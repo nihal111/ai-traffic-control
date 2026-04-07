@@ -10,6 +10,10 @@
   var keyboardOpen = false;
   var keyboardOffsetPx = 0;
 
+  function getViewport() {
+    return document.querySelector(".xterm .xterm-viewport");
+  }
+
   function getTerm() {
     if (window.term && window.term.options) return window.term;
     return null;
@@ -267,32 +271,46 @@
 
   function bindTouchScroll() {
     if (touchBound) return;
-    var viewport = document.querySelector(".xterm .xterm-viewport");
-    if (!viewport) return;
+    if (!getViewport()) return;
     touchBound = true;
 
     var touchStartY = 0;
     var touchStartX = 0;
     var scrollStart = 0;
     var draggingScroll = false;
+    var tracking = false;
 
-    viewport.addEventListener(
+    function isTerminalTarget(node) {
+      if (!node || !node.closest) return false;
+      if (node.closest("#ttyd-mobile-toolbar")) return false;
+      if (node.closest("#ttyd-scroll-rail")) return false;
+      return !!node.closest(".xterm, #terminal-container, .xterm-screen, .xterm-viewport");
+    }
+
+    document.addEventListener(
       "touchstart",
       function (e) {
         if (!e.touches || e.touches.length !== 1) return;
+        if (!isTerminalTarget(e.target)) return;
+        var viewport = getViewport();
+        if (!viewport) return;
         var t = e.touches[0];
+        tracking = true;
         touchStartY = t.clientY;
         touchStartX = t.clientX;
         scrollStart = viewport.scrollTop;
         draggingScroll = false;
       },
-      { passive: true }
+      { passive: true, capture: true }
     );
 
-    viewport.addEventListener(
+    document.addEventListener(
       "touchmove",
       function (e) {
+        if (!tracking) return;
         if (!e.touches || e.touches.length !== 1) return;
+        var viewport = getViewport();
+        if (!viewport) return;
         var t = e.touches[0];
         var dy = touchStartY - t.clientY;
         var dx = touchStartX - t.clientX;
@@ -309,12 +327,19 @@
       },
       { passive: false, capture: true }
     );
+
+    document.addEventListener(
+      "touchend",
+      function () {
+        tracking = false;
+      },
+      { passive: true, capture: true }
+    );
   }
 
   function ensureScrollRail() {
     if (railInit) return;
-    var viewport = document.querySelector(".xterm .xterm-viewport");
-    if (!viewport) return;
+    if (!getViewport()) return;
     railInit = true;
 
     var rail = document.createElement("div");
@@ -332,18 +357,31 @@
     var dragging = false;
     var dragStartY = 0;
     var dragStartTop = 0;
+    var boundViewport = null;
+
+    function withViewport(fn) {
+      var vp = getViewport();
+      if (!vp) return null;
+      return fn(vp);
+    }
 
     function maxScroll() {
-      return Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+      return withViewport(function (vp) {
+        return Math.max(0, vp.scrollHeight - vp.clientHeight);
+      }) || 0;
     }
 
     function setByRatio(ratio) {
       ratio = Math.max(0, Math.min(1, ratio));
-      viewport.scrollTop = ratio * maxScroll();
+      withViewport(function (vp) {
+        vp.scrollTop = ratio * maxScroll();
+      });
       syncThumb();
     }
 
     function syncThumb() {
+      var vp = getViewport();
+      if (!vp) return;
       var ms = maxScroll();
       if (ms <= 0) {
         rail.classList.add("hidden");
@@ -352,24 +390,30 @@
         return;
       }
       rail.classList.remove("hidden");
-      var visibleRatio = Math.max(0.08, viewport.clientHeight / viewport.scrollHeight);
+      var visibleRatio = Math.max(0.08, vp.clientHeight / vp.scrollHeight);
       var thumbH = Math.max(24, Math.floor(track.clientHeight * visibleRatio));
       var travel = Math.max(1, track.clientHeight - thumbH);
-      var ratio = viewport.scrollTop / ms;
+      var ratio = vp.scrollTop / ms;
       thumb.style.height = thumbH + "px";
       thumb.style.top = Math.round(travel * ratio) + "px";
     }
 
     function scrollBy(delta) {
-      viewport.scrollTop += delta;
+      withViewport(function (vp) {
+        vp.scrollTop += delta;
+      });
       syncThumb();
     }
 
     upBtn.addEventListener("click", function () {
-      scrollBy(-Math.max(40, viewport.clientHeight * 0.5));
+      withViewport(function (vp) {
+        scrollBy(-Math.max(40, vp.clientHeight * 0.5));
+      });
     });
     downBtn.addEventListener("click", function () {
-      scrollBy(Math.max(40, viewport.clientHeight * 0.5));
+      withViewport(function (vp) {
+        scrollBy(Math.max(40, vp.clientHeight * 0.5));
+      });
     });
 
     track.addEventListener("click", function (e) {
@@ -403,7 +447,9 @@
       var travel = Math.max(1, track.clientHeight - h);
       var top = Math.max(0, Math.min(travel, dragStartTop + (clientY - dragStartY)));
       thumb.style.top = top + "px";
-      viewport.scrollTop = (top / travel) * maxScroll();
+      withViewport(function (vp) {
+        vp.scrollTop = (top / travel) * maxScroll();
+      });
     }
 
     document.addEventListener(
@@ -429,9 +475,20 @@
       dragging = false;
     });
 
-    viewport.addEventListener("scroll", syncThumb, { passive: true });
+    function bindViewportScroll() {
+      var vp = getViewport();
+      if (!vp || vp === boundViewport) return;
+      if (boundViewport) boundViewport.removeEventListener("scroll", syncThumb);
+      boundViewport = vp;
+      boundViewport.addEventListener("scroll", syncThumb, { passive: true });
+    }
+
+    bindViewportScroll();
     window.addEventListener("resize", syncThumb);
-    setInterval(syncThumb, 300);
+    setInterval(function () {
+      bindViewportScroll();
+      syncThumb();
+    }, 300);
     syncThumb();
   }
 
