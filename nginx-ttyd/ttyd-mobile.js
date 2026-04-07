@@ -277,8 +277,57 @@
     var touchStartY = 0;
     var touchStartX = 0;
     var scrollStart = 0;
+    var startScrollTop = 0;
+    var lastY = 0;
+    var lastTs = 0;
+    var velocityY = 0;
     var draggingScroll = false;
     var tracking = false;
+    var inertiaRaf = 0;
+    var SCROLL_GAIN = 2.1;
+    var MIN_VELOCITY = 0.03;
+    var MAX_STEP = 120;
+
+    function stopInertia() {
+      if (!inertiaRaf) return;
+      cancelAnimationFrame(inertiaRaf);
+      inertiaRaf = 0;
+    }
+
+    function startInertia() {
+      stopInertia();
+      var v = velocityY * SCROLL_GAIN;
+      if (!Number.isFinite(v) || Math.abs(v) < MIN_VELOCITY) return;
+
+      var last = performance.now();
+      function step(now) {
+        var dt = Math.max(8, now - last);
+        last = now;
+        var viewport = getViewport();
+        if (!viewport) {
+          inertiaRaf = 0;
+          return;
+        }
+
+        var delta = Math.max(-MAX_STEP, Math.min(MAX_STEP, v * dt));
+        var before = viewport.scrollTop;
+        viewport.scrollTop += delta;
+        var after = viewport.scrollTop;
+        if (Math.abs(after - before) < 0.5) {
+          inertiaRaf = 0;
+          return;
+        }
+
+        // Exponential friction for a natural flick decay.
+        v *= Math.pow(0.94, dt / 16.7);
+        if (Math.abs(v) < MIN_VELOCITY) {
+          inertiaRaf = 0;
+          return;
+        }
+        inertiaRaf = requestAnimationFrame(step);
+      }
+      inertiaRaf = requestAnimationFrame(step);
+    }
 
     function isTerminalTarget(node) {
       if (!node || !node.closest) return false;
@@ -294,11 +343,16 @@
         if (!isTerminalTarget(e.target)) return;
         var viewport = getViewport();
         if (!viewport) return;
+        stopInertia();
         var t = e.touches[0];
         tracking = true;
         touchStartY = t.clientY;
         touchStartX = t.clientX;
         scrollStart = viewport.scrollTop;
+        startScrollTop = viewport.scrollTop;
+        lastY = t.clientY;
+        lastTs = performance.now();
+        velocityY = 0;
         draggingScroll = false;
       },
       { passive: true, capture: true }
@@ -314,6 +368,12 @@
         var t = e.touches[0];
         var dy = touchStartY - t.clientY;
         var dx = touchStartX - t.clientX;
+        var now = performance.now();
+        var dt = Math.max(8, now - lastTs);
+        var v = (lastY - t.clientY) / dt; // px/ms, positive when scrolling down
+        velocityY = velocityY * 0.7 + v * 0.3;
+        lastY = t.clientY;
+        lastTs = now;
 
         if (!draggingScroll) {
           if (Math.abs(dy) < 4) return;
@@ -321,7 +381,7 @@
           draggingScroll = true;
         }
 
-        viewport.scrollTop = scrollStart + dy;
+        viewport.scrollTop = startScrollTop + dy * SCROLL_GAIN;
         e.preventDefault();
         e.stopImmediatePropagation();
       },
@@ -331,6 +391,7 @@
     document.addEventListener(
       "touchend",
       function () {
+        if (tracking && draggingScroll) startInertia();
         tracking = false;
       },
       { passive: true, capture: true }
