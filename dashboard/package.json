@@ -1,0 +1,13 @@
+{
+  "name": "ai-traffic-control-dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:unit": "node --test tests/unit/*.test.mjs",
+    "test:e2e": "playwright test tests/e2e/terminal-smoke.spec.mjs --reporter=line --workers=1",
+    "test": "npm run test:unit && npm run test:e2e"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.53.0"
+  }
+}

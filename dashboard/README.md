@@ -52,6 +52,8 @@ Spawned sessions inject this env contract:
 
 `dashboard/scripts/shell-hook-writer.mjs` supports both env-only events (shell hooks) and JSON-over-stdin events (for upcoming Codex/Claude native hooks).
 
+Shell hooks are currently feature-flagged off by default (`ENABLE_SHELL_HOOKS=0`) because `ZDOTDIR` injection still needs hardening to avoid ttyd input regressions. The hook writer and forwarders are tested and ready; shell hook activation remains gated until the integration path is stabilized.
+
 ## Codex hooks (milestone 5)
 
 This repo includes local Codex hook wiring at `.codex/hooks.json` and a forwarder:
@@ -85,4 +87,22 @@ Override device:
 
 ```bash
 DEVICE="iPhone 13" ./dashboard/scripts/mobile-screenshot.sh
+```
+
+## Tests
+
+```bash
+cd dashboard
+npm install
+npm run test
+```
+
+This runs:
+- Unit: `tests/unit/shell-hook-writer.test.mjs`
+- E2E: `tests/e2e/terminal-smoke.spec.mjs` (spawns a slot, types via ttyd, asserts file write)
+
+Or run from repo root:
+
+```bash
+./dashboard/scripts/test-dashboard.sh
 ```

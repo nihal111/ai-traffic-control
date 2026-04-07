@@ -19,6 +19,7 @@ const TTYD_BIN = process.env.TTYD_BIN || '/opt/homebrew/bin/ttyd';
 const SHELL_BIN = process.env.SHELL_BIN || '/bin/zsh';
 const DEFAULT_WORKDIR = process.env.DEFAULT_SESSION_WORKDIR || '/Users/nihal/Code/MobileDev';
 const SHELL_HOOK_WRITER = process.env.SHELL_HOOK_WRITER || path.join(__dirname, 'scripts', 'shell-hook-writer.mjs');
+const ENABLE_SHELL_HOOKS = process.env.ENABLE_SHELL_HOOKS === '1';
 const REFRESH_MS = 8000;
 const USAGE_TTL_MS = 10000;
 const TELEMETRY_INGEST_MS = Number(process.env.TELEMETRY_INGEST_MS || 20000);
@@ -663,7 +664,7 @@ async function findListeningPid(port) {
   return Number.isFinite(pid) ? pid : null;
 }
 
-async function spawnSessionBackend(slot, sessionState, runtimeEnv) {
+async function spawnSessionBackend(slot, sessionState, runtimeEnv, shellConfig) {
   if (!fsSync.existsSync(TTYD_BIN)) throw new Error(`ttyd not found at ${TTYD_BIN}`);
   await fs.mkdir(RUN_DIR, { recursive: true });
 
@@ -678,7 +679,12 @@ async function spawnSessionBackend(slot, sessionState, runtimeEnv) {
       cwd: sessionState.workdir || DEFAULT_WORKDIR,
       detached: true,
       stdio: ['ignore', out, out],
-      env: { ...process.env, ...runtimeEnv, DASH_SLOT_NAME: slot.name },
+      env: {
+        ...process.env,
+        ...runtimeEnv,
+        ...(ENABLE_SHELL_HOOKS && shellConfig?.zdotdir ? { ZDOTDIR: shellConfig.zdotdir, ATC_ZDOTDIR: shellConfig.zdotdir } : {}),
+        DASH_SLOT_NAME: slot.name,
+      },
     }
   );
 
@@ -788,8 +794,8 @@ async function spawnSlotByName(name) {
 
   const runId = makeRunId();
   await rotateSlotCurrent(slot.name, st.runId);
-  const { hookEnv } = await ensureSlotRuntime(slot.name, runId, st.workdir);
-  const pid = await spawnSessionBackend(slot, st, { ...hookEnv });
+  const { paths, hookEnv } = await ensureSlotRuntime(slot.name, runId, st.workdir);
+  const pid = await spawnSessionBackend(slot, st, { ...hookEnv }, { zdotdir: paths.zdotdir });
   st.status = 'active';
   st.pid = pid;
   st.error = null;

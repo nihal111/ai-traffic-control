@@ -40,7 +40,7 @@ Scope:
 Status:
 - Implemented (baseline fields and state persistence).
 
-## Milestone 3 (Done): Shell-Level Hooks (Required Before Agent Hooks)
+## Milestone 3 (In Progress): Shell-Level Hooks (Required Before Agent Hooks)
 Scope:
 - Add shell-native hooks in each spawned zsh session:
   - `preexec`
@@ -68,9 +68,9 @@ Acceptance criteria:
 - Dashboard shows `active for`, `last interaction`, and live workdir without any agent running.
 
 Status:
-- Implemented with per-slot runtime files under `dashboard/runtime/slots/<slot>/current`.
-- Hooked zsh `preexec`, `precmd`, `chpwd`, plus `shell_start` event emission through `dashboard/scripts/shell-hook-writer.mjs`.
-- Dashboard session payload now merges `derived.json` telemetry for live timing/workdir display.
+- Hook writer + runtime file model implemented under `dashboard/runtime/slots/<slot>/current`.
+- zsh hook bootstrap generation is implemented, but live activation remains feature-flagged (`ENABLE_SHELL_HOOKS`) pending integration hardening.
+- Regression guard now exists as automated ttyd E2E (`tests/e2e/terminal-smoke.spec.mjs`) so hook activation can be reintroduced safely.
 
 ## Milestone 4 (Done): Shared Hook Writer + Env Contract
 Scope:
