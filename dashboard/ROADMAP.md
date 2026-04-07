@@ -137,7 +137,7 @@ Status:
 - Reused shared forwarder/writer pipeline so Claude and Codex land in the same event stream format.
 - Validated with simulated Claude-style payloads forwarded into slot runtime files.
 
-## Milestone 7 (Next): Derived Metrics + Title Generation
+## Milestone 7 (Done): Derived Metrics + Title Generation
 Scope:
 - Background ingestor computes and updates `derived.json` from events.
 - 5-minute title poll:
@@ -158,7 +158,12 @@ Acceptance criteria:
 - Blank agent metrics for plain shells.
 - Populated metrics/title only when Codex/Claude hooks emit events.
 
-## Milestone 8: Context Usage Display
+Status:
+- Added background telemetry ingestion (`TELEMETRY_INGEST_MS`) to compute derived metrics from per-slot events.
+- Added 5-minute title refresh (`TITLE_POLL_MS`) with deterministic title generation from recent prompts/commands.
+- Dashboard now surfaces derived `agentType`, `turnCount`, and generated title in slot cards.
+
+## Milestone 8 (Done): Context Usage Display
 Scope:
 - Provider-level usage from existing CodexBar integration (`5h`, `weekly`).
 - Per-slot context utilization:
@@ -169,7 +174,12 @@ Acceptance criteria:
 - Dashboard distinguishes provider usage from per-slot usage.
 - No misleading inferred per-slot context values.
 
-## Milestone 9: Reliability and Guardrails
+Status:
+- Provider-level usage remains sourced from CodexBar (`5h`, `weekly`) in top usage cards.
+- Per-slot `contextWindowPct` is populated only from explicit hook payload fields when present.
+- Slot cards now show `Context window: N/A` when no reliable per-slot field is available.
+
+## Milestone 9 (Done): Reliability and Guardrails
 Scope:
 - Run rotation and bounded retention.
 - Robust file writes (atomic metadata updates).
@@ -178,6 +188,12 @@ Scope:
 Acceptance criteria:
 - No runaway storage growth.
 - No dashboard breakage from missing/corrupt hook rows.
+
+Status:
+- Added slot run rotation with bounded retention (`SLOT_RUN_RETENTION`, default `3`).
+- Added atomic JSON writes with unique temp files to avoid state-write races.
+- Kept hook execution fail-open (`|| true`) so shell usability is unaffected by hook errors.
+- Telemetry parser skips corrupt JSONL rows and keeps dashboard responses stable.
 
 ## Fast Feedback Loop
 - Use mobile screenshot capture for every visible UI change.

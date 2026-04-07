@@ -67,6 +67,12 @@ When `codex` runs inside a spawned slot shell, native Codex hook payloads are fo
 
 Claude uses repo-local `.claude/settings.json` and the same forwarder, so Codex and Claude events land in the same per-slot schema.
 
+Derived metrics are computed in the dashboard process:
+- `TELEMETRY_INGEST_MS` (default `20000`)
+- `TITLE_POLL_MS` (default `300000`)
+
+Per-slot context usage is shown only when hooks provide an explicit percent field; otherwise the UI displays `N/A`.
+
 ## Fast Mobile UI Feedback
 
 Capture a mobile screenshot of the dashboard (Playwright, `Pixel 7` by default):

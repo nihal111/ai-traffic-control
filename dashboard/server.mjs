@@ -21,6 +21,9 @@ const DEFAULT_WORKDIR = process.env.DEFAULT_SESSION_WORKDIR || '/Users/nihal/Cod
 const SHELL_HOOK_WRITER = process.env.SHELL_HOOK_WRITER || path.join(__dirname, 'scripts', 'shell-hook-writer.mjs');
 const REFRESH_MS = 8000;
 const USAGE_TTL_MS = 10000;
+const TELEMETRY_INGEST_MS = Number(process.env.TELEMETRY_INGEST_MS || 20000);
+const TITLE_POLL_MS = Number(process.env.TITLE_POLL_MS || 300000);
+const SLOT_RUN_RETENTION = Number(process.env.SLOT_RUN_RETENTION || 3);
 
 let usageCache = { value: null, fetchedAt: 0, pending: null };
 
@@ -99,6 +102,14 @@ function durationSince(iso) {
   if (d > 0) return `${d}d ${h}h`;
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
+}
+
+function compactText(text, max = 64) {
+  const cleaned = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  return cleaned.length <= max ? cleaned : `${cleaned.slice(0, max - 1)}…`;
 }
 
 async function getCodexUsage() {
@@ -211,6 +222,13 @@ async function loadState() {
     if (!merged.sessions[slot.name].taskTitle) merged.sessions[slot.name].taskTitle = `${slot.name} task`;
     if (!merged.sessions[slot.name].agentType) merged.sessions[slot.name].agentType = 'none';
     if (!Object.hasOwn(merged.sessions[slot.name], 'runId')) merged.sessions[slot.name].runId = null;
+    if (merged.sessions[slot.name].status !== 'active') {
+      merged.sessions[slot.name].runId = null;
+      merged.sessions[slot.name].spawnedAt = null;
+      merged.sessions[slot.name].firstInteractionAt = null;
+      merged.sessions[slot.name].lastInteractionAt = null;
+      merged.sessions[slot.name].pid = null;
+    }
   }
 
   const names = new Set(cfg.map((c) => c.name));
@@ -295,6 +313,32 @@ function slotRuntimePaths(slotName) {
     zdotdir: path.join(currentDir, '.zsh_atc'),
     zshrcFile: path.join(currentDir, '.zsh_atc', '.zshrc'),
   };
+}
+
+function parseJsonLines(text) {
+  return String(text || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter((row) => row && typeof row === 'object');
+}
+
+async function readEvents(filePath, runId = null) {
+  try {
+    const raw = await fs.readFile(filePath, 'utf8');
+    const rows = parseJsonLines(raw);
+    if (!runId) return rows;
+    return rows.filter((row) => row.runId === runId);
+  } catch {
+    return [];
+  }
 }
 
 async function readJsonSafe(filePath, fallback = null) {
@@ -427,6 +471,168 @@ async function ensureSlotRuntime(slotName, runId, workdir) {
   return { paths, hookEnv };
 }
 
+async function rotateSlotCurrent(slotName, previousRunId = null) {
+  const runtime = slotRuntimePaths(slotName);
+  const runsDir = path.join(runtime.slotDir, 'runs');
+  await fs.mkdir(runsDir, { recursive: true });
+
+  let hasCurrent = false;
+  try {
+    const entries = await fs.readdir(runtime.currentDir);
+    hasCurrent = entries.length > 0;
+  } catch {
+    hasCurrent = false;
+  }
+
+  if (hasCurrent) {
+    const baseName = previousRunId || `archived-${Date.now().toString(36)}`;
+    let archiveDir = path.join(runsDir, baseName);
+    let suffix = 1;
+    while (fsSync.existsSync(archiveDir)) {
+      archiveDir = path.join(runsDir, `${baseName}-${suffix}`);
+      suffix += 1;
+    }
+    await fs.rename(runtime.currentDir, archiveDir);
+  }
+
+  await fs.mkdir(runtime.currentDir, { recursive: true });
+
+  try {
+    const entries = await fs.readdir(runsDir, { withFileTypes: true });
+    const dirs = await Promise.all(
+      entries
+        .filter((entry) => entry.isDirectory())
+        .map(async (entry) => {
+          const full = path.join(runsDir, entry.name);
+          const st = await fs.stat(full);
+          return { full, mtimeMs: st.mtimeMs };
+        })
+    );
+    dirs.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const toDelete = dirs.slice(Math.max(0, SLOT_RUN_RETENTION));
+    await Promise.all(toDelete.map((entry) => fs.rm(entry.full, { recursive: true, force: true })));
+  } catch {
+    // Keep serving even if retention pruning fails.
+  }
+}
+
+function generateTitleFromEvents(events) {
+  const recent = events.slice(-10);
+  const lastPrompt = [...recent].reverse().find((e) => e.eventType === 'UserPromptSubmit' && e.payload?.prompt);
+  if (lastPrompt?.payload?.prompt) return compactText(lastPrompt.payload.prompt, 72);
+
+  const lastCommand = [...recent].reverse().find((e) => typeof e.command === 'string' && e.command.trim());
+  if (lastCommand?.command) return `Shell: ${compactText(lastCommand.command, 64)}`;
+
+  const provider = [...recent].reverse().find((e) => e.provider)?.provider;
+  if (provider) return `${String(provider).toUpperCase()} session`;
+  return 'Interactive shell session';
+}
+
+function extractContextWindowPct(events) {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const payload = events[i]?.payload;
+    if (!payload || typeof payload !== 'object') continue;
+    const candidates = [
+      payload?.context_window_pct,
+      payload?.contextWindowPct,
+      payload?.context_window_percent,
+      payload?.contextWindowPercent,
+      payload?.usage?.context_window_pct,
+      payload?.usage?.contextWindowPct,
+      payload?.usage?.context_window_percent,
+      payload?.usage?.contextWindowPercent,
+      payload?.token_usage?.context_window_pct,
+      payload?.tokenUsage?.contextWindowPct,
+    ];
+    for (const c of candidates) {
+      const n = Number(c);
+      if (Number.isFinite(n)) return n;
+    }
+  }
+  return null;
+}
+
+async function recomputeDerivedForSlot(slot, stateRecord) {
+  if (!stateRecord?.runId) return;
+  const runtime = slotRuntimePaths(slot.name);
+  const events = await readEvents(runtime.eventsFile, stateRecord.runId);
+  if (events.length === 0) return;
+
+  const first = events[0];
+  const last = events[events.length - 1];
+  const lastWithCwd = [...events].reverse().find((e) => typeof e.cwd === 'string' && e.cwd.trim());
+  const lastProvider = [...events].reverse().find((e) => e.provider)?.provider || null;
+  const lastPrompt = [...events].reverse().find((e) => e.eventType === 'UserPromptSubmit');
+  const lastStop = [...events].reverse().find((e) => e.eventType === 'Stop');
+  const turnCount = events.filter((e) => e.eventType === 'UserPromptSubmit').length;
+  const contextWindowPct = extractContextWindowPct(events);
+  const titlePath = runtime.titleFile;
+
+  let title = '';
+  try {
+    title = (await fs.readFile(titlePath, 'utf8')).trim();
+  } catch {
+    title = '';
+  }
+
+  if (!title) {
+    title = generateTitleFromEvents(events);
+    await fs.writeFile(titlePath, `${title}\n`, 'utf8');
+  }
+
+  const derived = {
+    slot: slot.name,
+    runId: stateRecord.runId,
+    provider: lastProvider,
+    activeSince: first.ts || stateRecord.spawnedAt || null,
+    lastInteractionAt: last.ts || stateRecord.lastInteractionAt || null,
+    cwd: lastWithCwd?.cwd || stateRecord.workdir || null,
+    lastEventType: last.eventType || null,
+    eventCount: events.length,
+    shellStartedAt: events.find((e) => e.eventType === 'shell_start')?.ts || null,
+    lastCommand: [...events].reverse().find((e) => e.command)?.command || null,
+    lastCommandAt: [...events].reverse().find((e) => e.command)?.ts || null,
+    durationMs: Number.isFinite(Number(last.durationMs)) ? Number(last.durationMs) : null,
+    lastUserPromptAt: lastPrompt?.ts || null,
+    lastAssistantStopAt: lastStop?.ts || null,
+    turnCount,
+    agentType: lastProvider || 'none',
+    title,
+    contextWindowPct,
+  };
+
+  await writeJsonAtomic(runtime.derivedFile, derived);
+}
+
+async function ingestTelemetry() {
+  const [cfg, state] = await Promise.all([readSessionsConfig(), loadState()]);
+  await Promise.all(
+    cfg.map(async (slot) => {
+      const st = state.sessions[slot.name];
+      if (!st || st.status !== 'active' || !st.runId) return;
+      await recomputeDerivedForSlot(slot, st);
+    })
+  );
+}
+
+async function refreshTitles() {
+  const [cfg, state] = await Promise.all([readSessionsConfig(), loadState()]);
+  await Promise.all(
+    cfg.map(async (slot) => {
+      const st = state.sessions[slot.name];
+      if (!st || st.status !== 'active' || !st.runId) return;
+      const runtime = slotRuntimePaths(slot.name);
+      const events = await readEvents(runtime.eventsFile, st.runId);
+      if (events.length === 0) return;
+      const title = generateTitleFromEvents(events);
+      if (!title) return;
+      await fs.writeFile(runtime.titleFile, `${title}\n`, 'utf8');
+      await recomputeDerivedForSlot(slot, st);
+    })
+  );
+}
+
 async function killPid(pid) {
   if (!Number.isFinite(pid) || pid <= 0) return;
   try {
@@ -509,10 +715,16 @@ async function getMergedSessions() {
       const derived = await readJsonSafe(runtime.derivedFile, null);
       const active = await checkPortOpen(slot.publicPort);
       const backendActive = await checkPortOpen(slot.backendPort);
+      const spawnedTs = st.spawnedAt ? new Date(st.spawnedAt).getTime() : 0;
+      const inSpawnGrace = spawnedTs > 0 && Date.now() - spawnedTs < 8000;
 
-      if (st.status === 'active' && !backendActive) {
+      if (st.status === 'active' && !backendActive && !inSpawnGrace) {
         st.status = 'idle';
         st.pid = null;
+        st.runId = null;
+        st.spawnedAt = null;
+        st.firstInteractionAt = null;
+        st.lastInteractionAt = null;
         st.lastExitAt = new Date().toISOString();
       }
 
@@ -532,9 +744,17 @@ async function getMergedSessions() {
       return {
         ...slot,
         ...st,
+        taskTitle:
+          st.status === 'active' && st.runId && derived && derived.runId === st.runId && typeof derived.title === 'string' && derived.title
+            ? derived.title
+            : st.taskTitle,
+        agentType:
+          st.status === 'active' && st.runId && derived && derived.runId === st.runId && typeof derived.agentType === 'string'
+            ? derived.agentType
+            : st.agentType,
         workdir: displayWorkdir,
         activeSince: displayActiveSince || null,
-        telemetry: st.runId && derived && derived.runId === st.runId ? derived : null,
+        telemetry: st.status === 'active' && st.runId && derived && derived.runId === st.runId ? derived : null,
         active,
         backendActive,
         startedAgo: displayActiveSince ? durationSince(displayActiveSince) : 'n/a',
@@ -563,6 +783,7 @@ async function spawnSlotByName(name) {
   }
 
   const runId = makeRunId();
+  await rotateSlotCurrent(slot.name, st.runId);
   const { hookEnv } = await ensureSlotRuntime(slot.name, runId, st.workdir);
   const pid = await spawnSessionBackend(slot, st, {
     ...hookEnv,
@@ -586,6 +807,7 @@ async function killSlotByName(name) {
 
   const st = state.sessions[slot.name] || defaultSessionState(slot);
   await killSessionBackend(slot, st);
+  if (st.runId) await rotateSlotCurrent(slot.name, st.runId);
 
   st.status = 'idle';
   st.pid = null;
@@ -868,6 +1090,8 @@ function renderPage() {
           '<div class="line"><strong>Task:</strong> ' + esc(s.taskTitle || 'Not set') + '</div>' +
           '<div class="line"><strong>Workdir:</strong> ' + esc(s.workdir || 'Not set') + '</div>' +
           '<div class="line muted">Port ' + esc(s.publicPort) + ' -> backend ' + esc(s.backendPort) + '</div>' +
+          '<div class="line muted">Agent: ' + esc(s.agentType || 'none') + ' | Turns: ' + esc((s.telemetry && s.telemetry.turnCount) ? s.telemetry.turnCount : 0) + '</div>' +
+          '<div class="line muted">Context window: ' + esc((s.telemetry && Number.isFinite(Number(s.telemetry.contextWindowPct))) ? (Math.round(Number(s.telemetry.contextWindowPct)) + '%') : 'N/A') + '</div>' +
           '<div class="line muted">Active for: ' + esc(s.startedAgo || 'n/a') + ' | Last interaction: ' + esc(s.lastInteractionAgo || 'n/a') + '</div>' +
           (s.error ? '<div class="line error">' + esc(s.error) + '</div>' : '') +
           '<div class="action-hint ' + actionClass + '">' + esc(actionText) + '</div>' +
@@ -1036,6 +1260,16 @@ const server = http.createServer(async (req, res) => {
 });
 
 await loadState();
+await ingestTelemetry().catch(() => {});
+await refreshTitles().catch(() => {});
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`dashboard listening on http://0.0.0.0:${PORT}`);
 });
+
+setInterval(() => {
+  ingestTelemetry().catch(() => {});
+}, TELEMETRY_INGEST_MS);
+
+setInterval(() => {
+  refreshTitles().catch(() => {});
+}, TITLE_POLL_MS);
