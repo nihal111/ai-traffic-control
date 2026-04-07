@@ -19,7 +19,7 @@ const TTYD_BIN = process.env.TTYD_BIN || '/opt/homebrew/bin/ttyd';
 const SHELL_BIN = process.env.SHELL_BIN || '/bin/zsh';
 const DEFAULT_WORKDIR = process.env.DEFAULT_SESSION_WORKDIR || '/Users/nihal/Code/MobileDev';
 const SHELL_HOOK_WRITER = process.env.SHELL_HOOK_WRITER || path.join(__dirname, 'scripts', 'shell-hook-writer.mjs');
-const ENABLE_SHELL_HOOKS = process.env.ENABLE_SHELL_HOOKS === '1';
+const ENABLE_SHELL_HOOKS = process.env.ENABLE_SHELL_HOOKS !== '0';
 const REFRESH_MS = 8000;
 const USAGE_TTL_MS = 10000;
 const TELEMETRY_INGEST_MS = Number(process.env.TELEMETRY_INGEST_MS || 20000);

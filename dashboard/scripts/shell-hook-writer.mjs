@@ -26,6 +26,10 @@ function writeJsonAtomic(filePath, payload) {
 
 function readStdinJson() {
   try {
+    const stat = fs.fstatSync(0);
+    // Hook calls from interactive shells inherit a TTY stdin; reading fd 0 in that
+    // case blocks forever and freezes the terminal. Only read stdin for piped input.
+    if (stat.isCharacterDevice()) return null;
     const raw = fs.readFileSync(0, 'utf8').trim();
     if (!raw) return null;
     const parsed = JSON.parse(raw);

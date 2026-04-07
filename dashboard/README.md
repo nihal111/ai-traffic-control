@@ -50,9 +50,8 @@ Spawned sessions inject this env contract:
 - `ATC_META_FILE`
 - `ATC_DERIVED_FILE`
 
-`dashboard/scripts/shell-hook-writer.mjs` supports both env-only events (shell hooks) and JSON-over-stdin events (for upcoming Codex/Claude native hooks).
-
-Shell hooks are currently feature-flagged off by default (`ENABLE_SHELL_HOOKS=0`) because `ZDOTDIR` injection still needs hardening to avoid ttyd input regressions. The hook writer and forwarders are tested and ready; shell hook activation remains gated until the integration path is stabilized.
+`dashboard/scripts/shell-hook-writer.mjs` supports both env-only events (shell hooks) and JSON-over-stdin events (for Codex/Claude native hooks).
+Shell hooks are enabled by default. Set `ENABLE_SHELL_HOOKS=0` only when explicitly debugging shell startup issues.
 
 ## Codex hooks (milestone 5)
 

@@ -16,6 +16,7 @@ let stateFile;
 let runDir;
 let runtimeDir;
 let dashboardProc;
+let eventsFile;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -61,6 +62,7 @@ test.beforeAll(async () => {
   stateFile = path.join(tmpRoot, 'state', 'sessions-state.json');
   runDir = path.join(tmpRoot, 'run');
   runtimeDir = path.join(tmpRoot, 'runtime');
+  eventsFile = path.join(runtimeDir, 'slots', 'feynman', 'current', 'events.jsonl');
 
   await fs.mkdir(workdir, { recursive: true });
   await fs.mkdir(path.dirname(stateFile), { recursive: true });
@@ -85,7 +87,7 @@ test.beforeAll(async () => {
       SESSIONS_RUN_DIR: runDir,
       SESSIONS_RUNTIME_DIR: runtimeDir,
       DEFAULT_SESSION_WORKDIR: workdir,
-      ENABLE_SHELL_HOOKS: '0',
+      ENABLE_SHELL_HOOKS: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -133,6 +135,20 @@ test('spawned ttyd terminal executes keystrokes and writes expected file', async
   await page.goto(`http://127.0.0.1:${BACKEND_PORT}`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('.xterm', { timeout: 15000 });
 
+  await expect
+    .poll(async () => {
+      try {
+        const raw = await fs.readFile(eventsFile, 'utf8');
+        return raw.includes('"eventType":"shell_start"');
+      } catch {
+        return false;
+      }
+    }, {
+      timeout: 10000,
+      message: 'expected shell_start hook event before typing commands',
+    })
+    .toBe(true);
+
   // Focus terminal and execute a command purely through keystrokes.
   await page.locator('.xterm').click({ position: { x: 120, y: 120 } });
   const cmd = `printf 'atc-terminal-e2e-ok\\n' > ${markerFile}`;
@@ -152,6 +168,32 @@ test('spawned ttyd terminal executes keystrokes and writes expected file', async
       message: `expected terminal command to create ${markerFile}`,
     })
     .toBe('atc-terminal-e2e-ok');
+
+  await expect
+    .poll(async () => {
+      try {
+        const raw = await fs.readFile(eventsFile, 'utf8');
+        const rows = raw
+          .split('\n')
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => {
+            try {
+              return JSON.parse(line);
+            } catch {
+              return null;
+            }
+          })
+          .filter(Boolean);
+        return rows.some((row) => row.eventType === 'preexec' && typeof row.command === 'string' && row.command.includes(markerFile));
+      } catch {
+        return false;
+      }
+    }, {
+      timeout: 10000,
+      message: 'expected shell hooks to record preexec event',
+    })
+    .toBe(true);
 
   await api('/api/sessions/kill', 'POST', { name: 'Feynman' });
 });

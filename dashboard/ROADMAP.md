@@ -40,7 +40,7 @@ Scope:
 Status:
 - Implemented (baseline fields and state persistence).
 
-## Milestone 3 (In Progress): Shell-Level Hooks (Required Before Agent Hooks)
+## Milestone 3 (Done): Shell-Level Hooks (Required Before Agent Hooks)
 Scope:
 - Add shell-native hooks in each spawned zsh session:
   - `preexec`
@@ -69,8 +69,9 @@ Acceptance criteria:
 
 Status:
 - Hook writer + runtime file model implemented under `dashboard/runtime/slots/<slot>/current`.
-- zsh hook bootstrap generation is implemented, but live activation remains feature-flagged (`ENABLE_SHELL_HOOKS`) pending integration hardening.
-- Regression guard now exists as automated ttyd E2E (`tests/e2e/terminal-smoke.spec.mjs`) so hook activation can be reintroduced safely.
+- zsh hook bootstrap generation is live by default (`ENABLE_SHELL_HOOKS` defaults to on).
+- Fixed interactive-shell freeze caused by unguarded stdin reads in the hook writer (TTY stdin now skips JSON read path).
+- Regression guard exists as automated ttyd E2E (`tests/e2e/terminal-smoke.spec.mjs`) validating both command execution and hook emission.
 
 ## Milestone 4 (Done): Shared Hook Writer + Env Contract
 Scope:
