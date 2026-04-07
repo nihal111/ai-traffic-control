@@ -97,7 +97,7 @@ Status:
 - Shared writer now accepts both env variables and optional JSON stdin payload for normalized event ingestion.
 - Fallback sink is implemented at `dashboard/runtime/unassigned-events.jsonl`.
 
-## Milestone 5 (Next): Codex Native Hooks Integration
+## Milestone 5 (Done): Codex Native Hooks Integration
 Scope:
 - Enable Codex hooks via `~/.codex/config.toml` feature flag:
   - `[features] codex_hooks = true`
@@ -117,7 +117,13 @@ Acceptance criteria:
 - Codex turns/tool events appear in slot `events.jsonl`.
 - Dashboard shows Codex-specific activity only when Codex events exist.
 
-## Milestone 6: Claude Native Hooks Integration
+Status:
+- Added repo-local `.codex/hooks.json` for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`.
+- Added `dashboard/scripts/codex-hook-forwarder.mjs` to forward Codex hook payloads to the shared writer.
+- Added `dashboard/scripts/enable-codex-hooks.sh` and enabled `codex_hooks = true` in `~/.codex/config.toml`.
+- Validated ingestion with simulated Codex payloads and `Stop` JSON response handling.
+
+## Milestone 6 (Next): Claude Native Hooks Integration
 Scope:
 - Configure Claude hooks to call the same shared hook writer.
 - Normalize Claude hook payload into the same event schema as Codex.

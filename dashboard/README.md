@@ -52,6 +52,19 @@ Spawned sessions inject this env contract:
 
 `dashboard/scripts/shell-hook-writer.mjs` supports both env-only events (shell hooks) and JSON-over-stdin events (for upcoming Codex/Claude native hooks).
 
+## Codex hooks (milestone 5)
+
+This repo includes local Codex hook wiring at `.codex/hooks.json` and a forwarder:
+- `dashboard/scripts/codex-hook-forwarder.mjs`
+
+Enable the feature flag once on this machine:
+
+```bash
+./dashboard/scripts/enable-codex-hooks.sh
+```
+
+When `codex` runs inside a spawned slot shell, native Codex hook payloads are forwarded into that slot's `events.jsonl` via the same shared writer.
+
 ## Fast Mobile UI Feedback
 
 Capture a mobile screenshot of the dashboard (Playwright, `Pixel 7` by default):

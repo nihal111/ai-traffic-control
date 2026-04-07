@@ -50,9 +50,14 @@ const rawDuration = process.env.ATC_EVENT_DURATION_MS;
 const durationMs = rawDuration === undefined || rawDuration === '' ? null : Number(rawDuration);
 const stdinDurationMs = Number.isFinite(Number(stdinEvent?.durationMs)) ? Number(stdinEvent.durationMs) : null;
 
-const eventType = process.env.ATC_EVENT_TYPE || stdinEvent?.eventType || stdinEvent?.type || 'unknown';
+const eventType = process.env.ATC_EVENT_TYPE || stdinEvent?.hook_event_name || stdinEvent?.hookEventName || stdinEvent?.eventType || stdinEvent?.type || 'unknown';
 const cwd = process.env.ATC_EVENT_CWD || stdinEvent?.cwd || stdinEvent?.workdir || null;
-const command = process.env.ATC_EVENT_COMMAND || stdinEvent?.command || stdinEvent?.input || null;
+const command =
+  process.env.ATC_EVENT_COMMAND ||
+  stdinEvent?.command ||
+  stdinEvent?.input ||
+  stdinEvent?.tool_input?.command ||
+  null;
 
 const event = {
   ts: nowIso,
