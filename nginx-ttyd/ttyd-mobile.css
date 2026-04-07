@@ -1,6 +1,6 @@
 :root {
   --ttyd-kb-offset: 0px;
-  --ttyd-toolbar-height: 88px;
+  --ttyd-toolbar-height: 96px;
 }
 
 #ttyd-mobile-toolbar {
@@ -21,19 +21,25 @@
 
 #ttyd-toolbar-main {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+#ttyd-mobile-toolbar.keyboard-open #ttyd-toolbar-main {
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
 }
 
 #ttyd-mobile-toolbar button {
-  min-height: 50px;
-  border: 0;
-  border-radius: 12px;
+  min-height: 58px !important;
+  height: 58px !important;
+  border: 0 !important;
+  border-radius: 14px !important;
   background: #2f2f2f;
   color: #fff;
-  font-size: 17px;
+  font-size: 18px !important;
+  line-height: 1 !important;
   font-weight: 700;
-  padding: 0 8px;
+  padding: 0 12px !important;
   touch-action: manipulation;
 }
 
@@ -48,14 +54,14 @@
 #ttyd-toolbar-drawer {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 #ttyd-drawer-pages {
   display: grid;
   grid-auto-flow: column;
   grid-auto-columns: 100%;
-  gap: 10px;
+  gap: 12px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scroll-snap-type: x mandatory;
@@ -69,7 +75,7 @@
 .ttyd-drawer-page {
   scroll-snap-align: start;
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
 .ttyd-drawer-page:first-child {
@@ -77,13 +83,13 @@
 }
 
 .ttyd-drawer-page:last-child {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 #ttyd-mobile-toolbar #ttyd-font-size-label {
   text-align: center;
   color: #ddd;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.2;
 }
 
