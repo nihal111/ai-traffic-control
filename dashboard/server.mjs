@@ -744,7 +744,6 @@ function renderPage() {
           const color2 = codex.weekly.usedPercent >= 85 ? '#b4233b' : (codex.weekly.usedPercent >= 70 ? '#a86a05' : '#0f8f66');
           cards.push(usageCard('Codex weekly', Math.round(codex.weekly.usedPercent) + '%', 'Reset in ' + (codex.weekly.resetIn || 'n/a'), color2));
         }
-        cards.push(usageCard('Account', codex.accountEmail || 'unknown', 'Plan: ' + (codex.plan || 'unknown'), '#3a4c78'));
       } else {
         cards.push(usageCard('Codex', 'Unavailable', codex?.error || 'No data', '#7d1d2c'));
       }
