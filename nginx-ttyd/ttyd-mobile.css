@@ -1,6 +1,7 @@
 :root {
   --ttyd-kb-offset: 0px;
   --ttyd-toolbar-height: 96px;
+  --ttyd-bottom-inset: 96px;
 }
 
 #ttyd-mobile-toolbar {
@@ -94,9 +95,7 @@
 }
 
 body {
-  padding-bottom: calc(
-    var(--ttyd-toolbar-height) + env(safe-area-inset-bottom, 0px) + var(--ttyd-kb-offset)
-  ) !important;
+  padding-bottom: calc(var(--ttyd-bottom-inset) + env(safe-area-inset-bottom, 0px)) !important;
   box-sizing: border-box;
 }
 
@@ -118,7 +117,7 @@ body {
   position: fixed;
   right: 6px;
   top: 72px;
-  bottom: calc(var(--ttyd-toolbar-height) + 20px + var(--ttyd-kb-offset));
+  bottom: calc(var(--ttyd-bottom-inset) + 20px);
   width: 42px;
   z-index: 99998;
   display: flex;

@@ -8,6 +8,7 @@
   var railInit = false;
   var historyLoaded = false;
   var keyboardOpen = false;
+  var keyboardOffsetPx = 0;
 
   function getTerm() {
     if (window.term && window.term.options) return window.term;
@@ -141,9 +142,10 @@
 
   function setKeyboardOffset(px) {
     var n = Math.max(0, Math.round(px || 0));
+    keyboardOffsetPx = n;
     document.documentElement.style.setProperty("--ttyd-kb-offset", n + "px");
     setKeyboardOpen(n >= 40);
-    updateToolbarHeight();
+    updateLayoutInsets();
   }
 
   function toolbar() {
@@ -154,11 +156,12 @@
     return document.getElementById("ttyd-toolbar-drawer");
   }
 
-  function updateToolbarHeight() {
+  function updateLayoutInsets() {
     var tb = toolbar();
     if (!tb) return;
     var h = Math.max(70, Math.round(tb.offsetHeight || 0));
     document.documentElement.style.setProperty("--ttyd-toolbar-height", h + "px");
+    document.documentElement.style.setProperty("--ttyd-bottom-inset", h + keyboardOffsetPx + "px");
   }
 
   function setKeyboardOpen(open) {
@@ -178,7 +181,7 @@
     panel.hidden = false;
     tb.classList.add("drawer-open");
     if (trigger) trigger.setAttribute("aria-expanded", "true");
-    updateToolbarHeight();
+    updateLayoutInsets();
   }
 
   function closeDrawer() {
@@ -189,7 +192,7 @@
     panel.hidden = true;
     tb.classList.remove("drawer-open");
     if (trigger) trigger.setAttribute("aria-expanded", "false");
-    updateToolbarHeight();
+    updateLayoutInsets();
   }
 
   function toggleDrawer() {
@@ -501,12 +504,12 @@
     bindTouchScroll();
     if (flags.scrollbar) ensureScrollRail();
     if (flags.history) setTimeout(preloadTmuxHistory, 120);
-    updateToolbarHeight();
+    updateLayoutInsets();
   });
 
   window.addEventListener("resize", function () {
     bindTouchScroll();
     if (mobileFlags().scrollbar) ensureScrollRail();
-    updateToolbarHeight();
+    updateLayoutInsets();
   });
 })();
