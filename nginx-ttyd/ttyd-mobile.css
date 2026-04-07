@@ -1,6 +1,6 @@
 :root {
   --ttyd-kb-offset: 0px;
-  --ttyd-toolbar-height: 126px;
+  --ttyd-toolbar-height: 88px;
 }
 
 #ttyd-mobile-toolbar {
@@ -9,36 +9,81 @@
   right: 0;
   bottom: calc(env(safe-area-inset-bottom, 0px) + var(--ttyd-kb-offset));
   z-index: 99999;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  padding: 10px;
-  background: rgba(20, 20, 20, 0.95);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 10px 8px;
+  background: rgba(20, 20, 20, 0.96);
   backdrop-filter: blur(4px);
   border-top: 1px solid rgba(255, 255, 255, 0.2);
   box-sizing: border-box;
 }
 
+#ttyd-toolbar-main {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
 #ttyd-mobile-toolbar button {
-  min-height: 44px;
+  min-height: 50px;
   border: 0;
-  border-radius: 10px;
+  border-radius: 12px;
   background: #2f2f2f;
   color: #fff;
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 700;
+  padding: 0 8px;
   touch-action: manipulation;
+}
+
+#ttyd-mobile-toolbar:not(.keyboard-open) [data-input-only] {
+  display: none;
 }
 
 #ttyd-mobile-toolbar .active {
   background: #0f766e;
 }
 
+#ttyd-toolbar-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#ttyd-drawer-pages {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 100%;
+  gap: 10px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+}
+
+#ttyd-drawer-pages::-webkit-scrollbar {
+  display: none;
+}
+
+.ttyd-drawer-page {
+  scroll-snap-align: start;
+  display: grid;
+  gap: 10px;
+}
+
+.ttyd-drawer-page:first-child {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.ttyd-drawer-page:last-child {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 #ttyd-mobile-toolbar #ttyd-font-size-label {
-  grid-column: 1 / -1;
   text-align: center;
   color: #ddd;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.2;
 }
 
@@ -67,7 +112,7 @@ body {
   position: fixed;
   right: 6px;
   top: 72px;
-  bottom: calc(144px + var(--ttyd-kb-offset));
+  bottom: calc(var(--ttyd-toolbar-height) + 20px + var(--ttyd-kb-offset));
   width: 42px;
   z-index: 99998;
   display: flex;

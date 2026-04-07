@@ -25,8 +25,13 @@ if ! "$TMUX_BIN" has-session -t "$TMUX_SESSION" 2>/dev/null; then
 fi
 
 if ! lsof -nP -iTCP:"$BACKEND_PORT" -sTCP:LISTEN 2>/dev/null | grep -q ttyd; then
-  "$TMUX_BIN" new-session -d -s "$BACKEND_SESSION" \
-    "$TTYD_BIN -W -i 127.0.0.1 -p $BACKEND_PORT -t scrollback 100000 -t disableResizeOverlay true /bin/bash"
+  # Ensure a stale session name doesn't block startup when ttyd isn't listening.
+  if "$TMUX_BIN" has-session -t "$BACKEND_SESSION" 2>/dev/null; then
+    "$TMUX_BIN" kill-session -t "$BACKEND_SESSION"
+  fi
+
+  "$TMUX_BIN" new-session -d -s "$BACKEND_SESSION" zsh -lc \
+    "\"$TTYD_BIN\" -W -i 127.0.0.1 -p \"$BACKEND_PORT\" -t scrollback=100000 -t disableResizeOverlay=true -- \"$TMUX_BIN\" new-session -A -s \"$TMUX_SESSION\""
   echo "started ttyd backend on 127.0.0.1:$BACKEND_PORT in session $BACKEND_SESSION"
 else
   echo "ttyd backend already listening on 127.0.0.1:$BACKEND_PORT"

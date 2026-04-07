@@ -7,6 +7,7 @@
   var touchBound = false;
   var railInit = false;
   var historyLoaded = false;
+  var keyboardOpen = false;
 
   function getTerm() {
     if (window.term && window.term.options) return window.term;
@@ -88,7 +89,7 @@
       btn.classList.toggle("active", enabled);
     }
     localStorage.setItem(WRAP_KEY, enabled ? "1" : "0");
-    sendSeq(enabled ? "\\x1b[?7h" : "\\x1b[?7l");
+    sendSeq(enabled ? "\x1b[?7h" : "\x1b[?7l");
     dispatchResizeTwice();
   }
 
@@ -141,6 +142,61 @@
   function setKeyboardOffset(px) {
     var n = Math.max(0, Math.round(px || 0));
     document.documentElement.style.setProperty("--ttyd-kb-offset", n + "px");
+    setKeyboardOpen(n >= 40);
+    updateToolbarHeight();
+  }
+
+  function toolbar() {
+    return document.getElementById("ttyd-mobile-toolbar");
+  }
+
+  function drawer() {
+    return document.getElementById("ttyd-toolbar-drawer");
+  }
+
+  function updateToolbarHeight() {
+    var tb = toolbar();
+    if (!tb) return;
+    var h = Math.max(70, Math.round(tb.offsetHeight || 0));
+    document.documentElement.style.setProperty("--ttyd-toolbar-height", h + "px");
+  }
+
+  function setKeyboardOpen(open) {
+    if (keyboardOpen === !!open) return;
+    keyboardOpen = !!open;
+    var tb = toolbar();
+    if (!tb) return;
+    tb.classList.toggle("keyboard-open", keyboardOpen);
+    if (!keyboardOpen) closeDrawer();
+  }
+
+  function openDrawer() {
+    var tb = toolbar();
+    var panel = drawer();
+    var trigger = document.getElementById("ttyd-btn-more");
+    if (!tb || !panel) return;
+    panel.hidden = false;
+    tb.classList.add("drawer-open");
+    if (trigger) trigger.setAttribute("aria-expanded", "true");
+    updateToolbarHeight();
+  }
+
+  function closeDrawer() {
+    var tb = toolbar();
+    var panel = drawer();
+    var trigger = document.getElementById("ttyd-btn-more");
+    if (!tb || !panel) return;
+    panel.hidden = true;
+    tb.classList.remove("drawer-open");
+    if (trigger) trigger.setAttribute("aria-expanded", "false");
+    updateToolbarHeight();
+  }
+
+  function toggleDrawer() {
+    var panel = drawer();
+    if (!panel) return;
+    if (panel.hidden) openDrawer();
+    else closeDrawer();
   }
 
   function keyboardOffsetFromVisualViewport() {
@@ -158,6 +214,7 @@
     var vv = window.visualViewport;
     if (!vv) return;
     var raf = 0;
+    var settleTimer = 0;
 
     function schedule() {
       if (raf) return;
@@ -167,14 +224,40 @@
       });
     }
 
+    function stopSettleChecks() {
+      if (!settleTimer) return;
+      clearInterval(settleTimer);
+      settleTimer = 0;
+    }
+
+    function startSettleChecks() {
+      stopSettleChecks();
+      var tries = 0;
+      settleTimer = setInterval(function () {
+        tries += 1;
+        schedule();
+        if (keyboardOffsetFromVisualViewport() <= 0 || tries >= 15) {
+          stopSettleChecks();
+        }
+      }, 120);
+    }
+
     vv.addEventListener("resize", schedule);
     vv.addEventListener("scroll", schedule);
+    window.addEventListener("resize", schedule);
+    window.addEventListener("focus", schedule);
     document.addEventListener("focusin", schedule);
     document.addEventListener("focusout", function () {
+      // Android browsers sometimes lag viewport updates after keyboard close.
       setTimeout(schedule, 160);
+      setTimeout(startSettleChecks, 220);
     });
     window.addEventListener("orientationchange", function () {
       setTimeout(schedule, 120);
+      setTimeout(startSettleChecks, 220);
+    });
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible") schedule();
     });
     schedule();
   }
@@ -351,28 +434,39 @@
 
   window.__ttydMobileSendSeq = sendSeq;
 
-  function bind(id, seq) {
+  function bind(id, seq, closeAfter) {
     var el = document.getElementById(id);
     if (!el) return;
     el.addEventListener("click", function () {
       sendSeq(seq);
+      if (closeAfter) closeDrawer();
     });
   }
 
-  bind("ttyd-btn-ctrlc", "\\x03");
-  bind("ttyd-btn-esc", "\\x1b");
-  bind("ttyd-btn-tab", "\\x09");
-  bind("ttyd-btn-up", "\\x1b[A");
-  bind("ttyd-btn-down", "\\x1b[B");
+  bind("ttyd-btn-ctrlc", "\x03");
+  bind("ttyd-btn-esc", "\x1b");
+  bind("ttyd-btn-tab", "\x09");
+  bind("ttyd-btn-up", "\x1b[A");
+  bind("ttyd-btn-down", "\x1b[B");
+  bind("ttyd-btn-esc-alt", "\x1b", true);
+  bind("ttyd-btn-tab-alt", "\x09", true);
+  bind("ttyd-btn-up-alt", "\x1b[A", true);
+  bind("ttyd-btn-down-alt", "\x1b[B", true);
 
   var wrapBtn = document.getElementById("ttyd-btn-wrap");
-  if (wrapBtn) wrapBtn.addEventListener("click", toggleWrap);
+  if (wrapBtn) {
+    wrapBtn.addEventListener("click", function () {
+      toggleWrap();
+      closeDrawer();
+    });
+  }
 
   var decBtn = document.getElementById("ttyd-btn-font-dec");
   if (decBtn) {
     decBtn.addEventListener("click", function () {
       var current = readFontSize();
       applyFontSize(current - 1);
+      closeDrawer();
     });
   }
 
@@ -381,8 +475,20 @@
     incBtn.addEventListener("click", function () {
       var current = readFontSize();
       applyFontSize(current + 1);
+      closeDrawer();
     });
   }
+
+  var moreBtn = document.getElementById("ttyd-btn-more");
+  if (moreBtn) moreBtn.addEventListener("click", toggleDrawer);
+
+  document.addEventListener("click", function (e) {
+    var tb = toolbar();
+    var panel = drawer();
+    if (!tb || !panel || panel.hidden) return;
+    if (tb.contains(e.target)) return;
+    closeDrawer();
+  });
 
   window.addEventListener("load", function () {
     var flags = mobileFlags();
@@ -395,10 +501,12 @@
     bindTouchScroll();
     if (flags.scrollbar) ensureScrollRail();
     if (flags.history) setTimeout(preloadTmuxHistory, 120);
+    updateToolbarHeight();
   });
 
   window.addEventListener("resize", function () {
     bindTouchScroll();
     if (mobileFlags().scrollbar) ensureScrollRail();
+    updateToolbarHeight();
   });
 })();
