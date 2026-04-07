@@ -11,8 +11,8 @@
   z-index: 99999;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 10px 10px 8px;
+  gap: 8px;
+  padding: 8px 8px 2px;
   background: rgba(20, 20, 20, 0.96);
   backdrop-filter: blur(4px);
   border-top: 1px solid rgba(255, 255, 255, 0.2);
@@ -22,11 +22,11 @@
 #ttyd-toolbar-main {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 8px;
 }
 
 #ttyd-mobile-toolbar.keyboard-open #ttyd-toolbar-main {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 #ttyd-mobile-toolbar button {
@@ -57,14 +57,14 @@
 #ttyd-toolbar-drawer {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
 }
 
 #ttyd-drawer-pages {
   display: grid;
   grid-auto-flow: column;
   grid-auto-columns: 100%;
-  gap: 12px;
+  gap: 8px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scroll-snap-type: x mandatory;
@@ -78,22 +78,19 @@
 .ttyd-drawer-page {
   scroll-snap-align: start;
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .ttyd-drawer-page:first-child {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .ttyd-drawer-page:last-child {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 #ttyd-mobile-toolbar #ttyd-font-size-label {
-  text-align: center;
-  color: #ddd;
-  font-size: 12px;
-  line-height: 1.2;
+  display: none;
 }
 
 body {
