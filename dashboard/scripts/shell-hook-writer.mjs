@@ -24,7 +24,20 @@ function writeJsonAtomic(filePath, payload) {
   fs.renameSync(tmpPath, filePath);
 }
 
+function readStdinJson() {
+  try {
+    const raw = fs.readFileSync(0, 'utf8').trim();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') return parsed;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 const nowIso = new Date().toISOString();
+const stdinEvent = readStdinJson();
 const slot = process.env.ATC_SLOT || 'unknown';
 const runId = process.env.ATC_RUN_ID || 'unknown';
 const currentDir = process.env.ATC_CURRENT_DIR || '';
@@ -35,15 +48,21 @@ const derivedFile = process.env.ATC_DERIVED_FILE || (currentDir ? path.join(curr
 
 const rawDuration = process.env.ATC_EVENT_DURATION_MS;
 const durationMs = rawDuration === undefined || rawDuration === '' ? null : Number(rawDuration);
+const stdinDurationMs = Number.isFinite(Number(stdinEvent?.durationMs)) ? Number(stdinEvent.durationMs) : null;
+
+const eventType = process.env.ATC_EVENT_TYPE || stdinEvent?.eventType || stdinEvent?.type || 'unknown';
+const cwd = process.env.ATC_EVENT_CWD || stdinEvent?.cwd || stdinEvent?.workdir || null;
+const command = process.env.ATC_EVENT_COMMAND || stdinEvent?.command || stdinEvent?.input || null;
 
 const event = {
   ts: nowIso,
   slot,
   runId,
-  eventType: process.env.ATC_EVENT_TYPE || 'unknown',
-  cwd: process.env.ATC_EVENT_CWD || null,
-  command: process.env.ATC_EVENT_COMMAND || null,
-  durationMs: Number.isFinite(durationMs) ? durationMs : null,
+  eventType,
+  cwd,
+  command,
+  durationMs: Number.isFinite(durationMs) ? durationMs : stdinDurationMs,
+  payload: stdinEvent || null,
 };
 
 ensureParent(eventsFile);

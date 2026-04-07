@@ -72,7 +72,7 @@ Status:
 - Hooked zsh `preexec`, `precmd`, `chpwd`, plus `shell_start` event emission through `dashboard/scripts/shell-hook-writer.mjs`.
 - Dashboard session payload now merges `derived.json` telemetry for live timing/workdir display.
 
-## Milestone 4 (Next): Shared Hook Writer + Env Contract
+## Milestone 4 (Done): Shared Hook Writer + Env Contract
 Scope:
 - Standardize per-slot runtime env vars injected at spawn:
   - `ATC_SLOT`
@@ -92,7 +92,12 @@ Fallback:
 Acceptance criteria:
 - All shell and agent hooks route to deterministic slot files via env vars.
 
-## Milestone 5: Codex Native Hooks Integration
+Status:
+- Implemented env contract injection at session spawn (`ATC_*` vars above).
+- Shared writer now accepts both env variables and optional JSON stdin payload for normalized event ingestion.
+- Fallback sink is implemented at `dashboard/runtime/unassigned-events.jsonl`.
+
+## Milestone 5 (Next): Codex Native Hooks Integration
 Scope:
 - Enable Codex hooks via `~/.codex/config.toml` feature flag:
   - `[features] codex_hooks = true`

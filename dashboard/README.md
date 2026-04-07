@@ -41,6 +41,17 @@ Each spawned slot writes shell hook events into:
 
 Hooks are shell-level (`preexec`, `precmd`, `chpwd`) and run even without Codex/Claude active.
 
+Spawned sessions inject this env contract:
+- `ATC_SLOT`
+- `ATC_RUN_ID`
+- `ATC_SLOT_DIR`
+- `ATC_CURRENT_DIR`
+- `ATC_EVENTS_FILE`
+- `ATC_META_FILE`
+- `ATC_DERIVED_FILE`
+
+`dashboard/scripts/shell-hook-writer.mjs` supports both env-only events (shell hooks) and JSON-over-stdin events (for upcoming Codex/Claude native hooks).
+
 ## Fast Mobile UI Feedback
 
 Capture a mobile screenshot of the dashboard (Playwright, `Pixel 7` by default):
