@@ -20,7 +20,8 @@ const SHELL_BIN = process.env.SHELL_BIN || '/bin/zsh';
 const TMUX_BIN = process.env.TMUX_BIN || 'tmux';
 const ENABLE_TMUX_BACKEND = process.env.ENABLE_TMUX_BACKEND !== '0';
 const TMUX_SLOT_WINDOW = process.env.TMUX_SLOT_WINDOW || 'atc';
-const DEFAULT_WORKDIR = process.env.DEFAULT_SESSION_WORKDIR || '/Users/nihal/Code/MobileDev';
+const HOME_DIRECTORY = process.env.HOME || process.env.USERPROFILE || '/';
+const DEFAULT_WORKDIR = process.env.DEFAULT_SESSION_WORKDIR || HOME_DIRECTORY;
 const SHELL_HOOK_WRITER = process.env.SHELL_HOOK_WRITER || path.join(__dirname, 'scripts', 'shell-hook-writer.mjs');
 const ENABLE_SHELL_HOOKS = process.env.ENABLE_SHELL_HOOKS !== '0';
 const SOURCE_USER_ZSHRC = process.env.ATC_SOURCE_USER_ZSHRC !== '0';
@@ -31,6 +32,9 @@ const USAGE_TTL_MS = 10000;
 const TELEMETRY_INGEST_MS = Number(process.env.TELEMETRY_INGEST_MS || 2000);
 const TITLE_POLL_MS = Number(process.env.TITLE_POLL_MS || 300000);
 const SLOT_RUN_RETENTION = Number(process.env.SLOT_RUN_RETENTION || 3);
+const TEMPLATE_NEW_BRAINSTORM = 'new_brainstorm';
+const TEMPLATE_CONTINUE_WORK = 'continue_work';
+const PROVIDERS = new Set(['codex', 'claude', 'gemini']);
 
 let usageCache = { value: null, fetchedAt: 0, pending: null };
 
@@ -117,6 +121,55 @@ function compactText(text, max = 64) {
     .trim();
   if (!cleaned) return '';
   return cleaned.length <= max ? cleaned : `${cleaned.slice(0, max - 1)}…`;
+}
+
+function normalizeProvider(provider) {
+  const normalized = String(provider || '').trim().toLowerCase();
+  return PROVIDERS.has(normalized) ? normalized : 'codex';
+}
+
+function normalizeTemplateId(templateId, fallbackTemplate = TEMPLATE_NEW_BRAINSTORM) {
+  const normalized = String(templateId || '').trim().toLowerCase();
+  if (!normalized) return normalizeTemplateId(fallbackTemplate, TEMPLATE_NEW_BRAINSTORM);
+  if (normalized === TEMPLATE_CONTINUE_WORK) return TEMPLATE_CONTINUE_WORK;
+  return TEMPLATE_NEW_BRAINSTORM;
+}
+
+async function resolveWorkdirForSpawn(templateId, requestedWorkdir) {
+  if (templateId === TEMPLATE_NEW_BRAINSTORM) return HOME_DIRECTORY;
+  const candidate = String(requestedWorkdir || '').trim() || HOME_DIRECTORY;
+  const fullPath = path.resolve(candidate);
+  let stat;
+  try {
+    stat = await fs.stat(fullPath);
+  } catch {
+    throw new Error(`workdir does not exist: ${candidate}`);
+  }
+  if (!stat.isDirectory()) throw new Error(`workdir is not a directory: ${candidate}`);
+  return fullPath;
+}
+
+async function listDirectoryOptions(inputPath) {
+  const normalized = path.resolve(String(inputPath || '').trim() || HOME_DIRECTORY);
+  let stat;
+  try {
+    stat = await fs.stat(normalized);
+  } catch {
+    throw new Error('directory does not exist');
+  }
+  if (!stat.isDirectory()) throw new Error('path is not a directory');
+
+  const entries = await fs.readdir(normalized, { withFileTypes: true });
+  const directories = entries
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+    .map((entry) => ({
+      name: entry.name,
+      path: path.join(normalized, entry.name),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const parent = normalized === '/' ? null : path.dirname(normalized);
+  return { path: normalized, parent, directories };
 }
 
 function parseWindow(windowValue, fallbackMinutes = null) {
@@ -270,6 +323,8 @@ function defaultSessionState(cfg) {
     status: 'idle',
     taskTitle: `${cfg.name} task`,
     workdir: DEFAULT_WORKDIR,
+    provider: 'codex',
+    templateId: TEMPLATE_NEW_BRAINSTORM,
     agentType: 'none',
     spawnedAt: null,
     runId: null,
@@ -299,6 +354,8 @@ async function loadState() {
     if (!merged.sessions[slot.name]) merged.sessions[slot.name] = defaultSessionState(slot);
     merged.sessions[slot.name].name = slot.name;
     if (!merged.sessions[slot.name].workdir) merged.sessions[slot.name].workdir = DEFAULT_WORKDIR;
+    merged.sessions[slot.name].provider = normalizeProvider(merged.sessions[slot.name].provider);
+    merged.sessions[slot.name].templateId = normalizeTemplateId(merged.sessions[slot.name].templateId);
     if (!merged.sessions[slot.name].taskTitle) merged.sessions[slot.name].taskTitle = `${slot.name} task`;
     if (!merged.sessions[slot.name].agentType) merged.sessions[slot.name].agentType = 'none';
     if (!Object.hasOwn(merged.sessions[slot.name], 'runId')) merged.sessions[slot.name].runId = null;
@@ -622,10 +679,10 @@ function buildAtcZshrc(env) {
     '  source "${ATC_USER_ZSHRC}"',
     'fi',
     '',
-    '# Ensure shared command history behaves like a normal user zsh shell.',
-    'if [[ -z "${HISTFILE:-}" ]]; then',
-    '  export HISTFILE="${ATC_USER_HISTORY_FILE:-$HOME/.zsh_history}"',
-    'fi',
+    '# Force HISTFILE to the user history — ZDOTDIR causes zsh to default',
+    '# HISTFILE to $ZDOTDIR/.zsh_history before any rc file runs, so a',
+    '# conditional guard (if -z) would never override it.',
+    'export HISTFILE="${ATC_USER_HISTORY_FILE:-$HOME/.zsh_history}"',
     'if [[ ! -e "$HISTFILE" ]]; then',
     '  : > "$HISTFILE" 2>/dev/null || true',
     'fi',
@@ -988,6 +1045,16 @@ async function killSessionBackend(slot, stateRecord) {
   } catch {
     // no-op
   }
+
+  if (ENABLE_TMUX_BACKEND) {
+    const direct = await runCommand(TMUX_BIN, ['kill-session', '-t', slot.name], 3000);
+    if (!direct.ok) {
+      const tmuxSessionName = tmuxSessionNameForSlot(slot.name);
+      if (tmuxSessionName !== slot.name) {
+        await runCommand(TMUX_BIN, ['kill-session', '-t', tmuxSessionName], 3000);
+      }
+    }
+  }
 }
 
 async function getMergedSessions() {
@@ -1054,12 +1121,23 @@ async function getMergedSessions() {
   return merged;
 }
 
-async function spawnSlotByName(name) {
+async function spawnSlotByName(name, options = {}) {
   const [cfg, state] = await Promise.all([readSessionsConfig(), loadState()]);
   const slot = cfg.find((s) => s.name === name);
   if (!slot) throw new Error('session not found');
 
   const st = state.sessions[slot.name] || defaultSessionState(slot);
+  const provider = normalizeProvider(options.provider);
+  const templateProvided = typeof options.templateId === 'string' && options.templateId.trim();
+  const templateId = normalizeTemplateId(options.templateId, TEMPLATE_CONTINUE_WORK);
+  const requestedWorkdir = typeof options.workdir === 'string' ? options.workdir : '';
+  const effectiveWorkdirInput = requestedWorkdir.trim() || (templateProvided ? HOME_DIRECTORY : (st.workdir || DEFAULT_WORKDIR));
+  const workdir = await resolveWorkdirForSpawn(templateId, effectiveWorkdirInput);
+
+  st.provider = provider;
+  st.templateId = templateId;
+  st.workdir = workdir;
+
   const alreadyUp = await checkPortOpen(slot.backendPort);
   if (alreadyUp) {
     st.status = 'active';
@@ -1513,6 +1591,230 @@ function renderPage() {
     .color-starting { color: #cdd8ff; }
     .error { color: var(--red); }
 
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: #081126b8;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      z-index: 40;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      width: min(620px, 100%);
+      max-height: 88vh;
+      overflow: auto;
+      border: 1px solid #365089;
+      border-radius: 16px;
+      background: linear-gradient(180deg, #142449, #0e1831);
+      box-shadow: 0 18px 44px #00000052;
+      padding: 14px;
+    }
+    .modal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+      gap: 10px;
+    }
+    .modal-title {
+      font-size: 17px;
+      font-weight: 700;
+    }
+    .modal-close {
+      border: 1px solid #4967a8;
+      border-radius: 9px;
+      background: #18294f;
+      color: #d8e5ff;
+      width: 34px;
+      height: 34px;
+      font-size: 18px;
+      cursor: pointer;
+    }
+    .intent-block { margin-top: 12px; }
+    .intent-label {
+      color: #cad9fb;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.35px;
+      margin-bottom: 7px;
+    }
+    .provider-carousel {
+      display: grid;
+      grid-template-columns: 34px 1fr 34px;
+      gap: 8px;
+      align-items: center;
+    }
+    .carousel-nav {
+      border: 1px solid #4d69a8;
+      border-radius: 9px;
+      background: #172850;
+      color: #d9e6ff;
+      height: 42px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    .provider-select-card {
+      border: 1px solid #3c548f;
+      border-radius: 12px;
+      background: linear-gradient(150deg, #1b2a4f 0%, #111b36 100%);
+      padding: 10px;
+      min-height: 108px;
+      touch-action: pan-y;
+    }
+    .provider-select-head {
+      display: grid;
+      grid-template-columns: 46px 1fr;
+      gap: 9px;
+      align-items: center;
+    }
+    .provider-select-logo {
+      width: 46px;
+      height: 46px;
+      border-radius: 8px;
+      background: #fff;
+      object-fit: contain;
+      border: 1px solid #d7e4ff;
+      padding: 6px;
+    }
+    .provider-select-name {
+      font-size: 16px;
+      font-weight: 700;
+      line-height: 1.1;
+    }
+    .provider-select-plan {
+      color: #aec2ec;
+      font-size: 11px;
+      margin-top: 3px;
+    }
+    .provider-select-windows {
+      margin-top: 8px;
+      display: grid;
+      gap: 4px;
+    }
+    .template-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .template-btn {
+      border: 1px solid #3a4f82;
+      border-radius: 11px;
+      background: #111b35;
+      color: #dce7ff;
+      text-align: left;
+      padding: 10px;
+      cursor: pointer;
+      min-height: 76px;
+    }
+    .template-btn.active {
+      border-color: #5f87e0;
+      box-shadow: 0 0 0 1px #5f87e044 inset;
+      background: #15254a;
+    }
+    .template-title {
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .template-subtitle {
+      color: #adc2ea;
+      font-size: 12px;
+      line-height: 1.25;
+    }
+    .workdir-row {
+      border: 1px solid #344975;
+      border-radius: 10px;
+      background: #101b33;
+      padding: 9px;
+      display: grid;
+      gap: 8px;
+    }
+    .workdir-path {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: #d6e3ff;
+      word-break: break-all;
+    }
+    .choose-btn {
+      justify-self: start;
+      border: 1px solid #4465a8;
+      border-radius: 8px;
+      background: #183059;
+      color: #dce9ff;
+      padding: 7px 10px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .modal-actions {
+      margin-top: 14px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .btn-secondary,
+    .btn-primary {
+      border-radius: 9px;
+      padding: 8px 12px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .btn-secondary {
+      border: 1px solid #4a6196;
+      background: #162646;
+      color: #d9e5ff;
+    }
+    .btn-primary {
+      border: 1px solid #5981da;
+      background: #315ebf;
+      color: #f5f9ff;
+    }
+    .btn-danger {
+      border: 1px solid #a63e4d;
+      background: #7f2432;
+      color: #ffe4e9;
+      border-radius: 9px;
+      padding: 8px 12px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .confirm-text {
+      margin: 6px 0 2px;
+      color: #d8e4ff;
+      font-size: 14px;
+      line-height: 1.35;
+    }
+    .picker-list {
+      display: grid;
+      gap: 6px;
+      margin-top: 10px;
+      max-height: 320px;
+      overflow: auto;
+    }
+    .picker-item {
+      border: 1px solid #30466f;
+      border-radius: 9px;
+      background: #101a33;
+      color: #d8e5ff;
+      text-align: left;
+      padding: 9px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .picker-controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
     @media (max-width: 640px) {
       body { padding: 12px; }
       .title { font-size: 22px; }
@@ -1525,6 +1827,7 @@ function renderPage() {
       .windows { grid-template-columns: 1fr; }
       .session-inner { padding-right: 46px; }
       .name { font-size: 16px; }
+      .template-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -1543,9 +1846,105 @@ function renderPage() {
     </section>
   </div>
 
+  <div class="modal-overlay" id="intent-modal">
+    <div class="modal">
+      <div class="modal-head">
+        <div class="modal-title" id="intent-title">Start Session</div>
+        <button class="modal-close" id="intent-close" aria-label="Close intent modal">&times;</button>
+      </div>
+      <div class="intent-block">
+        <div class="intent-label">Provider</div>
+        <div class="provider-carousel">
+          <button class="carousel-nav" id="provider-prev" aria-label="Previous provider">&#8592;</button>
+          <div id="provider-select"></div>
+          <button class="carousel-nav" id="provider-next" aria-label="Next provider">&#8594;</button>
+        </div>
+      </div>
+      <div class="intent-block">
+        <div class="intent-label">Template</div>
+        <div class="template-grid">
+          <button class="template-btn" id="template-new" data-template="new_brainstorm">
+            <div class="template-title">New brainstorm</div>
+            <div class="template-subtitle">Brainstorm on a new idea</div>
+          </button>
+          <button class="template-btn" id="template-continue" data-template="continue_work">
+            <div class="template-title">Continue work</div>
+            <div class="template-subtitle">Continue WIP</div>
+          </button>
+        </div>
+      </div>
+      <div class="intent-block" id="workdir-block" style="display:none;">
+        <div class="intent-label">Working Directory</div>
+        <div class="workdir-row">
+          <div class="workdir-path" id="workdir-path"></div>
+          <button class="choose-btn" id="choose-workdir">Choose folder</button>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-secondary" id="intent-cancel">Cancel</button>
+        <button class="btn-primary" id="intent-confirm">Start session</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="dir-picker-modal">
+    <div class="modal">
+      <div class="modal-head">
+        <div class="modal-title">Select Working Directory</div>
+        <button class="modal-close" id="dir-picker-close" aria-label="Close directory picker">&times;</button>
+      </div>
+      <div class="workdir-path" id="dir-picker-path"></div>
+      <div class="picker-controls">
+        <button class="btn-secondary" id="dir-picker-up">Up</button>
+        <button class="btn-primary" id="dir-picker-select">Use this folder</button>
+      </div>
+      <div class="picker-list" id="dir-picker-list"></div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="kill-modal">
+    <div class="modal">
+      <div class="modal-head">
+        <div class="modal-title">Kill Session</div>
+        <button class="modal-close" id="kill-close" aria-label="Close kill confirmation">&times;</button>
+      </div>
+      <p class="confirm-text" id="kill-text"></p>
+      <p class="confirm-text">The associated tmux session will also be killed.</p>
+      <div class="modal-actions">
+        <button class="btn-secondary" id="kill-no">No</button>
+        <button class="btn-danger" id="kill-yes">Yes, kill session</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const refreshing = new Set();
     const spawning = new Set();
+    const HOME_DIRECTORY = ${JSON.stringify(HOME_DIRECTORY)};
+    const PROVIDER_ORDER = [
+      { key: 'codex', title: 'Codex' },
+      { key: 'claude', title: 'Claude' },
+      { key: 'gemini', title: 'Gemini' },
+    ];
+    let latestUsage = {};
+    const intentState = {
+      open: false,
+      name: '',
+      providerKey: 'codex',
+      templateId: 'new_brainstorm',
+      workdir: HOME_DIRECTORY,
+    };
+    const pickerState = {
+      open: false,
+      path: HOME_DIRECTORY,
+      parent: null,
+      directories: [],
+      loading: false,
+    };
+    const killState = {
+      open: false,
+      name: '',
+    };
 
     function esc(v) {
       return String(v)
@@ -1703,6 +2102,300 @@ function renderPage() {
       return body;
     }
 
+    async function apiGet(path) {
+      const res = await fetch(path, { cache: 'no-store' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || ('request failed: ' + res.status));
+      return body;
+    }
+
+    function openIntentModal(name) {
+      intentState.open = true;
+      intentState.name = name;
+      intentState.providerKey = 'codex';
+      intentState.templateId = 'new_brainstorm';
+      intentState.workdir = HOME_DIRECTORY;
+      renderIntentModal();
+      const modal = document.getElementById('intent-modal');
+      if (modal) modal.classList.add('open');
+    }
+
+    function closeIntentModal() {
+      intentState.open = false;
+      const modal = document.getElementById('intent-modal');
+      if (modal) modal.classList.remove('open');
+    }
+
+    function openDirPicker() {
+      pickerState.open = true;
+      pickerState.path = intentState.workdir || HOME_DIRECTORY;
+      const modal = document.getElementById('dir-picker-modal');
+      if (modal) modal.classList.add('open');
+      loadDirectory(pickerState.path).catch((err) => {
+        alert('Failed to list directories: ' + err.message);
+      });
+    }
+
+    function closeDirPicker() {
+      pickerState.open = false;
+      const modal = document.getElementById('dir-picker-modal');
+      if (modal) modal.classList.remove('open');
+    }
+
+    function openKillModal(name) {
+      killState.open = true;
+      killState.name = name;
+      const text = document.getElementById('kill-text');
+      if (text) text.textContent = 'Are you sure you want to kill the session ' + name + '?';
+      const modal = document.getElementById('kill-modal');
+      if (modal) modal.classList.add('open');
+    }
+
+    function closeKillModal() {
+      killState.open = false;
+      killState.name = '';
+      const modal = document.getElementById('kill-modal');
+      if (modal) modal.classList.remove('open');
+    }
+
+    function activeProviderIndex() {
+      const idx = PROVIDER_ORDER.findIndex((p) => p.key === intentState.providerKey);
+      return idx >= 0 ? idx : 0;
+    }
+
+    function rotateProvider(direction) {
+      const idx = activeProviderIndex();
+      const next = (idx + direction + PROVIDER_ORDER.length) % PROVIDER_ORDER.length;
+      intentState.providerKey = PROVIDER_ORDER[next].key;
+      renderIntentModal();
+    }
+
+    function providerSelectionCard(provider) {
+      const logo = PROVIDER_LOGOS[provider.key] || '';
+      const usage = latestUsage ? latestUsage[provider.key] : null;
+      if (!usage || !usage.ok) {
+        return '<div class="provider-select-card" id="provider-select-card">' +
+          '<div class="provider-select-head">' +
+            '<img class="provider-select-logo" src="' + esc(logo) + '" alt="' + esc(provider.title) + ' logo" loading="lazy" />' +
+            '<div><div class="provider-select-name">' + esc(provider.title) + '</div><div class="provider-select-plan">Usage unavailable</div></div>' +
+          '</div>' +
+          '<div class="provider-select-windows">' + miniWindow(null) + miniWindow(null) + '</div>' +
+        '</div>';
+      }
+      const plan = compactPlan(usage.plan || 'connected');
+      return '<div class="provider-select-card" id="provider-select-card">' +
+        '<div class="provider-select-head">' +
+          '<img class="provider-select-logo" src="' + esc(logo) + '" alt="' + esc(provider.title) + ' logo" loading="lazy" />' +
+          '<div><div class="provider-select-name">' + esc(provider.title) + '</div><div class="provider-select-plan">' + esc(plan) + '</div></div>' +
+        '</div>' +
+        '<div class="provider-select-windows">' +
+          miniWindow(usage.primary) +
+          miniWindow(usage.secondary) +
+        '</div>' +
+      '</div>';
+    }
+
+    function renderIntentModal() {
+      const title = document.getElementById('intent-title');
+      if (title) title.textContent = intentState.name ? ('Start ' + intentState.name) : 'Start Session';
+
+      const selectedProvider = PROVIDER_ORDER[activeProviderIndex()];
+      const providerHost = document.getElementById('provider-select');
+      if (providerHost) providerHost.innerHTML = providerSelectionCard(selectedProvider);
+
+      const templateButtons = document.querySelectorAll('[data-template]');
+      for (const btn of templateButtons) {
+        const template = btn.getAttribute('data-template');
+        btn.classList.toggle('active', template === intentState.templateId);
+      }
+
+      const workdirBlock = document.getElementById('workdir-block');
+      const workdirPath = document.getElementById('workdir-path');
+      const continueWork = intentState.templateId === 'continue_work';
+      if (workdirBlock) workdirBlock.style.display = continueWork ? 'block' : 'none';
+      if (workdirPath) workdirPath.textContent = intentState.workdir || HOME_DIRECTORY;
+
+      bindIntentModalInteractions();
+      bindProviderSwipe();
+    }
+
+    async function loadDirectory(targetPath) {
+      pickerState.loading = true;
+      renderDirectoryPicker();
+      const payload = await apiGet('/api/directories?path=' + encodeURIComponent(targetPath || HOME_DIRECTORY));
+      pickerState.path = payload.path || HOME_DIRECTORY;
+      pickerState.parent = payload.parent || null;
+      pickerState.directories = Array.isArray(payload.directories) ? payload.directories : [];
+      pickerState.loading = false;
+      renderDirectoryPicker();
+    }
+
+    function renderDirectoryPicker() {
+      const pathEl = document.getElementById('dir-picker-path');
+      if (pathEl) pathEl.textContent = pickerState.path || HOME_DIRECTORY;
+      const listEl = document.getElementById('dir-picker-list');
+      if (listEl) {
+        if (pickerState.loading) {
+          listEl.innerHTML = '<div class="line muted">Loading folders…</div>';
+        } else if (!pickerState.directories.length) {
+          listEl.innerHTML = '<div class="line muted">No subfolders here.</div>';
+        } else {
+          listEl.innerHTML = pickerState.directories
+            .map((entry) => '<button class="picker-item" data-dir-path="' + esc(entry.path) + '">' + esc(entry.name) + '</button>')
+            .join('');
+        }
+      }
+
+      const upBtn = document.getElementById('dir-picker-up');
+      if (upBtn) upBtn.disabled = !pickerState.parent;
+      bindDirectoryPickerInteractions();
+    }
+
+    function bindProviderSwipe() {
+      const card = document.getElementById('provider-select-card');
+      if (!card || card.dataset.swipeBound === '1') return;
+      card.dataset.swipeBound = '1';
+      let startX = null;
+      card.addEventListener('touchstart', function (ev) {
+        if (!ev.touches || !ev.touches[0]) return;
+        startX = ev.touches[0].clientX;
+      }, { passive: true });
+      card.addEventListener('touchend', function (ev) {
+        if (startX === null) return;
+        if (!ev.changedTouches || !ev.changedTouches[0]) {
+          startX = null;
+          return;
+        }
+        const delta = ev.changedTouches[0].clientX - startX;
+        startX = null;
+        if (Math.abs(delta) < 35) return;
+        rotateProvider(delta < 0 ? 1 : -1);
+      });
+    }
+
+    function bindIntentModalInteractions() {
+      const prev = document.getElementById('provider-prev');
+      if (prev && prev.dataset.bound !== '1') {
+        prev.dataset.bound = '1';
+        prev.addEventListener('click', function () { rotateProvider(-1); });
+      }
+      const next = document.getElementById('provider-next');
+      if (next && next.dataset.bound !== '1') {
+        next.dataset.bound = '1';
+        next.addEventListener('click', function () { rotateProvider(1); });
+      }
+
+      const templateButtons = document.querySelectorAll('[data-template]');
+      for (const btn of templateButtons) {
+        if (btn.dataset.bound === '1') continue;
+        btn.dataset.bound = '1';
+        btn.addEventListener('click', function () {
+          intentState.templateId = btn.getAttribute('data-template') || 'new_brainstorm';
+          if (intentState.templateId === 'new_brainstorm') intentState.workdir = HOME_DIRECTORY;
+          renderIntentModal();
+        });
+      }
+
+      const chooseWorkdir = document.getElementById('choose-workdir');
+      if (chooseWorkdir && chooseWorkdir.dataset.bound !== '1') {
+        chooseWorkdir.dataset.bound = '1';
+        chooseWorkdir.addEventListener('click', function () {
+          openDirPicker();
+        });
+      }
+    }
+
+    function bindDirectoryPickerInteractions() {
+      const listEl = document.getElementById('dir-picker-list');
+      if (listEl && listEl.dataset.bound !== '1') {
+        listEl.dataset.bound = '1';
+        listEl.addEventListener('click', function (ev) {
+          const btn = ev.target.closest('[data-dir-path]');
+          if (!btn) return;
+          const nextPath = btn.getAttribute('data-dir-path');
+          if (!nextPath) return;
+          loadDirectory(nextPath).catch((err) => {
+            alert('Failed to open folder: ' + err.message);
+          });
+        });
+      }
+    }
+
+    function bindStaticModalInteractions() {
+      const intentClose = document.getElementById('intent-close');
+      if (intentClose) intentClose.addEventListener('click', closeIntentModal);
+      const intentCancel = document.getElementById('intent-cancel');
+      if (intentCancel) intentCancel.addEventListener('click', closeIntentModal);
+      const intentOverlay = document.getElementById('intent-modal');
+      if (intentOverlay) {
+        intentOverlay.addEventListener('click', function (ev) {
+          if (ev.target === intentOverlay) closeIntentModal();
+        });
+      }
+
+      const intentConfirm = document.getElementById('intent-confirm');
+      if (intentConfirm) {
+        intentConfirm.addEventListener('click', async function () {
+          if (!intentState.name) return;
+          const payload = {
+            provider: intentState.providerKey,
+            templateId: intentState.templateId,
+            workdir: intentState.templateId === 'continue_work' ? intentState.workdir : HOME_DIRECTORY,
+          };
+          closeIntentModal();
+          await spawnSession(intentState.name, payload);
+        });
+      }
+
+      const pickerClose = document.getElementById('dir-picker-close');
+      if (pickerClose) pickerClose.addEventListener('click', closeDirPicker);
+      const pickerOverlay = document.getElementById('dir-picker-modal');
+      if (pickerOverlay) {
+        pickerOverlay.addEventListener('click', function (ev) {
+          if (ev.target === pickerOverlay) closeDirPicker();
+        });
+      }
+
+      const pickerUp = document.getElementById('dir-picker-up');
+      if (pickerUp) {
+        pickerUp.addEventListener('click', function () {
+          if (!pickerState.parent) return;
+          loadDirectory(pickerState.parent).catch((err) => {
+            alert('Failed to go up: ' + err.message);
+          });
+        });
+      }
+
+      const pickerSelect = document.getElementById('dir-picker-select');
+      if (pickerSelect) {
+        pickerSelect.addEventListener('click', function () {
+          intentState.workdir = pickerState.path || HOME_DIRECTORY;
+          closeDirPicker();
+          renderIntentModal();
+        });
+      }
+
+      const killClose = document.getElementById('kill-close');
+      if (killClose) killClose.addEventListener('click', closeKillModal);
+      const killNo = document.getElementById('kill-no');
+      if (killNo) killNo.addEventListener('click', closeKillModal);
+      const killOverlay = document.getElementById('kill-modal');
+      if (killOverlay) {
+        killOverlay.addEventListener('click', function (ev) {
+          if (ev.target === killOverlay) closeKillModal();
+        });
+      }
+      const killYes = document.getElementById('kill-yes');
+      if (killYes) {
+        killYes.addEventListener('click', async function () {
+          if (!killState.name) return;
+          const target = killState.name;
+          closeKillModal();
+          await killSession(target);
+        });
+      }
+    }
+
     async function prewarmPublicEndpoint(port) {
       const base = hostForPort(port);
       const ctl = new AbortController();
@@ -1723,13 +2416,14 @@ function renderPage() {
       }
     }
 
-    async function spawnSession(name) {
+    async function spawnSession(name, options) {
       if (refreshing.has(name)) return;
       refreshing.add(name);
       spawning.add(name);
       refresh().catch(() => {});
       try {
-        await apiPost('/api/sessions/spawn', { name: name });
+        const payload = { name: name, ...(options || {}) };
+        await apiPost('/api/sessions/spawn', payload);
       } catch (err) {
         alert('Spawn failed for ' + name + ': ' + err.message);
       } finally {
@@ -1760,7 +2454,7 @@ function renderPage() {
       const isActive = s.status === 'active' && s.backendActive;
       const isSpawning = spawning.has(s.name);
       const hasAgent = !!(s.telemetry && s.telemetry.agentType && s.telemetry.agentType !== 'none');
-      const actionText = isSpawning ? 'Starting terminal…' : (isActive ? 'Tap to connect' : 'Tap to spawn');
+      const actionText = isSpawning ? 'Starting terminal…' : (isActive ? 'Tap to connect' : 'Tap to start');
       const actionClass = isSpawning ? 'color-starting' : (isActive ? 'color-active' : 'color-idle');
       const badgeClass = isSpawning ? 'starting' : (isActive ? 'active' : 'idle');
       const badgeText = isSpawning ? 'starting' : (isActive ? 'active' : 'idle');
@@ -1807,7 +2501,7 @@ function renderPage() {
             window.open(connectUrlForPort(item.publicPort), '_blank', 'noopener,noreferrer');
             return;
           }
-          await spawnSession(item.name);
+          openIntentModal(item.name);
         });
       }
 
@@ -1818,7 +2512,7 @@ function renderPage() {
           if (btn.hasAttribute('disabled')) return;
           const name = btn.getAttribute('data-name');
           if (!name) return;
-          await killSession(name);
+          openKillModal(name);
         });
       }
     }
@@ -1830,6 +2524,7 @@ function renderPage() {
       ]);
 
       const usage = await usageResp.json();
+      latestUsage = usage || {};
       const sessionsPayload = await sessionsResp.json();
       const sessions = sessionsPayload.sessions || [];
 
@@ -1845,8 +2540,10 @@ function renderPage() {
       const sessionsEl = document.getElementById('sessions');
       sessionsEl.innerHTML = sessions.map(sessionCard).join('') || '<div class="line muted">No sessions configured.</div>';
       bindSessionInteractions(sessions);
+      if (intentState.open) renderIntentModal();
     }
 
+    bindStaticModalInteractions();
     refresh();
     setInterval(refresh, ${REFRESH_MS});
   </script>
@@ -1898,6 +2595,17 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === '/api/directories' && req.method === 'GET') {
+    try {
+      const requestedPath = String(url.searchParams.get('path') || '').trim();
+      const listing = await listDirectoryOptions(requestedPath || HOME_DIRECTORY);
+      json(res, 200, listing);
+    } catch (error) {
+      json(res, 400, { error: error.message || 'directory lookup failed' });
+    }
+    return;
+  }
+
   if (url.pathname === '/api/sessions/spawn' && req.method === 'POST') {
     try {
       const body = await readJsonBody(req);
@@ -1906,10 +2614,16 @@ const server = http.createServer(async (req, res) => {
         json(res, 400, { error: 'name is required' });
         return;
       }
-      await spawnSlotByName(name);
+      const provider = normalizeProvider(body.provider);
+      const hasTemplate = typeof body.templateId === 'string' && body.templateId.trim();
+      const templateId = hasTemplate ? normalizeTemplateId(body.templateId, TEMPLATE_NEW_BRAINSTORM) : undefined;
+      const workdir = typeof body.workdir === 'string' ? body.workdir : '';
+      await spawnSlotByName(name, { provider, templateId, workdir });
       json(res, 200, { ok: true, name });
     } catch (error) {
-      json(res, 500, { error: error.message || 'spawn failed' });
+      const message = error.message || 'spawn failed';
+      const status = message.includes('workdir') || message.includes('directory') || message.includes('session not found') ? 400 : 500;
+      json(res, status, { error: message });
     }
     return;
   }

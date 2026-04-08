@@ -1,205 +1,226 @@
-# AI Traffic Control Implementation Plan
+# Personal OS V1 Roadmap
 
-This document formalizes implementation milestones for slot orchestration and lightweight telemetry.
+This roadmap converts the new product vision into incremental milestones that can be shipped and validated end-to-end.
 
-## Design Principles
-- Keep slots deterministic and reusable (`Feynman`, `Einstein`, `Gauss`, `Fermi`).
-- Prefer low-complexity instrumentation first (shell-level hooks), then agent-specific hooks.
-- Avoid brittle process/TTY inference for agent-specific stats.
-- Keep storage bounded (small rolling history, not full indefinite transcripts).
+## Product Goal
+Build a browser-native, voice-driven, agent-orchestrated personal operating system where:
+- Scientists are persistent execution slots.
+- Templates convert intent into deterministic setup.
+- Voice is the primary control plane.
+- History and second-brain integration provide memory and strategy.
 
-## Slot Model
-- A slot is a stable identity with fixed ports and reusable runtime.
-- `Kill` terminates the live process for that slot and marks it idle.
-- `Spawn` reuses the same slot name/ports and creates a new `runId`.
-- Runtime data is partitioned by slot and run.
+## Guiding Constraints
+- Zero-friction startup for common flows: intent to execution in under 10 seconds.
+- Keep deterministic slot lifecycle and telemetry foundations already in place.
+- Ship thin vertical slices before broad intelligence features.
+- Every milestone must leave a user-visible improvement.
 
-Runtime paths:
-- `dashboard/runtime/slots/<slot>/current/meta.json`
-- `dashboard/runtime/slots/<slot>/current/events.jsonl`
-- `dashboard/runtime/slots/<slot>/current/derived.json`
-- `dashboard/runtime/slots/<slot>/current/title.txt`
-- `dashboard/runtime/slots/<slot>/runs/<runId>/...` (archived)
-
-Retention:
-- Keep `current` plus last `N` archived runs (default `N=3`).
-
-## Milestone 1 (Done): Lifecycle UX + Control Plane
+## Milestone 0 (Baseline, Already Complete): Stable Runtime + Telemetry
 Scope:
-- Idle/active slot lifecycle in dashboard.
-- Tap card behavior (`idle -> spawn`, `active -> connect`) and kill button.
-- Public proxy + backend ports.
+- Slot lifecycle, runtime files, shell hooks, Codex/Claude hooks, derived telemetry, retention guardrails.
+
+Outcome:
+- Reliable substrate exists for higher-level orchestration.
 
 Status:
-- Implemented.
+- Done.
 
-## Milestone 2 (Done): Basic Slot Metadata
+## Milestone 1: Intent Templates v1 (No Voice Yet)
+Theme:
+- Replace raw terminal entry with structured spawn flows.
+
 Scope:
-- Store `taskTitle`, `workdir`, `agentType`, timestamps in slot state.
+- Introduce template menu when activating idle scientist.
+- Implement templates:
+  - `New Brainstorm`
+  - `Continue Work (WIP)`
+- For `Continue Work`, add recent projects picker and file explorer fallback.
+- Persist template usage and selected context into slot metadata.
 
-Status:
-- Implemented (baseline fields and state persistence).
-
-## Milestone 3 (Done): Shell-Level Hooks (Required Before Agent Hooks)
-Scope:
-- Add shell-native hooks in each spawned zsh session:
-  - `preexec`
-  - `precmd`
-  - `chpwd`
-- Emit lightweight JSON events independent of Codex/Claude.
-
-Event payload fields:
-- `ts`
-- `slot`
-- `runId`
-- `eventType` (`shell_start`, `preexec`, `precmd`, `chpwd`)
-- `cwd`
-- `command` (for `preexec`)
-- `durationMs` (optional if derived from preexec/precmd)
-
-Files written:
-- Append event rows to `current/events.jsonl`.
-- Update `current/meta.json` with `activeSince`, `lastInteractionAt`, latest `cwd`.
-- Update `current/derived.json` for dashboard reads.
+Deliverables:
+- New UI intent modal for idle scientists.
+- Spawn API contract: `scientist + template + provider + workdir`.
+- Deterministic defaults for missing selections.
 
 Acceptance criteria:
-- Spawned slot creates `current/*` files.
-- `cwd` changes and command activity update timestamps reliably.
-- Dashboard shows `active for`, `last interaction`, and live workdir without any agent running.
+- Idle click never drops user into unstructured shell by default.
+- User can start a brainstorm or continue prior repo without manual shell setup.
+- Session metadata includes template selection for replay/analytics.
 
-Status:
-- Hook writer + runtime file model implemented under `dashboard/runtime/slots/<slot>/current`.
-- zsh hook bootstrap generation is live by default (`ENABLE_SHELL_HOOKS` defaults to on).
-- Fixed interactive-shell freeze caused by unguarded stdin reads in the hook writer (TTY stdin now skips JSON read path).
-- Regression guard exists as automated ttyd E2E (`tests/e2e/terminal-smoke.spec.mjs`) validating command execution, all shell hooks (`shell_start`, `preexec`, `precmd`, `chpwd`), and derived session telemetry in `/api/sessions`.
+## Milestone 2: Persona Overlay System
+Theme:
+- Keep scientist identity stable while role changes are lightweight.
 
-## Milestone 4 (Done): Shared Hook Writer + Env Contract
 Scope:
-- Standardize per-slot runtime env vars injected at spawn:
-  - `ATC_SLOT`
-  - `ATC_RUN_ID`
-  - `ATC_SLOT_DIR`
-  - `ATC_CURRENT_DIR`
-  - `ATC_EVENTS_FILE`
-  - `ATC_META_FILE`
-- Implement a single hook writer script that:
-  - reads JSON from stdin
-  - enriches with `ATC_*` metadata
-  - appends to `ATC_EVENTS_FILE`
+- Add persona selector independent of scientist identity.
+- v1 personas:
+  - `Brainstormer`
+  - `Refactorer`
+  - `Tester`
+  - `Reviewer`
+  - `Lucky Dip Explorer`
+- Map persona to initial system prompt/instructions at spawn time.
 
-Fallback:
-- If `ATC_EVENTS_FILE` missing, append to `dashboard/runtime/unassigned-events.jsonl`.
+Deliverables:
+- Persona registry + UI control.
+- Provider-agnostic persona injection at session start.
+- Persona shown in slot card and session history.
 
 Acceptance criteria:
-- All shell and agent hooks route to deterministic slot files via env vars.
+- Same scientist can switch persona between runs with one interaction.
+- Persona change does not alter slot identity, ports, or historical continuity.
 
-Status:
-- Implemented env contract injection at session spawn (`ATC_*` vars above).
-- Shared writer now accepts both env variables and optional JSON stdin payload for normalized event ingestion.
-- Fallback sink is implemented at `dashboard/runtime/unassigned-events.jsonl`.
+## Milestone 3: Idle Pulse + Stall Detection
+Theme:
+- Operational awareness for opportunistic delegation.
 
-## Milestone 5 (Done): Codex Native Hooks Integration
 Scope:
-- Enable Codex hooks via `~/.codex/config.toml` feature flag:
-  - `[features] codex_hooks = true`
-- Configure `hooks.json` to call the shared hook writer for:
-  - `SessionStart`
-  - `UserPromptSubmit`
-  - `PreToolUse`
-  - `PostToolUse`
-  - `Stop`
+- Add derived state machine per slot:
+  - `active`
+  - `idle`
+  - `stalled`
+- Detect inactivity and stalled runs from telemetry thresholds.
+- Surface state in dashboard and API.
 
-Codex hook output handling:
-- Persist key fields from stdin payload, including:
-  - `session_id`, `turn_id`, `cwd`, `model`, `transcript_path`
-  - `tool_name`, `tool_input.command`, `tool_response` where present
+Deliverables:
+- Configurable thresholds for idle/stalled classification.
+- Slot pulse indicators and sortable state filters.
+- Event annotations when state transitions occur.
 
 Acceptance criteria:
-- Codex turns/tool events appear in slot `events.jsonl`.
-- Dashboard shows Codex-specific activity only when Codex events exist.
+- State transitions are deterministic and explainable from runtime data.
+- Dashboard can filter to idle scientists in one interaction.
 
-Status:
-- Added repo-local `.codex/hooks.json` for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`.
-- Added `dashboard/scripts/codex-hook-forwarder.mjs` to forward Codex hook payloads to the shared writer.
-- Added `dashboard/scripts/enable-codex-hooks.sh` and enabled `codex_hooks = true` in `~/.codex/config.toml`.
-- Validated ingestion with simulated Codex payloads and `Stop` JSON response handling.
+## Milestone 4: Lucky Dip Suggestions v1
+Theme:
+- Eliminate blank-canvas moments with actionable re-entry prompts.
 
-## Milestone 6 (Done): Claude Native Hooks Integration
 Scope:
-- Configure Claude hooks to call the same shared hook writer.
-- Normalize Claude hook payload into the same event schema as Codex.
+- Build suggestion engine over recent sessions and unfinished threads.
+- Rank candidates by recency, prior momentum, and completion gap.
+- Add one-click action from suggestion to template-driven spawn.
+
+Deliverables:
+- `Lucky Dip` panel with top 3 suggestions.
+- Rationale tags per suggestion (for example `80% complete`, `stale 3d`).
+- Launch action that pre-fills scientist, persona, provider, and workdir.
 
 Acceptance criteria:
-- Claude events appear in slot `events.jsonl` with `provider=claude`.
-- Dashboard shows Claude-specific activity only when Claude events exist.
+- User can go from no idea to active session in <= 2 clicks.
+- Suggestions are traceable to concrete prior sessions/projects.
 
-Status:
-- Added repo-local `.claude/settings.json` hook config for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`.
-- Reused shared forwarder/writer pipeline so Claude and Codex land in the same event stream format.
-- Validated with simulated Claude-style payloads forwarded into slot runtime files.
+## Milestone 5: Voice Control Plane v1
+Theme:
+- Intent via speech, execution via existing orchestration primitives.
 
-## Milestone 7 (Done): Derived Metrics + Title Generation
 Scope:
-- Background ingestor computes and updates `derived.json` from events.
-- 5-minute title poll:
-  - summarize last 10 interactions
-  - write `current/title.txt`
-  - allow manual title override lock later
+- Integrate WhisperFlow transcription pipeline.
+- Add intent parser for commands like:
+  - `Put Einstein on a new Codex brainstorm`
+- Resolve inferred fields with safe defaults and confirmation UX.
 
-Metrics to show:
-- `activeSince`
-- `lastInteractionAt`
-- `lastUserPromptAt`
-- `lastAssistantStopAt`
-- `agentType`
-- `turnCount`
-- `title`
+Deliverables:
+- Voice input capture widget.
+- Intent-to-action parser for scientist/template/provider/workdir.
+- Confirmation step for low-confidence interpretations.
 
 Acceptance criteria:
-- Blank agent metrics for plain shells.
-- Populated metrics/title only when Codex/Claude hooks emit events.
+- Happy path voice command can spawn correct session without typing.
+- Parser confidence and correction actions are logged for tuning.
 
-Status:
-- Added background telemetry ingestion (`TELEMETRY_INGEST_MS`) to compute derived metrics from per-slot events.
-- Added 5-minute title refresh (`TITLE_POLL_MS`) with deterministic title generation from recent prompts/commands.
-- Dashboard now surfaces derived `agentType`, `turnCount`, and generated title in slot cards.
+## Milestone 6: Downtime Prep Automations
+Theme:
+- Make idle scientists productive without autonomous risk.
 
-## Milestone 8 (Done): Context Usage Display
 Scope:
-- Provider-level usage from existing CodexBar integration (`5h`, `weekly`).
-- Per-slot context utilization:
-  - populate only if hook payload provides reliable fields
-  - otherwise show `N/A` explicitly (no fake estimates by default)
+- Add non-destructive background prep tasks for idle slots:
+  - repo health checks
+  - test discovery
+  - refactor opportunity summaries
+  - cleanup suggestions
+- Require explicit user approval before any mutating action.
+
+Deliverables:
+- Idle queue scheduler with budget and concurrency controls.
+- Prep task result cards attached to each scientist.
+- One-click `Apply Now` path that spawns proper persona/template.
 
 Acceptance criteria:
-- Dashboard distinguishes provider usage from per-slot usage.
-- No misleading inferred per-slot context values.
+- Idle time generates useful, reviewable suggestions.
+- No background mutation occurs without explicit user action.
 
-Status:
-- Provider-level usage remains sourced from CodexBar (`5h`, `weekly`) in top usage cards.
-- Per-slot `contextWindowPct` is populated only from explicit hook payload fields when present.
-- Slot cards now show `Context window: N/A` when no reliable per-slot field is available.
+## Milestone 7: Structured History Layer
+Theme:
+- Upgrade raw logs into queryable memory.
 
-## Milestone 9 (Done): Reliability and Guardrails
 Scope:
-- Run rotation and bounded retention.
-- Robust file writes (atomic metadata updates).
-- Graceful behavior when hook writer fails.
+- Normalize mapping:
+  - `session -> transcript -> project -> scientist -> persona`
+- Build timeline API for re-entry by project, date, or scientist.
+- Add `Memory Lane` UI for fast context resurrection.
+
+Deliverables:
+- Indexed history store (bounded, resilient).
+- Session summary cards with deep links to transcript and workspace.
+- Memory Lane filters (`recent`, `stalled`, `high-momentum`).
 
 Acceptance criteria:
-- No runaway storage growth.
-- No dashboard breakage from missing/corrupt hook rows.
+- User can reopen meaningful prior context in <= 10 seconds.
+- History browsing works even when a provider transcript is unavailable.
 
-Status:
-- Added slot run rotation with bounded retention (`SLOT_RUN_RETENTION`, default `3`).
-- Added atomic JSON writes with unique temp files to avoid state-write races.
-- Kept hook execution fail-open (`|| true`) so shell usability is unaffected by hook errors.
-- Telemetry parser skips corrupt JSONL rows and keeps dashboard responses stable.
+## Milestone 8: Second Brain Integration v1
+Theme:
+- Turn execution traces into strategic reflection.
 
-## Fast Feedback Loop
-- Use mobile screenshot capture for every visible UI change.
+Scope:
+- Export structured daily and weekly summaries.
+- Add connector for second-brain target (start with Obsidian-compatible markdown output).
+- Generate signals:
+  - time allocation by project/persona
+  - neglected threads
+  - suggested next focus
 
-Commands:
-- `./dashboard/scripts/start-ttyd-sessions.sh`
-- `./dashboard/scripts/start-dashboard.sh`
-- `./dashboard/scripts/mobile-screenshot.sh http://127.0.0.1:1111 dashboard/run/dashboard-mobile.png`
+Deliverables:
+- Scheduled summary generator.
+- Markdown export package with backlinks to sessions/projects.
+- Review dashboard: daily brief + weekly review cards.
+
+Acceptance criteria:
+- User receives automated daily and weekly summaries with actionable recommendations.
+- Summaries include direct re-entry actions, not just passive reporting.
+
+## Milestone 9: V1 End-to-End Quality Gate
+Theme:
+- Ensure the experience feels magical, not fragile.
+
+Scope:
+- Define V1 critical flows and automate tests:
+  - idle scientist -> template spawn
+  - persona switch
+  - voice command spawn
+  - lucky dip relaunch
+  - memory lane re-entry
+- Add UX latency/error SLOs and instrumentation.
+
+Deliverables:
+- E2E test suite for V1 flows.
+- Reliability dashboard with spawn success rate and median time-to-first-action.
+- Launch checklist and rollback plan.
+
+Acceptance criteria:
+- Critical-flow pass rate >= 95% in CI.
+- Median intent-to-active-session < 10 seconds on local baseline setup.
+
+## Execution Order (Why This Sequence)
+1. Templates first to eliminate setup friction with minimal risk.
+2. Persona and pulse next to create meaningful orchestration primitives.
+3. Lucky Dip before voice so recommendation quality is proven via clicks first.
+4. Voice after deterministic intent actions exist.
+5. Downtime automation only after stall/idle states are reliable.
+6. History and second-brain layers after core execution loop is stable.
+7. Final quality gate to lock V1 before expansion.
+
+## Immediate Next Sprint (Recommended)
+- Deliver Milestone 1 completely.
+- Start Milestone 2 with persona registry and UI only.
+- Defer parser and automation complexity until post-template telemetry confirms flow quality.
