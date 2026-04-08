@@ -19,6 +19,7 @@ const TTYD_BIN = process.env.TTYD_BIN || '/opt/homebrew/bin/ttyd';
 const SHELL_BIN = process.env.SHELL_BIN || '/bin/zsh';
 const TMUX_BIN = process.env.TMUX_BIN || 'tmux';
 const ENABLE_TMUX_BACKEND = process.env.ENABLE_TMUX_BACKEND !== '0';
+const TMUX_SLOT_WINDOW = process.env.TMUX_SLOT_WINDOW || 'atc';
 const DEFAULT_WORKDIR = process.env.DEFAULT_SESSION_WORKDIR || '/Users/nihal/Code/MobileDev';
 const SHELL_HOOK_WRITER = process.env.SHELL_HOOK_WRITER || path.join(__dirname, 'scripts', 'shell-hook-writer.mjs');
 const ENABLE_SHELL_HOOKS = process.env.ENABLE_SHELL_HOOKS !== '0';
@@ -484,6 +485,44 @@ function shSingle(str) {
   return `'${String(str).replace(/'/g, `'\\''`)}'`;
 }
 
+function shellWithHookEnvCommand(shellConfig) {
+  if (!shellConfig?.zdotdir) return `${SHELL_BIN} -il`;
+  return `env ZDOTDIR=${shSingle(shellConfig.zdotdir)} ATC_ZDOTDIR=${shSingle(shellConfig.zdotdir)} ${shSingle(SHELL_BIN)} -il`;
+}
+
+async function tmuxWindowExists(sessionName, windowName) {
+  const result = await runCommand(TMUX_BIN, ['list-windows', '-t', sessionName, '-F', '#{window_name}'], 3000);
+  if (!result.ok) return false;
+  return (result.stdout || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .includes(windowName);
+}
+
+async function ensureTmuxSlotWindow(sessionName, workdir, shellConfig) {
+  const shellCmd = shellWithHookEnvCommand(shellConfig);
+  const hasSession = await runCommand(TMUX_BIN, ['has-session', '-t', sessionName], 3000);
+  if (!hasSession.ok) {
+    const created = await runCommand(TMUX_BIN, ['new-session', '-d', '-s', sessionName, '-n', TMUX_SLOT_WINDOW, '-c', workdir, shellCmd], 5000);
+    if (!created.ok) throw new Error(`failed to create tmux session ${sessionName}: ${created.stderr || 'unknown error'}`);
+    return;
+  }
+
+  const hasWindow = await tmuxWindowExists(sessionName, TMUX_SLOT_WINDOW);
+  if (!hasWindow) {
+    const added = await runCommand(TMUX_BIN, ['new-window', '-t', sessionName, '-n', TMUX_SLOT_WINDOW, '-c', workdir, shellCmd], 5000);
+    if (!added.ok) throw new Error(`failed to create tmux window ${TMUX_SLOT_WINDOW} in ${sessionName}: ${added.stderr || 'unknown error'}`);
+  } else {
+    const respawned = await runCommand(TMUX_BIN, ['respawn-pane', '-k', '-t', `${sessionName}:${TMUX_SLOT_WINDOW}.0`, '-c', workdir, shellCmd], 5000);
+    if (!respawned.ok)
+      throw new Error(`failed to respawn tmux pane ${sessionName}:${TMUX_SLOT_WINDOW}.0: ${respawned.stderr || 'unknown error'}`);
+  }
+
+  const selected = await runCommand(TMUX_BIN, ['select-window', '-t', `${sessionName}:${TMUX_SLOT_WINDOW}`], 3000);
+  if (!selected.ok) throw new Error(`failed to select tmux window ${sessionName}:${TMUX_SLOT_WINDOW}: ${selected.stderr || 'unknown error'}`);
+}
+
 function buildAtcZshrc(env) {
   return [
     '#!/usr/bin/env zsh',
@@ -821,8 +860,11 @@ async function spawnSessionBackend(slot, sessionState, runtimeEnv, shellConfig) 
 
   const slotWorkdir = sessionState.workdir || DEFAULT_WORKDIR;
   const tmuxSessionName = tmuxSessionNameForSlot(slot.name);
+  if (ENABLE_TMUX_BACKEND) {
+    await ensureTmuxSlotWindow(tmuxSessionName, slotWorkdir, shellConfig);
+  }
   const ttydCommandArgs = ENABLE_TMUX_BACKEND
-    ? [TMUX_BIN, 'new-session', '-A', '-s', tmuxSessionName, '-c', slotWorkdir, `${SHELL_BIN} -il`]
+    ? [TMUX_BIN, 'attach-session', '-t', `${tmuxSessionName}:${TMUX_SLOT_WINDOW}`]
     : [SHELL_BIN, '-il'];
 
   const out = fsSync.openSync(logFileForBackend(slot.backendPort), 'a');
@@ -1141,21 +1183,23 @@ function renderPage() {
     }
     .provider {
       display: grid;
-      grid-template-columns: 34px 1fr;
-      align-items: center;
+      grid-template-columns: 72px 1fr;
+      align-items: stretch;
       gap: 10px;
       min-width: 0;
       padding-right: 34px;
     }
     .provider-logo {
-      width: 34px;
-      height: 34px;
+      width: 100%;
+      height: 100%;
+      min-height: 74px;
       border-radius: 10px;
       border: 1px solid #d7e4ff;
       background: #ffffff;
       object-fit: contain;
-      padding: 6px;
+      padding: 11px;
     }
+    .provider-name-wrap { min-width: 0; }
     .provider-name {
       font-size: 16px;
       font-weight: 700;
@@ -1169,6 +1213,12 @@ function renderPage() {
       font-size: 11px;
       font-weight: 600;
     }
+    .provider-plan-block {
+      display: none;
+      color: #afc3ec;
+      font-size: 12px;
+      margin-top: 3px;
+    }
     .provider-mini {
       margin-top: 5px;
       display: grid;
@@ -1176,7 +1226,7 @@ function renderPage() {
     }
     .mini {
       display: grid;
-      grid-template-columns: 28px minmax(0, 3fr) minmax(120px, 1fr);
+      grid-template-columns: 78px 42px minmax(0, 1.45fr) minmax(112px, 0.85fr);
       align-items: center;
       gap: 7px;
       min-width: 0;
@@ -1185,8 +1235,14 @@ function renderPage() {
       color: #acc2ec;
       font-size: 10px;
       font-weight: 700;
-      text-transform: uppercase;
       letter-spacing: 0.3px;
+      white-space: nowrap;
+    }
+    .mini-pct {
+      text-align: right;
+      font-size: 11px;
+      font-weight: 800;
+      white-space: nowrap;
     }
     .mini-bar {
       width: 100%;
@@ -1202,8 +1258,8 @@ function renderPage() {
       transition: width 180ms ease-out;
       background: linear-gradient(90deg, #1bb172 0%, #f0b526 72%, #d7424d 100%);
     }
-    .mini-meta {
-      color: #cfdbf7;
+    .mini-reset {
+      color: #ffffff;
       font-size: 11px;
       white-space: nowrap;
       text-align: right;
@@ -1215,6 +1271,19 @@ function renderPage() {
       display: none;
     }
     .usage-row.expanded .usage-details { display: block; }
+    .usage-row.expanded .provider {
+      align-items: start;
+      grid-template-columns: 72px 1fr;
+    }
+    .usage-row.expanded .provider-name {
+      display: block;
+      font-size: 21px;
+      line-height: 1.05;
+      margin-top: 1px;
+    }
+    .usage-row.expanded .provider-plan-inline { display: none; }
+    .usage-row.expanded .provider-plan-block { display: block; }
+    .usage-row.expanded .provider-mini { display: none; }
     .windows {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1368,9 +1437,11 @@ function renderPage() {
       body { padding: 12px; }
       .title { font-size: 22px; }
       .title .decor { font-size: 18px; }
-      .provider { grid-template-columns: 30px 1fr; }
-      .provider-logo { width: 30px; height: 30px; padding: 5px; }
-      .mini { grid-template-columns: 24px minmax(0, 2fr) minmax(92px, 1fr); gap: 6px; }
+      .provider { grid-template-columns: 46px 1fr; }
+      .provider-logo { min-height: 58px; padding: 8px; }
+      .usage-row.expanded .provider { grid-template-columns: 46px 1fr; }
+      .mini { grid-template-columns: 62px 34px minmax(0, 1.35fr) minmax(84px, 0.9fr); gap: 5px; }
+      .mini-label, .mini-pct, .mini-reset { font-size: 10px; }
       .windows { grid-template-columns: 1fr; }
       .session-inner { padding-right: 46px; }
       .name { font-size: 16px; }
@@ -1406,9 +1477,9 @@ function renderPage() {
     }
 
     const PROVIDER_LOGOS = {
-      codex: '/assets/logos/openai.svg',
-      claude: '/assets/logos/anthropic.svg',
-      gemini: '/assets/logos/google.svg',
+      codex: '/assets/logos/openai.svg?v=2',
+      claude: '/assets/logos/anthropic.svg?v=2',
+      gemini: '/assets/logos/google.svg?v=2',
     };
     const usageExpanded = new Set();
 
@@ -1436,21 +1507,22 @@ function renderPage() {
 
     function compactWindowLabel(label) {
       const lower = String(label || '').toLowerCase();
-      if (lower.includes('5-hour') || lower.includes('5h')) return '5h';
-      if (lower.includes('weekly') || lower === 'w') return 'W';
-      if (lower.includes('primary')) return 'P';
-      if (lower.includes('secondary')) return 'S';
-      return String(label || 'W').slice(0, 2);
+      if (lower.includes('5-hour') || lower.includes('5h')) return '5H';
+      if (lower.includes('weekly') || lower === 'w') return 'Weekly';
+      if (lower.includes('primary')) return 'Primary';
+      if (lower.includes('secondary')) return 'Secondary';
+      return String(label || 'window').slice(0, 10);
     }
 
     function miniWindow(windowInfo) {
-      if (!windowInfo) return '<div class="mini"><div class="mini-label">n/a</div><div class="mini-meta">No data</div></div>';
+      if (!windowInfo) return '<div class="mini"><div class="mini-label">n/a</div><div class="mini-pct">--</div><div class="mini-bar"></div><div class="mini-reset">No data</div></div>';
       const pct = clampPct(windowInfo.usedPercent);
       const shortLabel = compactWindowLabel(windowInfo.label || 'window');
       return '<div class="mini">' +
         '<div class="mini-label">' + esc(shortLabel) + '</div>' +
+        '<div class="mini-pct" style="color:' + pctColor(pct) + ';">' + esc(Math.round(pct) + '%') + '</div>' +
         '<div class="mini-bar"><div class="mini-bar-fill" style="width:' + pct + '%"></div></div>' +
-        '<div class="mini-meta">' + esc(Math.round(pct) + '%  ' + (windowInfo.resetIn || 'n/a')) + '</div>' +
+        '<div class="mini-reset">' + esc(windowInfo.resetIn || 'n/a') + '</div>' +
       '</div>';
     }
 
@@ -1477,7 +1549,7 @@ function renderPage() {
           '</button>' +
           '<div class="provider">' +
             '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" />' +
-            '<div><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Unavailable)</span></div></div>' +
+            '<div class="provider-name-wrap"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Unavailable)</span></div><div class="provider-plan-block">Unavailable</div></div>' +
           '</div>' +
           '<div class="usage-error">' + esc(payload?.error || 'Usage unavailable') + '</div>' +
         '</article>';
@@ -1490,8 +1562,9 @@ function renderPage() {
         '</button>' +
         '<div class="provider">' +
           '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" />' +
-          '<div>' +
+          '<div class="provider-name-wrap">' +
             '<div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(' + esc(plan) + ')</span></div>' +
+            '<div class="provider-plan-block">' + esc(plan) + '</div>' +
             '<div class="provider-mini">' +
               miniWindow(payload.primary) +
               miniWindow(payload.secondary) +
@@ -1720,7 +1793,7 @@ const server = http.createServer(async (req, res) => {
       const mime = ext === '.svg' ? 'image/svg+xml' : ext === '.png' ? 'image/png' : 'application/octet-stream';
       res.writeHead(200, {
         'Content-Type': mime,
-        'Cache-Control': 'public, max-age=86400',
+        'Cache-Control': 'no-store, max-age=0',
         'Content-Length': data.length,
       });
       res.end(data);
