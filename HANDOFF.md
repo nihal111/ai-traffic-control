@@ -1,7 +1,11 @@
-# Handoff - Mobile ttyd Stack
+# Handoff - AI Traffic Control Mobile ttyd Stack
 
 Date: 2026-04-07
 Owner context: Nihal mobile terminal customization work
+
+## Project rename note
+This project was renamed from `MobileDev` to `AiTrafficControl` (display name: `AI Traffic Control`).
+All tracked repository paths and references should now use `AiTrafficControl`.
 
 ## Goal
 Maintain a custom mobile-friendly terminal on top of ttyd with nginx injection, while keeping persistence via tmux and minimizing moving parts.
