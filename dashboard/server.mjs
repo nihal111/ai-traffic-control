@@ -15,6 +15,8 @@ const SESSIONS_FILE = process.env.SESSIONS_FILE || path.join(__dirname, 'session
 const STATE_FILE = process.env.SESSIONS_STATE_FILE || path.join(__dirname, 'state', 'sessions-state.json');
 const RUN_DIR = process.env.SESSIONS_RUN_DIR || path.join(__dirname, 'run');
 const RUNTIME_DIR = process.env.SESSIONS_RUNTIME_DIR || path.join(__dirname, 'runtime');
+const REPO_ROOT = path.join(__dirname, '..');
+const PERSONAS_DIR = path.join(REPO_ROOT, 'personas');
 const TTYD_BIN = process.env.TTYD_BIN || '/opt/homebrew/bin/ttyd';
 const SHELL_BIN = process.env.SHELL_BIN || '/bin/zsh';
 const TMUX_BIN = process.env.TMUX_BIN || 'tmux';
@@ -35,6 +37,7 @@ const SLOT_RUN_RETENTION = Number(process.env.SLOT_RUN_RETENTION || 3);
 const RECENT_WORKDIR_LIMIT = 5;
 const TEMPLATE_NEW_BRAINSTORM = 'new_brainstorm';
 const TEMPLATE_CONTINUE_WORK = 'continue_work';
+const PERSONA_NONE = 'none';
 const PROVIDERS = new Set(['codex', 'claude', 'gemini']);
 const ENABLE_PROVIDER_AUTO_LAUNCH = process.env.ATC_AUTO_LAUNCH_PROVIDER !== '0';
 const PROVIDER_BOOT_COMMANDS = {
@@ -42,6 +45,56 @@ const PROVIDER_BOOT_COMMANDS = {
   claude: String(process.env.ATC_PROVIDER_BOOTSTRAP_CLAUDE || 'claude --dangerously-skip-permissions').trim(),
   gemini: String(process.env.ATC_PROVIDER_BOOTSTRAP_GEMINI || 'gemini --yolo').trim(),
 };
+const PERSONA_CONFIGS = [
+  {
+    id: PERSONA_NONE,
+    label: 'Vanilla',
+    description: 'Run without a custom persona prompt.',
+    accent: '#64748b',
+    promptFile: null,
+  },
+  {
+    id: 'brainstormer',
+    label: 'Brainstormer',
+    description: 'Explore ideas, surface options, and converge on next steps.',
+    accent: '#f59e0b',
+    promptFile: 'brainstormer.md',
+  },
+  {
+    id: 'refactor',
+    label: 'Refactor',
+    description: 'Simplify code, reduce duplication, and improve structure safely.',
+    accent: '#60a5fa',
+    promptFile: 'refactor.md',
+  },
+  {
+    id: 'tester',
+    label: 'Tester',
+    description: 'Focus on behavior, test quality, and meaningful coverage.',
+    accent: '#34d399',
+    promptFile: 'tester.md',
+  },
+  {
+    id: 'reviewer',
+    label: 'Reviewer',
+    description: 'Inspect changes critically for bugs, regressions, and gaps.',
+    accent: '#f472b6',
+    promptFile: 'reviewer.md',
+  },
+  {
+    id: 'slot_machine_bandit',
+    label: 'Slot Machine Bandit',
+    description: 'Hunt for the most promising next thread or re-entry point.',
+    accent: '#a78bfa',
+    promptFile: 'slot-machine-bandit.md',
+  },
+];
+const PERSONA_BY_ID = new Map(PERSONA_CONFIGS.map((persona) => [persona.id, persona]));
+const PERSONA_SELECTABLE = PERSONA_CONFIGS.filter((persona) => persona.id !== PERSONA_NONE);
+const PERSONA_ALIASES = new Map([
+  ['lucky_dip_explorer', 'slot_machine_bandit'],
+  ['lucky-dip-explorer', 'slot_machine_bandit'],
+]);
 
 let usageCache = { value: null, fetchedAt: 0, pending: null };
 
@@ -139,6 +192,38 @@ function providerBootCommand(provider) {
   const normalized = normalizeProvider(provider);
   const command = PROVIDER_BOOT_COMMANDS[normalized];
   return typeof command === 'string' ? command.trim() : '';
+}
+
+function normalizePersonaId(personaId, fallbackPersona = PERSONA_NONE) {
+  const normalized = String(personaId || '').trim().toLowerCase();
+  if (!normalized) return normalizePersonaId(fallbackPersona, PERSONA_NONE);
+  const canonical = normalized.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const alias = PERSONA_ALIASES.get(canonical) || canonical;
+  return PERSONA_BY_ID.has(alias) ? alias : PERSONA_NONE;
+}
+
+function personaConfig(personaId) {
+  return PERSONA_BY_ID.get(normalizePersonaId(personaId)) || PERSONA_BY_ID.get(PERSONA_NONE);
+}
+
+async function readPersonaPrompt(personaId) {
+  const persona = personaConfig(personaId);
+  if (!persona || persona.id === PERSONA_NONE || !persona.promptFile) return null;
+  const promptPath = path.join(PERSONAS_DIR, persona.promptFile);
+  const raw = await fs.readFile(promptPath, 'utf8');
+  return String(raw || '').trimEnd();
+}
+
+function shellPromptSubstitution(promptText) {
+  const encoded = Buffer.from(String(promptText || ''), 'utf8').toString('base64');
+  return `$(node -e "process.stdout.write(Buffer.from(process.argv[1],'base64').toString('utf8'))" ${shSingle(encoded)})`;
+}
+
+function buildProviderLaunchCommand(provider, workdir, promptText) {
+  const baseCommand = providerBootCommand(provider);
+  const workdirPrefix = workdir ? `cd ${shSingle(workdir)} && ` : '';
+  if (!promptText) return `${workdirPrefix}${baseCommand}`;
+  return `${workdirPrefix}${baseCommand} "${shellPromptSubstitution(promptText)}"`;
 }
 
 function normalizeTemplateId(templateId, fallbackTemplate = TEMPLATE_NEW_BRAINSTORM) {
@@ -362,6 +447,7 @@ function defaultSessionState(cfg) {
     workdir: DEFAULT_WORKDIR,
     provider: 'codex',
     templateId: TEMPLATE_NEW_BRAINSTORM,
+    personaId: PERSONA_NONE,
     agentType: 'none',
     spawnedAt: null,
     runId: null,
@@ -394,6 +480,7 @@ async function loadState() {
     if (!merged.sessions[slot.name].workdir) merged.sessions[slot.name].workdir = DEFAULT_WORKDIR;
     merged.sessions[slot.name].provider = normalizeProvider(merged.sessions[slot.name].provider);
     merged.sessions[slot.name].templateId = normalizeTemplateId(merged.sessions[slot.name].templateId);
+    merged.sessions[slot.name].personaId = normalizePersonaId(merged.sessions[slot.name].personaId);
     if (!merged.sessions[slot.name].taskTitle) merged.sessions[slot.name].taskTitle = `${slot.name} task`;
     if (!merged.sessions[slot.name].agentType) merged.sessions[slot.name].agentType = 'none';
     if (!Object.hasOwn(merged.sessions[slot.name], 'runId')) merged.sessions[slot.name].runId = null;
@@ -666,9 +753,10 @@ async function ensureTmuxSlotWindow(sessionName, workdir, shellConfig) {
   if (!selected.ok) throw new Error(`failed to select tmux window ${sessionName}:${TMUX_SLOT_WINDOW}: ${selected.stderr || 'unknown error'}`);
 }
 
-async function launchProviderInTmuxSlot(sessionName, provider) {
+async function launchProviderInTmuxSlot(sessionName, provider, sessionState) {
   if (!ENABLE_PROVIDER_AUTO_LAUNCH) return;
-  const command = providerBootCommand(provider);
+  const personaPrompt = await readPersonaPrompt(sessionState?.personaId);
+  const command = buildProviderLaunchCommand(provider, sessionState?.workdir || DEFAULT_WORKDIR, personaPrompt);
   if (!command) return;
 
   const target = `${sessionName}:${TMUX_SLOT_WINDOW}.0`;
@@ -799,10 +887,15 @@ function buildAtcZshrc(env) {
   ].join('\n');
 }
 
-async function ensureSlotRuntime(slotName, runId, workdir) {
+async function ensureSlotRuntime(slotName, runId, workdir, sessionState = {}) {
   const paths = slotRuntimePaths(slotName);
   await fs.mkdir(paths.currentDir, { recursive: true });
   await fs.mkdir(paths.zdotdir, { recursive: true });
+
+  const provider = normalizeProvider(sessionState.provider);
+  const templateId = normalizeTemplateId(sessionState.templateId);
+  const personaId = normalizePersonaId(sessionState.personaId);
+  const persona = personaConfig(personaId);
 
   const now = new Date().toISOString();
   const meta = {
@@ -813,6 +906,10 @@ async function ensureSlotRuntime(slotName, runId, workdir) {
     cwd: workdir || DEFAULT_WORKDIR,
     eventCount: 0,
     shellStartedAt: now,
+    provider,
+    templateId,
+    personaId,
+    personaLabel: persona?.label || 'Vanilla',
   };
   const derived = {
     slot: slotName,
@@ -824,6 +921,10 @@ async function ensureSlotRuntime(slotName, runId, workdir) {
     eventCount: 0,
     shellStartedAt: now,
     durationMs: null,
+    provider,
+    templateId,
+    personaId,
+    personaLabel: persona?.label || 'Vanilla',
   };
 
   await writeJsonAtomic(paths.metaFile, meta);
@@ -843,6 +944,9 @@ async function ensureSlotRuntime(slotName, runId, workdir) {
     ATC_SOURCE_USER_ZSHRC: SOURCE_USER_ZSHRC ? '1' : '0',
     ATC_USER_ZSHRC: USER_ZSHRC_PATH,
     ATC_USER_HISTORY_FILE: USER_HISTORY_FILE,
+    ATC_PROVIDER: provider,
+    ATC_TEMPLATE_ID: templateId,
+    ATC_PERSONA_ID: personaId,
   };
 
   await fs.writeFile(paths.zshrcFile, buildAtcZshrc(hookEnv), { mode: 0o644 });
@@ -1059,7 +1163,7 @@ async function spawnSessionBackend(slot, sessionState, runtimeEnv, shellConfig) 
   const tmuxSessionName = tmuxSessionNameForSlot(slot.name);
   if (ENABLE_TMUX_BACKEND) {
     await ensureTmuxSlotWindow(tmuxSessionName, slotWorkdir, shellConfig);
-    await launchProviderInTmuxSlot(tmuxSessionName, sessionState.provider);
+    await launchProviderInTmuxSlot(tmuxSessionName, sessionState.provider, sessionState);
   }
   const ttydCommandArgs = ENABLE_TMUX_BACKEND
     ? [TMUX_BIN, 'attach-session', '-t', `${tmuxSessionName}:${TMUX_SLOT_WINDOW}`]
@@ -1208,14 +1312,10 @@ async function spawnSlotByName(name, options = {}) {
   const provider = normalizeProvider(options.provider);
   const templateProvided = typeof options.templateId === 'string' && options.templateId.trim();
   const templateId = normalizeTemplateId(options.templateId, TEMPLATE_CONTINUE_WORK);
+  const personaId = normalizePersonaId(options.personaId, PERSONA_NONE);
   const requestedWorkdir = typeof options.workdir === 'string' ? options.workdir : '';
   const effectiveWorkdirInput = requestedWorkdir.trim() || (templateProvided ? HOME_DIRECTORY : (st.workdir || DEFAULT_WORKDIR));
   const workdir = await resolveWorkdirForSpawn(templateId, effectiveWorkdirInput);
-
-  st.provider = provider;
-  st.templateId = templateId;
-  st.workdir = workdir;
-  if (templateId === TEMPLATE_CONTINUE_WORK) appendRecentWorkdir(state, workdir);
 
   const alreadyUp = await checkPortOpen(slot.backendPort);
   if (alreadyUp) {
@@ -1227,8 +1327,13 @@ async function spawnSlotByName(name, options = {}) {
   }
 
   const runId = makeRunId();
+  st.provider = provider;
+  st.templateId = templateId;
+  st.personaId = personaId;
+  st.workdir = workdir;
+  if (templateId === TEMPLATE_CONTINUE_WORK) appendRecentWorkdir(state, workdir);
   await rotateSlotCurrent(slot.name, st.runId);
-  const { paths, hookEnv } = await ensureSlotRuntime(slot.name, runId, st.workdir);
+  const { paths, hookEnv } = await ensureSlotRuntime(slot.name, runId, st.workdir, st);
   await emitSlotEvent(hookEnv, 'shell_start', st.workdir || DEFAULT_WORKDIR, '', '');
   const pid = await spawnSessionBackend(slot, st, { ...hookEnv }, { zdotdir: paths.zdotdir });
   const backendReady = await waitForTtydReady(slot.backendPort, 10000);
@@ -1354,6 +1459,12 @@ function renderPage() {
       min-height: 100vh;
       padding: 16px;
     }
+    body.modal-open {
+      overflow: hidden;
+      touch-action: none;
+      -webkit-overflow-scrolling: none;
+      overscroll-behavior: none;
+    }
     .shell { max-width: 980px; margin: 0 auto; }
     .title-wrap {
       text-align: center;
@@ -1383,6 +1494,7 @@ function renderPage() {
       padding: 14px;
       margin-top: 14px;
       box-shadow: 0 8px 28px #0000002e;
+      contain: layout;
     }
     .usage-stack { display: grid; gap: 10px; }
     .usage-row {
@@ -1427,9 +1539,8 @@ function renderPage() {
       padding-right: 34px;
     }
     .provider-logo {
-      width: 100%;
-      height: 100%;
-      min-height: 74px;
+      width: 72px;
+      height: 72px;
       border-radius: 10px;
       border: 1px solid #d7e4ff;
       background: #ffffff;
@@ -1596,6 +1707,7 @@ function renderPage() {
       position: relative;
       overflow: hidden;
       transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+      min-height: 160px;
     }
     .session::before {
       content: "";
@@ -1619,8 +1731,21 @@ function renderPage() {
       to { transform: translateX(100%); }
     }
     .session-inner { padding: 14px 52px 14px 14px; }
-    .head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
     .name { font-size: 17px; font-weight: 700; }
+    .head-badges {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 6px;
+      max-width: 62%;
+    }
     .badge {
       font-size: 11px;
       line-height: 1;
@@ -1635,6 +1760,20 @@ function renderPage() {
     .badge.active { border-color: #0f8e68; background: #0a3f31; color: #8ef6d3; }
     .badge.starting { border-color: #4a4d78; background: #20274a; color: #d5ddff; }
     .badge.idle { border-color: #72570f; background: #3f300c; color: #ffd98a; }
+    .persona-badge {
+      display: inline-flex;
+      align-items: center;
+      font-size: 11px;
+      line-height: 1;
+      padding: 6px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--persona-accent, #5b73b4);
+      color: var(--persona-accent, #cfe0ff);
+      background: #151f38;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      white-space: nowrap;
+    }
 
     .line { color: #d8e2ff; font-size: 13px; margin: 3px 0; }
     .line.muted { color: var(--muted); }
@@ -1743,6 +1882,7 @@ function renderPage() {
       padding: 10px;
       min-height: 108px;
       touch-action: pan-y;
+      contain: layout;
     }
     .provider-select-head {
       display: grid;
@@ -1803,6 +1943,42 @@ function renderPage() {
       color: #adc2ea;
       font-size: 12px;
       line-height: 1.25;
+    }
+    .persona-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .persona-btn {
+      border: 1px solid #3a4f82;
+      border-radius: 11px;
+      background: #111b35;
+      color: #dce7ff;
+      text-align: left;
+      padding: 10px;
+      cursor: pointer;
+      min-height: 86px;
+    }
+    .persona-btn.active {
+      border-color: var(--persona-accent, #5f87e0);
+      box-shadow: 0 0 0 1px #ffffff18 inset;
+      background: #15254a;
+    }
+    .persona-name {
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .persona-desc {
+      color: #adc2ea;
+      font-size: 12px;
+      line-height: 1.25;
+    }
+    .persona-note {
+      margin-top: 8px;
+      color: #91a6cf;
+      font-size: 11px;
+      line-height: 1.35;
     }
     .workdir-row {
       border: 1px solid #344975;
@@ -1972,34 +2148,38 @@ function renderPage() {
     <div class="modal">
       <div class="modal-head">
         <div class="modal-title" id="intent-title">Start Session</div>
-        <button class="modal-close" id="intent-close" aria-label="Close intent modal">&times;</button>
+        <button type="button" class="modal-close" id="intent-close" aria-label="Close intent modal">&times;</button>
       </div>
       <div class="intent-block">
         <div class="intent-label">Provider</div>
         <div class="provider-carousel">
-          <button class="carousel-nav" id="provider-prev" aria-label="Previous provider">&#8592;</button>
+          <button type="button" class="carousel-nav" id="provider-prev" aria-label="Previous provider">&#8592;</button>
           <div id="provider-select"></div>
-          <button class="carousel-nav" id="provider-next" aria-label="Next provider">&#8594;</button>
+          <button type="button" class="carousel-nav" id="provider-next" aria-label="Next provider">&#8594;</button>
         </div>
       </div>
       <div class="intent-block">
         <div class="intent-label">Template</div>
         <div class="template-grid">
-          <button class="template-btn" id="template-new" data-template="new_brainstorm">
+          <button type="button" class="template-btn" id="template-new" data-template="new_brainstorm">
             <div class="template-title">New brainstorm</div>
             <div class="template-subtitle">Brainstorm on a new idea</div>
           </button>
-          <button class="template-btn" id="template-continue" data-template="continue_work">
+          <button type="button" class="template-btn" id="template-continue" data-template="continue_work">
             <div class="template-title">Continue work</div>
             <div class="template-subtitle">Continue WIP</div>
           </button>
         </div>
       </div>
+      <div class="intent-block">
+        <div class="intent-label">Persona</div>
+        <div id="persona-selector"></div>
+      </div>
       <div class="intent-block" id="workdir-block" style="display:none;">
         <div class="intent-label">Working Directory</div>
         <div class="workdir-row">
           <div class="workdir-path" id="workdir-path"></div>
-          <button class="choose-btn" id="choose-workdir">Choose folder</button>
+          <button type="button" class="choose-btn" id="choose-workdir">Choose folder</button>
         </div>
         <div class="recent-workdirs">
           <div class="recent-workdirs-label">Recent Directories</div>
@@ -2007,8 +2187,8 @@ function renderPage() {
         </div>
       </div>
       <div class="modal-actions">
-        <button class="btn-secondary" id="intent-cancel">Cancel</button>
-        <button class="btn-primary" id="intent-confirm">Start session</button>
+        <button type="button" class="btn-secondary" id="intent-cancel">Cancel</button>
+        <button type="button" class="btn-primary" id="intent-confirm">Start session</button>
       </div>
     </div>
   </div>
@@ -2017,12 +2197,12 @@ function renderPage() {
     <div class="modal">
       <div class="modal-head">
         <div class="modal-title">Select Working Directory</div>
-        <button class="modal-close" id="dir-picker-close" aria-label="Close directory picker">&times;</button>
+        <button type="button" class="modal-close" id="dir-picker-close" aria-label="Close directory picker">&times;</button>
       </div>
       <div class="workdir-path" id="dir-picker-path"></div>
       <div class="picker-controls">
-        <button class="btn-secondary" id="dir-picker-up">Up</button>
-        <button class="btn-primary" id="dir-picker-select">Use this folder</button>
+        <button type="button" class="btn-secondary" id="dir-picker-up">Up</button>
+        <button type="button" class="btn-primary" id="dir-picker-select">Use this folder</button>
       </div>
       <div class="picker-list" id="dir-picker-list"></div>
     </div>
@@ -2032,13 +2212,13 @@ function renderPage() {
     <div class="modal">
       <div class="modal-head">
         <div class="modal-title">Kill Session</div>
-        <button class="modal-close" id="kill-close" aria-label="Close kill confirmation">&times;</button>
+        <button type="button" class="modal-close" id="kill-close" aria-label="Close kill confirmation">&times;</button>
       </div>
       <p class="confirm-text" id="kill-text"></p>
       <p class="confirm-text">The associated tmux session will also be killed.</p>
       <div class="modal-actions">
-        <button class="btn-secondary" id="kill-no">No</button>
-        <button class="btn-danger" id="kill-yes">Yes, kill session</button>
+        <button type="button" class="btn-secondary" id="kill-no">No</button>
+        <button type="button" class="btn-danger" id="kill-yes">Yes, kill session</button>
       </div>
     </div>
   </div>
@@ -2047,6 +2227,9 @@ function renderPage() {
     const refreshing = new Set();
     const spawning = new Set();
     const HOME_DIRECTORY = ${JSON.stringify(HOME_DIRECTORY)};
+    const PERSONA_NONE = ${JSON.stringify(PERSONA_NONE)};
+    const PERSONA_CONFIGS = ${JSON.stringify(PERSONA_CONFIGS)};
+    const PERSONA_MAP = new Map(PERSONA_CONFIGS.map((persona) => [persona.id, persona]));
     const PROVIDER_ORDER = [
       { key: 'codex', title: 'Codex' },
       { key: 'claude', title: 'Claude' },
@@ -2058,6 +2241,7 @@ function renderPage() {
       name: '',
       providerKey: 'codex',
       templateId: 'new_brainstorm',
+      personaId: PERSONA_NONE,
       workdir: HOME_DIRECTORY,
     };
     const pickerState = {
@@ -2071,6 +2255,10 @@ function renderPage() {
       open: false,
       name: '',
     };
+
+    function toggleBodyScroll(locked) {
+      document.body.classList.toggle('modal-open', !!locked);
+    }
 
     function esc(v) {
       return String(v)
@@ -2150,11 +2338,11 @@ function renderPage() {
       const isExpanded = usageExpanded.has(providerKey);
       if (!payload || !payload.ok) {
         return '<article class="usage-row error">' +
-          '<button class="usage-toggle" data-toggle-provider="' + esc(providerKey) + '" aria-expanded="false" aria-label="Toggle ' + esc(title) + ' details">' +
+          '<button type="button" class="usage-toggle" data-toggle-provider="' + esc(providerKey) + '" aria-expanded="false" aria-label="Toggle ' + esc(title) + ' details">' +
             '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5"/></svg>' +
           '</button>' +
           '<div class="provider">' +
-            '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" />' +
+            '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="72" height="72" />' +
             '<div class="provider-name-wrap"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Unavailable)</span></div><div class="provider-plan-block">Unavailable</div></div>' +
           '</div>' +
           '<div class="usage-error">' + esc(payload?.error || 'Usage unavailable') + '</div>' +
@@ -2163,11 +2351,11 @@ function renderPage() {
 
       const plan = compactPlan(payload.plan || 'connected');
       return '<article class="usage-row ' + (isExpanded ? 'expanded' : '') + '" data-provider="' + esc(providerKey) + '">' +
-        '<button class="usage-toggle" data-toggle-provider="' + esc(providerKey) + '" aria-expanded="' + (isExpanded ? 'true' : 'false') + '" aria-label="Toggle ' + esc(title) + ' details">' +
+        '<button type="button" class="usage-toggle" data-toggle-provider="' + esc(providerKey) + '" aria-expanded="' + (isExpanded ? 'true' : 'false') + '" aria-label="Toggle ' + esc(title) + ' details">' +
           '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5"/></svg>' +
         '</button>' +
         '<div class="provider">' +
-          '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" />' +
+          '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="72" height="72" />' +
           '<div class="provider-name-wrap">' +
             '<div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(' + esc(plan) + ')</span></div>' +
             '<div class="provider-plan-block">' + esc(plan) + '</div>' +
@@ -2208,6 +2396,38 @@ function renderPage() {
       return cleaned.slice(0, max - 1) + '…';
     }
 
+    function normalizePersonaId(personaId) {
+      const raw = String(personaId || '').trim().toLowerCase();
+      if (!raw) return PERSONA_NONE;
+      const canonical = raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+      return PERSONA_MAP.has(canonical) ? canonical : PERSONA_NONE;
+    }
+
+    function personaForId(personaId) {
+      return PERSONA_MAP.get(normalizePersonaId(personaId)) || PERSONA_MAP.get(PERSONA_NONE);
+    }
+
+    function renderPersonaSelector() {
+      return '<div class="persona-grid">' +
+        PERSONA_CONFIGS.map((persona) => {
+          const active = normalizePersonaId(intentState.personaId) === persona.id;
+          const classes = ['persona-btn'];
+          if (active) classes.push('active');
+          return '<button type="button" class="' + classes.join(' ') + '" data-persona-id="' + esc(persona.id) + '" aria-pressed="' + (active ? 'true' : 'false') + '" style="--persona-accent:' + esc(persona.accent) + '">' +
+            '<div class="persona-name">' + esc(persona.label) + '</div>' +
+            '<div class="persona-desc">' + esc(persona.description) + '</div>' +
+          '</button>';
+        }).join('') +
+      '</div>' +
+      '<div class="persona-note">Selected at start only. Changing persona later means killing and respawning the session.</div>';
+    }
+
+    function personaBadge(personaId) {
+      const persona = personaForId(personaId);
+      if (!persona || persona.id === PERSONA_NONE) return '';
+      return '<span class="persona-badge" data-persona-badge="1" style="--persona-accent:' + esc(persona.accent) + '">' + esc(persona.label) + '</span>';
+    }
+
     function hostForPort(port) {
       return window.location.protocol + '//' + window.location.hostname + ':' + port;
     }
@@ -2241,16 +2461,19 @@ function renderPage() {
       intentState.name = name;
       intentState.providerKey = 'codex';
       intentState.templateId = 'new_brainstorm';
+      intentState.personaId = PERSONA_NONE;
       intentState.workdir = HOME_DIRECTORY;
       renderIntentModal();
       const modal = document.getElementById('intent-modal');
       if (modal) modal.classList.add('open');
+      toggleBodyScroll(true);
     }
 
     function closeIntentModal() {
       intentState.open = false;
       const modal = document.getElementById('intent-modal');
       if (modal) modal.classList.remove('open');
+      toggleBodyScroll(false);
     }
 
     function openDirPicker() {
@@ -2261,12 +2484,14 @@ function renderPage() {
       loadDirectory(pickerState.path).catch((err) => {
         alert('Failed to list directories: ' + err.message);
       });
+      toggleBodyScroll(true);
     }
 
     function closeDirPicker() {
       pickerState.open = false;
       const modal = document.getElementById('dir-picker-modal');
       if (modal) modal.classList.remove('open');
+      if (!intentState.open && !killState.open) toggleBodyScroll(false);
     }
 
     function openKillModal(name) {
@@ -2276,6 +2501,7 @@ function renderPage() {
       if (text) text.textContent = 'Are you sure you want to kill the session ' + name + '?';
       const modal = document.getElementById('kill-modal');
       if (modal) modal.classList.add('open');
+      toggleBodyScroll(true);
     }
 
     function closeKillModal() {
@@ -2283,6 +2509,7 @@ function renderPage() {
       killState.name = '';
       const modal = document.getElementById('kill-modal');
       if (modal) modal.classList.remove('open');
+      toggleBodyScroll(false);
     }
 
     function activeProviderIndex() {
@@ -2303,7 +2530,7 @@ function renderPage() {
       if (!usage || !usage.ok) {
         return '<div class="provider-select-card" id="provider-select-card">' +
           '<div class="provider-select-head">' +
-            '<img class="provider-select-logo" src="' + esc(logo) + '" alt="' + esc(provider.title) + ' logo" loading="lazy" />' +
+            '<img class="provider-select-logo" src="' + esc(logo) + '" alt="' + esc(provider.title) + ' logo" loading="lazy" width="46" height="46" />' +
             '<div><div class="provider-select-name">' + esc(provider.title) + '</div><div class="provider-select-plan">Usage unavailable</div></div>' +
           '</div>' +
           '<div class="provider-select-windows">' + miniWindow(null) + miniWindow(null) + '</div>' +
@@ -2312,7 +2539,7 @@ function renderPage() {
       const plan = compactPlan(usage.plan || 'connected');
       return '<div class="provider-select-card" id="provider-select-card">' +
         '<div class="provider-select-head">' +
-          '<img class="provider-select-logo" src="' + esc(logo) + '" alt="' + esc(provider.title) + ' logo" loading="lazy" />' +
+          '<img class="provider-select-logo" src="' + esc(logo) + '" alt="' + esc(provider.title) + ' logo" loading="lazy" width="46" height="46" />' +
           '<div><div class="provider-select-name">' + esc(provider.title) + '</div><div class="provider-select-plan">' + esc(plan) + '</div></div>' +
         '</div>' +
         '<div class="provider-select-windows">' +
@@ -2336,6 +2563,9 @@ function renderPage() {
         btn.classList.toggle('active', template === intentState.templateId);
       }
 
+      const personaHost = document.getElementById('persona-selector');
+      if (personaHost) personaHost.innerHTML = renderPersonaSelector();
+
       const workdirBlock = document.getElementById('workdir-block');
       const workdirPath = document.getElementById('workdir-path');
       const recentList = document.getElementById('recent-workdirs-list');
@@ -2350,7 +2580,7 @@ function renderPage() {
             .slice(0, 5)
             .map((entry) => {
               const active = entry === intentState.workdir;
-              return '<button class="recent-workdir-btn ' + (active ? 'active' : '') + '" data-recent-workdir="' + esc(entry) + '">' + esc(entry) + '</button>';
+              return '<button type="button" class="recent-workdir-btn ' + (active ? 'active' : '') + '" data-recent-workdir="' + esc(entry) + '">' + esc(entry) + '</button>';
             })
             .join('');
         }
@@ -2382,7 +2612,7 @@ function renderPage() {
           listEl.innerHTML = '<div class="line muted">No subfolders here.</div>';
         } else {
           listEl.innerHTML = pickerState.directories
-            .map((entry) => '<button class="picker-item" data-dir-path="' + esc(entry.path) + '">' + esc(entry.name) + '</button>')
+            .map((entry) => '<button type="button" class="picker-item" data-dir-path="' + esc(entry.path) + '">' + esc(entry.name) + '</button>')
             .join('');
         }
       }
@@ -2418,19 +2648,26 @@ function renderPage() {
       const prev = document.getElementById('provider-prev');
       if (prev && prev.dataset.bound !== '1') {
         prev.dataset.bound = '1';
-        prev.addEventListener('click', function () { rotateProvider(-1); });
+        prev.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          rotateProvider(-1);
+        });
       }
       const next = document.getElementById('provider-next');
       if (next && next.dataset.bound !== '1') {
         next.dataset.bound = '1';
-        next.addEventListener('click', function () { rotateProvider(1); });
+        next.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          rotateProvider(1);
+        });
       }
 
       const templateButtons = document.querySelectorAll('[data-template]');
       for (const btn of templateButtons) {
         if (btn.dataset.bound === '1') continue;
         btn.dataset.bound = '1';
-        btn.addEventListener('click', function () {
+        btn.addEventListener('click', function (ev) {
+          ev.preventDefault();
           intentState.templateId = btn.getAttribute('data-template') || 'new_brainstorm';
           if (intentState.templateId === 'new_brainstorm') intentState.workdir = HOME_DIRECTORY;
           renderIntentModal();
@@ -2440,7 +2677,8 @@ function renderPage() {
       const chooseWorkdir = document.getElementById('choose-workdir');
       if (chooseWorkdir && chooseWorkdir.dataset.bound !== '1') {
         chooseWorkdir.dataset.bound = '1';
-        chooseWorkdir.addEventListener('click', function () {
+        chooseWorkdir.addEventListener('click', function (ev) {
+          ev.preventDefault();
           openDirPicker();
         });
       }
@@ -2451,9 +2689,22 @@ function renderPage() {
         recentList.addEventListener('click', function (ev) {
           const btn = ev.target.closest('[data-recent-workdir]');
           if (!btn) return;
+          ev.preventDefault();
           const nextWorkdir = btn.getAttribute('data-recent-workdir');
           if (!nextWorkdir) return;
           intentState.workdir = nextWorkdir;
+          renderIntentModal();
+        });
+      }
+
+      const personaHost = document.getElementById('persona-selector');
+      if (personaHost && personaHost.dataset.bound !== '1') {
+        personaHost.dataset.bound = '1';
+        personaHost.addEventListener('click', function (ev) {
+          const btn = ev.target.closest('[data-persona-id]');
+          if (!btn) return;
+          ev.preventDefault();
+          intentState.personaId = normalizePersonaId(btn.getAttribute('data-persona-id'));
           renderIntentModal();
         });
       }
@@ -2477,9 +2728,9 @@ function renderPage() {
 
     function bindStaticModalInteractions() {
       const intentClose = document.getElementById('intent-close');
-      if (intentClose) intentClose.addEventListener('click', closeIntentModal);
+      if (intentClose) intentClose.addEventListener('click', function (ev) { ev.preventDefault(); closeIntentModal(); });
       const intentCancel = document.getElementById('intent-cancel');
-      if (intentCancel) intentCancel.addEventListener('click', closeIntentModal);
+      if (intentCancel) intentCancel.addEventListener('click', function (ev) { ev.preventDefault(); closeIntentModal(); });
       const intentOverlay = document.getElementById('intent-modal');
       if (intentOverlay) {
         intentOverlay.addEventListener('click', function (ev) {
@@ -2489,11 +2740,13 @@ function renderPage() {
 
       const intentConfirm = document.getElementById('intent-confirm');
       if (intentConfirm) {
-        intentConfirm.addEventListener('click', async function () {
+        intentConfirm.addEventListener('click', async function (ev) {
+          ev.preventDefault();
           if (!intentState.name) return;
           const payload = {
             provider: intentState.providerKey,
             templateId: intentState.templateId,
+            personaId: intentState.personaId,
             workdir: intentState.templateId === 'continue_work' ? intentState.workdir : HOME_DIRECTORY,
           };
           closeIntentModal();
@@ -2502,7 +2755,7 @@ function renderPage() {
       }
 
       const pickerClose = document.getElementById('dir-picker-close');
-      if (pickerClose) pickerClose.addEventListener('click', closeDirPicker);
+      if (pickerClose) pickerClose.addEventListener('click', function (ev) { ev.preventDefault(); closeDirPicker(); });
       const pickerOverlay = document.getElementById('dir-picker-modal');
       if (pickerOverlay) {
         pickerOverlay.addEventListener('click', function (ev) {
@@ -2512,7 +2765,8 @@ function renderPage() {
 
       const pickerUp = document.getElementById('dir-picker-up');
       if (pickerUp) {
-        pickerUp.addEventListener('click', function () {
+        pickerUp.addEventListener('click', function (ev) {
+          ev.preventDefault();
           if (!pickerState.parent) return;
           loadDirectory(pickerState.parent).catch((err) => {
             alert('Failed to go up: ' + err.message);
@@ -2522,7 +2776,8 @@ function renderPage() {
 
       const pickerSelect = document.getElementById('dir-picker-select');
       if (pickerSelect) {
-        pickerSelect.addEventListener('click', function () {
+        pickerSelect.addEventListener('click', function (ev) {
+          ev.preventDefault();
           intentState.workdir = pickerState.path || HOME_DIRECTORY;
           closeDirPicker();
           renderIntentModal();
@@ -2530,9 +2785,9 @@ function renderPage() {
       }
 
       const killClose = document.getElementById('kill-close');
-      if (killClose) killClose.addEventListener('click', closeKillModal);
+      if (killClose) killClose.addEventListener('click', function (ev) { ev.preventDefault(); closeKillModal(); });
       const killNo = document.getElementById('kill-no');
-      if (killNo) killNo.addEventListener('click', closeKillModal);
+      if (killNo) killNo.addEventListener('click', function (ev) { ev.preventDefault(); closeKillModal(); });
       const killOverlay = document.getElementById('kill-modal');
       if (killOverlay) {
         killOverlay.addEventListener('click', function (ev) {
@@ -2541,7 +2796,8 @@ function renderPage() {
       }
       const killYes = document.getElementById('kill-yes');
       if (killYes) {
-        killYes.addEventListener('click', async function () {
+        killYes.addEventListener('click', async function (ev) {
+          ev.preventDefault();
           if (!killState.name) return;
           const target = killState.name;
           closeKillModal();
@@ -2577,6 +2833,7 @@ function renderPage() {
       refresh().catch(() => {});
       try {
         const payload = { name: name, ...(options || {}) };
+        payload.personaId = normalizePersonaId(payload.personaId);
         await apiPost('/api/sessions/spawn', payload);
       } catch (err) {
         alert('Spawn failed for ' + name + ': ' + err.message);
@@ -2608,17 +2865,21 @@ function renderPage() {
       const isActive = s.status === 'active' && s.backendActive;
       const isSpawning = spawning.has(s.name);
       const hasAgent = !!(s.telemetry && s.telemetry.agentType && s.telemetry.agentType !== 'none');
+      const personaId = normalizePersonaId(s.personaId);
       const actionText = isSpawning ? 'Starting terminal…' : (isActive ? 'Tap to connect' : 'Tap to start');
       const actionClass = isSpawning ? 'color-starting' : (isActive ? 'color-active' : 'color-idle');
       const badgeClass = isSpawning ? 'starting' : (isActive ? 'active' : 'idle');
       const badgeText = isSpawning ? 'starting' : (isActive ? 'active' : 'idle');
 
-      return '<article class="session tap ' + (isSpawning ? 'spawning' : '') + '" data-name="' + esc(s.name) + '" data-active="' + (isActive ? '1' : '0') + '" data-spawning="' + (isSpawning ? '1' : '0') + '">' +
-        '<button class="kill" ' + (isActive ? '' : 'disabled') + ' data-kill="1" data-name="' + esc(s.name) + '" aria-label="Kill ' + esc(s.name) + '">&times;</button>' +
+      return '<article class="session tap ' + (isSpawning ? 'spawning' : '') + '" data-name="' + esc(s.name) + '" data-persona-id="' + esc(personaId) + '" data-active="' + (isActive ? '1' : '0') + '" data-spawning="' + (isSpawning ? '1' : '0') + '">' +
+        '<button type="button" class="kill" ' + (isActive ? '' : 'disabled') + ' data-kill="1" data-name="' + esc(s.name) + '" aria-label="Kill ' + esc(s.name) + '">&times;</button>' +
         '<div class="session-inner">' +
           '<div class="head">' +
             '<div class="name">' + esc(s.name) + '</div>' +
-            '<span class="badge ' + esc(badgeClass) + '">' + esc(badgeText) + '</span>' +
+            '<div class="head-badges">' +
+              '<span class="badge ' + esc(badgeClass) + '">' + esc(badgeText) + '</span>' +
+              personaBadge(personaId) +
+            '</div>' +
           '</div>' +
           '<div class="line"><strong>Task:</strong> ' + esc(s.taskTitle || 'Not set') + '</div>' +
           '<div class="line"><strong>Workdir:</strong> ' + esc(s.workdir || 'Not set') + '</div>' +
@@ -2690,13 +2951,18 @@ function renderPage() {
         providerUsageRow('claude', 'Claude', usage.claude),
         providerUsageRow('gemini', 'Gemini', usage.gemini),
       ];
-      usageGrid.innerHTML = rows.join('');
-      bindUsageInteractions();
+      const nextUsageHtml = rows.join('');
+      if (usageGrid && usageGrid.innerHTML !== nextUsageHtml) {
+        usageGrid.innerHTML = nextUsageHtml;
+        bindUsageInteractions();
+      }
 
       const sessionsEl = document.getElementById('sessions');
-      sessionsEl.innerHTML = sessions.map(sessionCard).join('') || '<div class="line muted">No sessions configured.</div>';
-      bindSessionInteractions(sessions);
-      if (intentState.open) renderIntentModal();
+      const nextSessionsHtml = sessions.map(sessionCard).join('') || '<div class="line muted">No sessions configured.</div>';
+      if (sessionsEl && sessionsEl.innerHTML !== nextSessionsHtml) {
+        sessionsEl.innerHTML = nextSessionsHtml;
+        bindSessionInteractions(sessions);
+      }
     }
 
     bindStaticModalInteractions();
@@ -2774,7 +3040,8 @@ const server = http.createServer(async (req, res) => {
       const hasTemplate = typeof body.templateId === 'string' && body.templateId.trim();
       const templateId = hasTemplate ? normalizeTemplateId(body.templateId, TEMPLATE_NEW_BRAINSTORM) : undefined;
       const workdir = typeof body.workdir === 'string' ? body.workdir : '';
-      await spawnSlotByName(name, { provider, templateId, workdir });
+      const personaId = typeof body.personaId === 'string' && body.personaId.trim() ? normalizePersonaId(body.personaId, PERSONA_NONE) : undefined;
+      await spawnSlotByName(name, { provider, templateId, workdir, personaId });
       json(res, 200, { ok: true, name });
     } catch (error) {
       const message = error.message || 'spawn failed';
@@ -2840,4 +3107,10 @@ if (process.env.DASHBOARD_TEST_IMPORT !== '1') {
   await startDashboardServer();
 }
 
-export { fetchCodexbarUsage };
+export {
+  buildProviderLaunchCommand,
+  fetchCodexbarUsage,
+  normalizePersonaId,
+  personaConfig,
+  PERSONA_CONFIGS,
+};

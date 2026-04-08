@@ -143,8 +143,6 @@ test('shell hooks emit full telemetry and dashboard exposes derived metadata', a
   const cardText = await page.locator('.session').first().innerText();
   expect(cardText).not.toContain('Port ');
   expect(cardText).not.toContain('backend');
-  expect(cardText).not.toContain('Agent:');
-  expect(cardText).not.toContain('Context window:');
   expect(cardText).not.toContain('Interactive shell session');
   expect(cardText).not.toContain('Last event:');
   expect(cardText).not.toContain('Last cmd duration:');

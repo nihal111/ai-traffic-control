@@ -129,6 +129,7 @@ export class DashboardHarness {
         DEFAULT_SESSION_WORKDIR: this.workdir,
         ENABLE_SHELL_HOOKS: '1',
         ENABLE_TMUX_BACKEND: '1',
+        ATC_AUTO_LAUNCH_PROVIDER: '0',
         TELEMETRY_INGEST_MS: String(this.telemetryIngestMs),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -193,8 +194,8 @@ export class DashboardHarness {
   }
 
   /** Spawn the session and wait for the backend to become active. */
-  async spawnAndWaitForBackend(timeoutMs = 12000) {
-    await this.api('/api/sessions/spawn', 'POST', { name: this.slotName });
+  async spawnAndWaitForBackend(timeoutMs = 12000, payload = {}) {
+    await this.api('/api/sessions/spawn', 'POST', { name: this.slotName, ...payload });
     await waitFor(async () => {
       const sessions = await this.api('/api/sessions');
       const slot = sessions.sessions.find((s) => s.name === this.slotName);
