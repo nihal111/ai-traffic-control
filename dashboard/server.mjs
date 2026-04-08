@@ -1409,6 +1409,7 @@ async function killSlotByName(name) {
   st.pid = null;
   st.runId = null;
   st.error = null;
+  st.personaId = PERSONA_NONE;
   st.lastExitAt = new Date().toISOString();
   st.spawnedAt = null;
   st.firstInteractionAt = null;
@@ -1743,7 +1744,7 @@ function renderPage() {
       border-radius: 14px;
       background: linear-gradient(130deg, #162449 0%, #111831 60%, #111831 100%);
       position: relative;
-      overflow: hidden;
+      overflow: visible;
       transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
       min-height: 128px;
       display: grid;
@@ -1782,10 +1783,10 @@ function renderPage() {
     }
     .session-persona-hat {
       position: absolute;
-      top: -4px;
-      left: -8px;
-      width: 54px;
-      height: 36px;
+      top: -8px;
+      left: -10px;
+      width: 62px;
+      height: 42px;
       transform: rotate(-32deg);
       z-index: 2;
       filter: drop-shadow(0 3px 5px rgba(0, 0, 0, 0.32));
@@ -1974,23 +1975,54 @@ function renderPage() {
     }
     .provider-carousel {
       display: grid;
-      grid-template-columns: 34px 1fr 34px;
-      gap: 8px;
-      align-items: center;
-    }
-    .carousel-nav {
-      border: 1px solid #4d69a8;
-      border-radius: 9px;
-      background: #172850;
-      color: #d9e6ff;
-      height: 42px;
-      cursor: pointer;
-      font-size: 16px;
-    }
-    .provider-select-card {
+      grid-template-columns: 28px minmax(0, 1fr) 28px;
+      gap: 0;
+      align-items: stretch;
       border: 1px solid #3c548f;
       border-radius: 12px;
+      overflow: hidden;
       background: linear-gradient(150deg, #1b2a4f 0%, #111b36 100%);
+    }
+    .selector-nav {
+      border: 0;
+      background: #172850;
+      color: #d9e6ff;
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      min-width: 0;
+    }
+    .selector-nav svg {
+      width: 11px;
+      height: 11px;
+      display: block;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .selector-nav-left {
+      border-right: 1px solid #3c548f;
+    }
+    .selector-nav-right {
+      border-left: 1px solid #3c548f;
+    }
+    .persona-carousel {
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr) 28px;
+      gap: 0;
+      align-items: stretch;
+      border: 1px solid #3a4f82;
+      border-radius: 12px;
+      overflow: hidden;
+      background: linear-gradient(150deg, #111b35 0%, #0f1730 100%);
+    }
+    .provider-select-card {
+      border: 0;
+      border-radius: 0;
+      background: transparent;
       padding: 10px;
       min-height: 126px;
       touch-action: pan-y;
@@ -2031,7 +2063,7 @@ function renderPage() {
     .intent-scientist {
       border: 1px solid #3c548f;
       border-radius: 14px;
-      overflow: hidden;
+      overflow: visible;
       background: linear-gradient(145deg, #162347 0%, #0e1831 100%);
       min-height: 126px;
       position: relative;
@@ -2047,10 +2079,10 @@ function renderPage() {
     }
     .intent-scientist-hat {
       position: absolute;
-      top: -5px;
-      left: -7px;
-      width: 56px;
-      height: 40px;
+      top: -10px;
+      left: -12px;
+      width: 64px;
+      height: 44px;
       transform: rotate(-32deg);
       z-index: 2;
       filter: drop-shadow(0 4px 7px rgba(0, 0, 0, 0.35));
@@ -2115,9 +2147,9 @@ function renderPage() {
       align-items: center;
     }
     .persona-select-card {
-      border: 1px solid #3a4f82;
-      border-radius: 11px;
-      background: #111b35;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
       color: #dce7ff;
       text-align: left;
       padding: 10px;
@@ -2153,26 +2185,20 @@ function renderPage() {
     }
     .persona-carousel {
       display: grid;
-      grid-template-columns: 34px 1fr 34px;
-      gap: 8px;
-      align-items: center;
+      grid-template-columns: 28px minmax(0, 1fr) 28px;
+      gap: 0;
+      align-items: stretch;
+      border: 1px solid #3a4f82;
+      border-radius: 12px;
+      overflow: hidden;
+      background: linear-gradient(150deg, #111b35 0%, #0f1730 100%);
     }
     #persona-select-card {
       min-width: 0;
       width: 100%;
     }
-    .persona-nav {
-      border: 1px solid #4d69a8;
-      border-radius: 9px;
-      background: #172850;
-      color: #d9e6ff;
-      height: 42px;
-      cursor: pointer;
-      font-size: 16px;
-    }
     .persona-select-card.active {
-      border-color: var(--persona-accent, #5f87e0);
-      box-shadow: 0 0 0 1px #ffffff18 inset;
+      box-shadow: inset 0 0 0 1px var(--persona-accent, #5f87e0);
       background: #15254a;
     }
     .persona-select-card {
@@ -2347,10 +2373,10 @@ function renderPage() {
       .intent-scientist,
       .intent-scientist-image,
       .intent-scientist-fallback { min-height: 104px; }
-      .intent-scientist-hat { width: 44px; height: 30px; top: -4px; left: -6px; }
+      .intent-scientist-hat { width: 48px; height: 32px; top: -8px; left: -8px; }
       .template-grid { grid-template-columns: 1fr 1fr; gap: 7px; }
       .persona-carousel,
-      .provider-carousel { grid-template-columns: 30px minmax(0, 1fr) 30px; gap: 6px; }
+      .provider-carousel { grid-template-columns: 26px minmax(0, 1fr) 26px; gap: 0; }
     }
   </style>
 </head>
@@ -2383,9 +2409,13 @@ function renderPage() {
         <div class="intent-block">
           <div class="intent-label">Provider</div>
           <div class="provider-carousel">
-            <button type="button" class="carousel-nav" id="provider-prev" aria-label="Previous provider">&#8592;</button>
+            <button type="button" class="selector-nav selector-nav-left" id="provider-prev" aria-label="Previous provider">
+              <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3L5 8l5 5"/></svg>
+            </button>
             <div id="provider-select"></div>
-            <button type="button" class="carousel-nav" id="provider-next" aria-label="Next provider">&#8594;</button>
+            <button type="button" class="selector-nav selector-nav-right" id="provider-next" aria-label="Next provider">
+              <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg>
+            </button>
           </div>
         </div>
       </div>
@@ -2722,11 +2752,15 @@ function renderPage() {
       const personas = allowedPersonaList();
       const activeId = normalizePersonaForTemplate(intentState.personaId, intentState.templateId);
       return '<div class="persona-carousel">' +
-        '<button type="button" class="persona-nav" id="persona-prev" aria-label="Previous persona">&#8592;</button>' +
+        '<button type="button" class="selector-nav selector-nav-left" id="persona-prev" aria-label="Previous persona">' +
+          '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3L5 8l5 5"/></svg>' +
+        '</button>' +
         '<div id="persona-select-card">' +
           personaCard(PERSONA_MAP.get(activeId) || PERSONA_MAP.get(PERSONA_NONE), true) +
         '</div>' +
-        '<button type="button" class="persona-nav" id="persona-next" aria-label="Next persona">&#8594;</button>' +
+        '<button type="button" class="selector-nav selector-nav-right" id="persona-next" aria-label="Next persona">' +
+          '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg>' +
+        '</button>' +
       '</div>' +
       '<div class="persona-note">' +
         (personas.length > 1
@@ -3262,8 +3296,8 @@ function renderPage() {
           (pictureSrc
             ? '<img class="session-picture" src="' + esc(pictureSrc) + '" alt="' + esc(pictureAlt) + '" loading="lazy" decoding="async" />'
             : '<div class="session-media-fallback" aria-hidden="true">' + esc(String(s.name || '?').trim().slice(0, 1).toUpperCase()) + '</div>') +
-          hat +
         '</div>' +
+        hat +
         '<div class="session-body">' +
           '<div class="head">' +
             '<div class="head-main">' +

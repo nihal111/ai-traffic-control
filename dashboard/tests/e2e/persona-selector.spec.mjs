@@ -69,4 +69,28 @@ test('persona cycles within the allowed template set and persists in session sta
     .toBe('tester');
 
   await expect(page.locator('[data-persona-badge="1"]')).toHaveText('Tester');
+
+  await harness.api('/api/sessions/kill', 'POST', {
+    name: harness.slotName,
+  });
+
+  await expect
+    .poll(async () => {
+      const session = await harness.getSession();
+      return session ? { personaId: session.personaId, status: session.status } : null;
+    }, {
+      timeout: 12000,
+      message: 'expected persona state to clear after kill',
+    })
+    .toMatchObject({
+      personaId: 'none',
+      status: 'idle',
+    });
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(page.locator('[data-persona-badge="1"]')).toHaveCount(0);
+
+  await page.locator('.session.tap').first().click();
+  await expect(page.locator('.persona-select-name')).toHaveText('Vanilla');
+  await expect(page.locator('#intent-scientist svg.intent-scientist-hat')).toHaveCount(0);
 });
