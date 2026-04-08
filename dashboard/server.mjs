@@ -22,6 +22,7 @@ const SHELL_HOOK_WRITER = process.env.SHELL_HOOK_WRITER || path.join(__dirname, 
 const ENABLE_SHELL_HOOKS = process.env.ENABLE_SHELL_HOOKS !== '0';
 const SOURCE_USER_ZSHRC = process.env.ATC_SOURCE_USER_ZSHRC !== '0';
 const USER_ZSHRC_PATH = process.env.ATC_USER_ZSHRC || path.join(process.env.HOME || '', '.zshrc');
+const USER_HISTORY_FILE = process.env.ATC_USER_HISTORY_FILE || path.join(process.env.HOME || '', '.zsh_history');
 const REFRESH_MS = 8000;
 const USAGE_TTL_MS = 10000;
 const TELEMETRY_INGEST_MS = Number(process.env.TELEMETRY_INGEST_MS || 20000);
@@ -388,10 +389,24 @@ function buildAtcZshrc(env) {
     `typeset -gx ATC_HOOK_WRITER=${shSingle(env.ATC_HOOK_WRITER)}`,
     `typeset -gx ATC_SOURCE_USER_ZSHRC=${shSingle(env.ATC_SOURCE_USER_ZSHRC)}`,
     `typeset -gx ATC_USER_ZSHRC=${shSingle(env.ATC_USER_ZSHRC)}`,
+    `typeset -gx ATC_USER_HISTORY_FILE=${shSingle(env.ATC_USER_HISTORY_FILE)}`,
     '',
     'if [[ "${ATC_SOURCE_USER_ZSHRC:-1}" != "0" && -n "${ATC_USER_ZSHRC:-}" && -r "${ATC_USER_ZSHRC}" ]]; then',
     '  source "${ATC_USER_ZSHRC}"',
     'fi',
+    '',
+    '# Ensure shared command history behaves like a normal user zsh shell.',
+    'if [[ -z "${HISTFILE:-}" ]]; then',
+    '  export HISTFILE="${ATC_USER_HISTORY_FILE:-$HOME/.zsh_history}"',
+    'fi',
+    'if [[ ! -e "$HISTFILE" ]]; then',
+    '  : > "$HISTFILE" 2>/dev/null || true',
+    'fi',
+    'setopt APPEND_HISTORY',
+    'setopt INC_APPEND_HISTORY',
+    'setopt SHARE_HISTORY',
+    'setopt HIST_FCNTL_LOCK',
+    'fc -R "$HISTFILE" 2>/dev/null || true',
     '',
     'if [[ -z "${ATC_SHELL_HOOKS_ACTIVE:-}" ]]; then',
     '  typeset -g ATC_SHELL_HOOKS_ACTIVE=1',
@@ -480,6 +495,7 @@ async function ensureSlotRuntime(slotName, runId, workdir) {
     ATC_HOOK_WRITER: SHELL_HOOK_WRITER,
     ATC_SOURCE_USER_ZSHRC: SOURCE_USER_ZSHRC ? '1' : '0',
     ATC_USER_ZSHRC: USER_ZSHRC_PATH,
+    ATC_USER_HISTORY_FILE: USER_HISTORY_FILE,
   };
 
   await fs.writeFile(paths.zshrcFile, buildAtcZshrc(hookEnv), { mode: 0o644 });
