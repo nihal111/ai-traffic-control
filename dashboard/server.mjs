@@ -272,6 +272,31 @@ function checkPortOpen(port, host = '127.0.0.1', timeoutMs = 500) {
   });
 }
 
+async function waitForTtydReady(port, timeoutMs = 10000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 900);
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/`, {
+        method: 'GET',
+        cache: 'no-store',
+        signal: ctl.signal,
+      });
+      clearTimeout(timer);
+      if (response.ok) {
+        const html = await response.text();
+        if (html && html.toLowerCase().includes('ttyd')) return true;
+      }
+    } catch {
+      clearTimeout(timer);
+      // continue polling
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return false;
+}
+
 function pidFileForBackend(backendPort) {
   return path.join(RUN_DIR, `ttyd-${backendPort}.pid`);
 }
@@ -822,6 +847,12 @@ async function spawnSlotByName(name) {
   await rotateSlotCurrent(slot.name, st.runId);
   const { paths, hookEnv } = await ensureSlotRuntime(slot.name, runId, st.workdir);
   const pid = await spawnSessionBackend(slot, st, { ...hookEnv }, { zdotdir: paths.zdotdir });
+  const ready = await waitForTtydReady(slot.backendPort, 10000);
+  if (!ready) {
+    await killSessionBackend(slot, { pid });
+    throw new Error(`ttyd backend ${slot.backendPort} did not become ready in time`);
+  }
+
   st.status = 'active';
   st.pid = pid;
   st.error = null;
@@ -1078,6 +1109,12 @@ function renderPage() {
       return window.location.protocol + '//' + window.location.hostname + ':' + port;
     }
 
+    function connectUrlForPort(port) {
+      const base = hostForPort(port);
+      const sep = base.includes('?') ? '&' : '?';
+      return base + sep + 'atc_connect=' + Date.now();
+    }
+
     async function apiPost(path, payload) {
       const res = await fetch(path, {
         method: 'POST',
@@ -1154,7 +1191,7 @@ function renderPage() {
 
           const active = item.status === 'active' && item.backendActive;
           if (active) {
-            window.open(hostForPort(item.publicPort), '_blank', 'noopener,noreferrer');
+            window.open(connectUrlForPort(item.publicPort), '_blank', 'noopener,noreferrer');
             return;
           }
           await spawnSession(item.name);
