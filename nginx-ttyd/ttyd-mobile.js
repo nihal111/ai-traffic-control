@@ -125,11 +125,11 @@
   }
 
 
-  function sendSeq(seq) {
+  function sendSeq(seq, skipFocus) {
     var term = getTerm();
     if (term && typeof term.input === "function") {
       term.input(seq);
-      if (typeof term.focus === "function") term.focus();
+      if (!skipFocus && typeof term.focus === "function") term.focus();
     }
   }
 
@@ -558,11 +558,17 @@
   window.__ttydMobileSendSeq = sendSeq;
   window.__ttydMobileDebugSetKeyboardOffset = setKeyboardOffset;
 
-  function bind(id, seq) {
+  function bind(id, seq, skipFocus) {
     var el = document.getElementById(id);
     if (!el) return;
-    el.addEventListener("click", function () {
-      sendSeq(seq);
+    el.addEventListener("click", function (e) {
+      sendSeq(seq, skipFocus);
+      if (skipFocus) {
+        // Blur the terminal textarea so the mobile keyboard stays hidden.
+        var helper = document.querySelector(".xterm-helper-textarea");
+        if (helper) helper.blur();
+        e.preventDefault();
+      }
     });
   }
 
@@ -571,10 +577,11 @@
   bind("ttyd-btn-tab", "\x09");
   bind("ttyd-btn-up", "\x1b[A");
   bind("ttyd-btn-down", "\x1b[B");
-  bind("ttyd-btn-ctrlb", "\x02");
-  bind("ttyd-btn-bracket", "[");
-  bind("ttyd-btn-pgup", "\x1b[5~");
-  bind("ttyd-btn-pgdn", "\x1b[6~");
+  // Vim/tmux scroll row — skip focus to keep keyboard hidden.
+  bind("ttyd-btn-ctrlb", "\x02", true);
+  bind("ttyd-btn-bracket", "[", true);
+  bind("ttyd-btn-pgup", "\x1b[5~", true);
+  bind("ttyd-btn-pgdn", "\x1b[6~", true);
 
   document.addEventListener(
     "touchstart",
