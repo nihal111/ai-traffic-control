@@ -430,25 +430,62 @@ async function getUsageSummary() {
   const now = Date.now();
   if (usageCache.value && now - usageCache.fetchedAt < USAGE_TTL_MS) return usageCache.value;
   if (usageCache.pending) return usageCache.pending;
+  refreshUsageSummaryInBackground();
+  return usageCache.pending;
+}
 
+function loadingUsageSummary() {
+  const loading = (provider) => ({ ok: false, provider, loading: true, error: null });
+  return {
+    fetchedAt: null,
+    codex: loading('codex'),
+    claude: loading('claude'),
+    gemini: loading('gemini'),
+  };
+}
+
+function errorUsageSummary(errorMessage) {
+  const errorPayload = (provider) => ({ ok: false, provider, loading: false, error: errorMessage || 'Usage unavailable' });
+  return {
+    fetchedAt: new Date().toISOString(),
+    codex: errorPayload('codex'),
+    claude: errorPayload('claude'),
+    gemini: errorPayload('gemini'),
+  };
+}
+
+function refreshUsageSummaryInBackground() {
+  if (usageCache.pending) return usageCache.pending;
   usageCache.pending = (async () => {
-    const [codexRaw, claudeRaw, geminiRaw] = await Promise.all([
-      fetchCodexbarUsage('codex', 'cli'),
-      fetchCodexbarUsage('claude', 'web'),
-      fetchCodexbarUsage('gemini', 'auto'),
-    ]);
+    try {
+      const [codexRaw, claudeRaw, geminiRaw] = await Promise.all([
+        fetchCodexbarUsage('codex', 'cli'),
+        fetchCodexbarUsage('claude', 'web'),
+        fetchCodexbarUsage('gemini', 'auto'),
+      ]);
 
-    return {
-      fetchedAt: new Date().toISOString(),
-      codex: decorateUsageWindows(codexRaw, ['5-hour', 'weekly']),
-      claude: decorateUsageWindows(claudeRaw, ['5-hour', 'weekly']),
-      gemini: decorateUsageWindows(geminiRaw, ['24h primary', '24h secondary']),
-    };
+      const value = {
+        fetchedAt: new Date().toISOString(),
+        codex: decorateUsageWindows(codexRaw, ['5-hour', 'weekly']),
+        claude: decorateUsageWindows(claudeRaw, ['5-hour', 'weekly']),
+        gemini: decorateUsageWindows(geminiRaw, ['24h primary', '24h secondary']),
+      };
+      usageCache = { value, fetchedAt: Date.now(), pending: null };
+      return value;
+    } catch (error) {
+      const fallback = usageCache.value || errorUsageSummary(error?.message || 'Usage unavailable');
+      usageCache = { value: fallback, fetchedAt: Date.now(), pending: null };
+      return fallback;
+    }
   })();
+  return usageCache.pending;
+}
 
-  const value = await usageCache.pending;
-  usageCache = { value, fetchedAt: Date.now(), pending: null };
-  return value;
+function getUsageSnapshot() {
+  const now = Date.now();
+  if (usageCache.value && now - usageCache.fetchedAt < USAGE_TTL_MS) return usageCache.value;
+  refreshUsageSummaryInBackground();
+  return usageCache.value || loadingUsageSummary();
 }
 
 async function ensureDir(filePath) {
@@ -1732,10 +1769,35 @@ function renderPage() {
       border-color: #7c2d43;
       background: linear-gradient(150deg, #3c1928 0%, #2a1420 100%);
     }
+    .usage-row.loading {
+      border-color: #2f4f82;
+      background: linear-gradient(150deg, #142747 0%, #12203b 100%);
+    }
     .usage-error {
       color: #ffcfda;
       font-size: 12px;
       line-height: 1.2;
+    }
+    .usage-loading {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #d5e5ff;
+      font-size: 12px;
+      line-height: 1.2;
+    }
+    .usage-spinner {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      border: 2px solid #3f5f95;
+      border-top-color: #8fc1ff;
+      animation: usage-spin 850ms linear infinite;
+      flex: 0 0 auto;
+    }
+    @keyframes usage-spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
     }
 
     .sessions { display: grid; gap: 10px; }
@@ -2599,6 +2661,18 @@ function renderPage() {
     function providerUsageRow(providerKey, title, payload) {
       const logo = PROVIDER_LOGOS[providerKey] || '';
       const isExpanded = usageExpanded.has(providerKey);
+      if (payload && payload.loading) {
+        return '<article class="usage-row loading">' +
+          '<button type="button" class="usage-toggle" data-toggle-provider="' + esc(providerKey) + '" aria-expanded="false" aria-label="Toggle ' + esc(title) + ' details">' +
+            '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5"/></svg>' +
+          '</button>' +
+          '<div class="provider">' +
+            '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="78" height="78" />' +
+            '<div class="provider-name-wrap"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Loading)</span></div><div class="provider-plan-block">Loading</div></div>' +
+          '</div>' +
+          '<div class="usage-loading"><span class="usage-spinner" aria-hidden="true"></span><span>Loading usage…</span></div>' +
+        '</article>';
+      }
       if (!payload || !payload.ok) {
         return '<article class="usage-row error">' +
           '<button type="button" class="usage-toggle" data-toggle-provider="' + esc(providerKey) + '" aria-expanded="false" aria-label="Toggle ' + esc(title) + ' details">' +
@@ -3358,37 +3432,47 @@ function renderPage() {
       }
     }
 
-    async function refresh() {
-      const [usageResp, sessionsResp] = await Promise.all([
-        fetch('/api/usage', { cache: 'no-store' }),
-        fetch('/api/sessions', { cache: 'no-store' }),
-      ]);
-
-      const usage = await usageResp.json();
+    function renderUsageGrid(usage) {
       latestUsage = usage || {};
-      const sessionsPayload = await sessionsResp.json();
-      const sessions = sessionsPayload.sessions || [];
-      const latestRecent = Array.isArray(sessionsPayload.recentWorkdirs) ? sessionsPayload.recentWorkdirs : [];
-      recentWorkdirs.splice(0, recentWorkdirs.length, ...latestRecent);
-
       const usageGrid = document.getElementById('usage-grid');
       const rows = [
-        providerUsageRow('codex', 'Codex', usage.codex),
-        providerUsageRow('claude', 'Claude', usage.claude),
-        providerUsageRow('gemini', 'Gemini', usage.gemini),
+        providerUsageRow('codex', 'Codex', latestUsage.codex),
+        providerUsageRow('claude', 'Claude', latestUsage.claude),
+        providerUsageRow('gemini', 'Gemini', latestUsage.gemini),
       ];
       const nextUsageHtml = rows.join('');
       if (usageGrid && usageGrid.innerHTML !== nextUsageHtml) {
         usageGrid.innerHTML = nextUsageHtml;
         bindUsageInteractions();
       }
+    }
 
+    function renderSessions(sessionsPayload) {
+      const sessions = sessionsPayload.sessions || [];
+      const latestRecent = Array.isArray(sessionsPayload.recentWorkdirs) ? sessionsPayload.recentWorkdirs : [];
+      recentWorkdirs.splice(0, recentWorkdirs.length, ...latestRecent);
       const sessionsEl = document.getElementById('sessions');
       const nextSessionsHtml = sessions.map(sessionCard).join('') || '<div class="line muted">No sessions configured.</div>';
       if (sessionsEl && sessionsEl.innerHTML !== nextSessionsHtml) {
         sessionsEl.innerHTML = nextSessionsHtml;
         bindSessionInteractions(sessions);
       }
+    }
+
+    async function refresh() {
+      const sessionsTask = fetch('/api/sessions', { cache: 'no-store' })
+        .then(function (resp) { return resp.json(); })
+        .then(function (payload) { renderSessions(payload || {}); })
+        .catch(function () {});
+
+      const usageTask = fetch('/api/usage', { cache: 'no-store' })
+        .then(function (resp) { return resp.json(); })
+        .then(function (usage) { renderUsageGrid(usage || {}); })
+        .catch(function () {
+          renderUsageGrid(latestUsage);
+        });
+
+      await Promise.allSettled([sessionsTask, usageTask]);
     }
 
     bindStaticModalInteractions();
@@ -3432,7 +3516,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/usage' && req.method === 'GET') {
-    const usage = await getUsageSummary();
+    const usage = getUsageSnapshot();
     json(res, 200, usage);
     return;
   }
@@ -3516,6 +3600,7 @@ async function startDashboardServer() {
   await loadState();
   await ingestTelemetry().catch(() => {});
   await refreshTitles().catch(() => {});
+  refreshUsageSummaryInBackground().catch(() => {});
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`dashboard listening on http://0.0.0.0:${PORT}`);
   });
