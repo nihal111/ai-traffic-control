@@ -13,19 +13,36 @@ const harness = new DashboardHarness({
 
 test.beforeAll(async () => {
   await harness.setup('Einstein');
+  await harness.api('/api/sessions/update', 'POST', {
+    name: harness.slotName,
+    picturePath: 'scientists/einstein.jpg',
+  });
 });
 
 test.afterAll(async () => {
   await harness.teardown();
 });
 
-test('persona can be selected at start time and persists in session state', async ({ page }) => {
+test('persona cycles within the allowed template set and persists in session state', async ({ page }) => {
   await page.goto(`http://127.0.0.1:${DASHBOARD_PORT}`, { waitUntil: 'domcontentloaded' });
 
   await page.locator('.session.tap').first().click();
   await expect(page.locator('#intent-modal')).toHaveClass(/open/);
+  await expect(page.locator('#intent-scientist img.intent-scientist-image')).toBeVisible();
+  await expect(page.locator('.persona-select-card')).toHaveCount(1);
+  await expect(page.locator('.persona-select-name')).toHaveText('Vanilla');
 
-  await page.locator('[data-persona-id="tester"]').click();
+  await page.locator('#persona-next').click();
+  await expect(page.locator('.persona-select-name')).toHaveText('Brainstormer');
+  await expect(page.locator('#intent-scientist svg.intent-scientist-hat')).toBeVisible();
+
+  await page.locator('#template-continue').click();
+  await expect(page.locator('.persona-select-name')).toHaveText('Vanilla');
+
+  await page.locator('#persona-next').click();
+  await page.locator('#persona-next').click();
+  await expect(page.locator('.persona-select-name')).toHaveText('Tester');
+
   await page.locator('#intent-confirm').click();
 
   await expect

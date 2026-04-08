@@ -57,28 +57,32 @@ const PERSONA_CONFIGS = [
     id: 'brainstormer',
     label: 'Brainstormer',
     description: 'Explore ideas, surface options, and converge on next steps.',
-    accent: '#f59e0b',
+    accent: '#22c55e',
+    hatColor: '#22c55e',
     promptFile: 'brainstormer.md',
   },
   {
     id: 'refactor',
     label: 'Refactor',
     description: 'Simplify code, reduce duplication, and improve structure safely.',
-    accent: '#60a5fa',
+    accent: '#f97316',
+    hatColor: '#f97316',
     promptFile: 'refactor.md',
   },
   {
     id: 'tester',
     label: 'Tester',
     description: 'Focus on behavior, test quality, and meaningful coverage.',
-    accent: '#34d399',
+    accent: '#8b5a2b',
+    hatColor: '#8b5a2b',
     promptFile: 'tester.md',
   },
   {
     id: 'reviewer',
     label: 'Reviewer',
     description: 'Inspect changes critically for bugs, regressions, and gaps.',
-    accent: '#f472b6',
+    accent: '#ef4444',
+    hatColor: '#ef4444',
     promptFile: 'reviewer.md',
   },
   {
@@ -86,11 +90,16 @@ const PERSONA_CONFIGS = [
     label: 'Slot Machine Bandit',
     description: 'Hunt for the most promising next thread or re-entry point.',
     accent: '#a78bfa',
+    hatStyle: 'rainbow',
     promptFile: 'slot-machine-bandit.md',
   },
 ];
 const PERSONA_BY_ID = new Map(PERSONA_CONFIGS.map((persona) => [persona.id, persona]));
 const PERSONA_SELECTABLE = PERSONA_CONFIGS.filter((persona) => persona.id !== PERSONA_NONE);
+const TEMPLATE_PERSONA_IDS = {
+  [TEMPLATE_NEW_BRAINSTORM]: [PERSONA_NONE, 'brainstormer'],
+  [TEMPLATE_CONTINUE_WORK]: [PERSONA_NONE, 'refactor', 'tester', 'reviewer', 'slot_machine_bandit'],
+};
 const PERSONA_ALIASES = new Map([
   ['lucky_dip_explorer', 'slot_machine_bandit'],
   ['lucky-dip-explorer', 'slot_machine_bandit'],
@@ -204,6 +213,16 @@ function normalizePersonaId(personaId, fallbackPersona = PERSONA_NONE) {
 
 function personaConfig(personaId) {
   return PERSONA_BY_ID.get(normalizePersonaId(personaId)) || PERSONA_BY_ID.get(PERSONA_NONE);
+}
+
+function personaIdsForTemplate(templateId) {
+  return TEMPLATE_PERSONA_IDS[templateId] || [PERSONA_NONE];
+}
+
+function normalizePersonaForTemplate(personaId, templateId) {
+  const allowed = personaIdsForTemplate(templateId);
+  const normalized = normalizePersonaId(personaId);
+  return allowed.includes(normalized) ? normalized : allowed[0] || PERSONA_NONE;
 }
 
 function normalizePicturePath(picturePath) {
@@ -1407,6 +1426,7 @@ async function updateSlotMeta(name, patch) {
   if (typeof patch.taskTitle === 'string' && patch.taskTitle.trim()) st.taskTitle = patch.taskTitle.trim();
   if (typeof patch.workdir === 'string' && patch.workdir.trim()) st.workdir = patch.workdir.trim();
   if (typeof patch.agentType === 'string' && patch.agentType.trim()) st.agentType = patch.agentType.trim();
+  if (typeof patch.picturePath === 'string') st.picturePath = patch.picturePath.trim();
 
   state.sessions[slot.name] = st;
   await saveState(state);
@@ -1952,24 +1972,26 @@ function renderPage() {
       border-radius: 12px;
       background: linear-gradient(150deg, #1b2a4f 0%, #111b36 100%);
       padding: 10px;
-      min-height: 108px;
+      min-height: 126px;
       touch-action: pan-y;
       contain: layout;
     }
     .provider-select-head {
       display: grid;
-      grid-template-columns: 46px 1fr;
+      grid-template-columns: 58px 1fr;
       gap: 9px;
       align-items: center;
     }
     .provider-select-logo {
-      width: 46px;
-      height: 46px;
+      width: 58px;
+      height: 58px;
       border-radius: 8px;
       background: #fff;
+      box-sizing: border-box;
+      display: block;
       object-fit: contain;
       border: 1px solid #d7e4ff;
-      padding: 6px;
+      padding: 7px;
     }
     .provider-select-name {
       font-size: 16px;
@@ -1985,6 +2007,54 @@ function renderPage() {
       margin-top: 8px;
       display: grid;
       gap: 4px;
+    }
+    .intent-scientist {
+      border: 1px solid #3c548f;
+      border-radius: 14px;
+      overflow: hidden;
+      background: linear-gradient(145deg, #162347 0%, #0e1831 100%);
+      min-height: 156px;
+      position: relative;
+    }
+    .intent-scientist-image {
+      display: block;
+      width: 100%;
+      height: 100%;
+      min-height: 156px;
+      object-fit: cover;
+      object-position: center top;
+    }
+    .intent-scientist-hat {
+      position: absolute;
+      top: 8px;
+      left: 50%;
+      width: 84px;
+      height: 56px;
+      transform: translateX(-50%);
+      z-index: 2;
+      filter: drop-shadow(0 4px 7px rgba(0, 0, 0, 0.35));
+      pointer-events: none;
+    }
+    .intent-scientist-fallback {
+      min-height: 156px;
+      display: grid;
+      place-items: center;
+      font-size: 30px;
+      font-weight: 800;
+      color: #dbe8ff;
+      background:
+        radial-gradient(circle at 30% 25%, #223763 0%, #152647 45%, #0d152a 100%);
+    }
+    .intent-scientist-overlay {
+      position: absolute;
+      inset: auto 0 0 0;
+      padding: 10px 12px;
+      background: linear-gradient(180deg, #0000 0%, #0b1324d9 100%);
+      color: #eef4ff;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+      z-index: 1;
     }
     .template-grid {
       display: grid;
@@ -2018,10 +2088,11 @@ function renderPage() {
     }
     .persona-grid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: 34px minmax(0, 1fr) 34px;
       gap: 8px;
+      align-items: center;
     }
-    .persona-btn {
+    .persona-select-card {
       border: 1px solid #3a4f82;
       border-radius: 11px;
       background: #111b35;
@@ -2029,22 +2100,54 @@ function renderPage() {
       text-align: left;
       padding: 10px;
       cursor: pointer;
-      min-height: 86px;
+      min-height: 88px;
+      touch-action: pan-y;
+      contain: layout;
     }
-    .persona-btn.active {
-      border-color: var(--persona-accent, #5f87e0);
-      box-shadow: 0 0 0 1px #ffffff18 inset;
-      background: #15254a;
+    .persona-select-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+      min-width: 0;
     }
-    .persona-name {
+    .persona-select-dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 999px;
+      flex: 0 0 auto;
+      background: var(--persona-accent, #5f87e0);
+      box-shadow: 0 0 0 4px #ffffff10;
+    }
+    .persona-select-name {
       font-size: 13px;
       font-weight: 700;
-      margin-bottom: 6px;
+      line-height: 1.1;
     }
-    .persona-desc {
+    .persona-select-desc {
       color: #adc2ea;
       font-size: 12px;
       line-height: 1.25;
+    }
+    .persona-carousel {
+      display: grid;
+      grid-template-columns: 34px 1fr 34px;
+      gap: 8px;
+      align-items: center;
+    }
+    .persona-nav {
+      border: 1px solid #4d69a8;
+      border-radius: 9px;
+      background: #172850;
+      color: #d9e6ff;
+      height: 42px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    .persona-select-card.active {
+      border-color: var(--persona-accent, #5f87e0);
+      box-shadow: 0 0 0 1px #ffffff18 inset;
+      background: #15254a;
     }
     .persona-note {
       margin-top: 8px;
@@ -2195,6 +2298,13 @@ function renderPage() {
         height: 46px;
         padding: 7px;
       }
+      .provider-select-card { min-height: 116px; }
+      .provider-select-head { grid-template-columns: 54px 1fr; }
+      .provider-select-logo {
+        width: 54px;
+        height: 54px;
+        padding: 6px;
+      }
       .provider-select-logo { box-sizing: border-box; display: block; }
       .usage-row.expanded .provider { grid-template-columns: 46px 1fr; }
       .mini { grid-template-columns: 62px 34px minmax(0, 1.35fr) minmax(84px, 0.9fr); gap: 5px; }
@@ -2204,6 +2314,12 @@ function renderPage() {
       .session-body { padding: 10px; }
       .name { font-size: 16px; }
       .template-grid { grid-template-columns: 1fr; }
+      .intent-scientist,
+      .intent-scientist-image,
+      .intent-scientist-fallback { min-height: 112px; }
+      .intent-scientist-hat { width: 72px; height: 48px; top: 6px; }
+      .persona-carousel,
+      .provider-carousel { grid-template-columns: 32px minmax(0, 1fr) 32px; gap: 6px; }
     }
   </style>
 </head>
@@ -2227,6 +2343,10 @@ function renderPage() {
       <div class="modal-head">
         <div class="modal-title" id="intent-title">Start Session</div>
         <button type="button" class="modal-close" id="intent-close" aria-label="Close intent modal">&times;</button>
+      </div>
+      <div class="intent-block">
+        <div class="intent-label">Scientist</div>
+        <div id="intent-scientist"></div>
       </div>
       <div class="intent-block">
         <div class="intent-label">Provider</div>
@@ -2317,6 +2437,8 @@ function renderPage() {
     const intentState = {
       open: false,
       name: '',
+      pictureSrc: '',
+      pictureAlt: '',
       providerKey: 'codex',
       templateId: 'new_brainstorm',
       personaId: PERSONA_NONE,
@@ -2495,19 +2617,89 @@ function renderPage() {
       return '/assets/' + cleaned;
     }
 
+    function personaIdsForTemplate(templateId) {
+      if (templateId === '${TEMPLATE_NEW_BRAINSTORM}') return [PERSONA_NONE, 'brainstormer'];
+      if (templateId === '${TEMPLATE_CONTINUE_WORK}') return [PERSONA_NONE, 'refactor', 'tester', 'reviewer', 'slot_machine_bandit'];
+      return [PERSONA_NONE];
+    }
+
+    function normalizePersonaForTemplate(personaId, templateId) {
+      const allowed = personaIdsForTemplate(templateId);
+      const normalized = normalizePersonaId(personaId);
+      return allowed.includes(normalized) ? normalized : allowed[0] || PERSONA_NONE;
+    }
+
+    function selectedScientistName() {
+      return String(intentState.name || 'Scientist').trim() || 'Scientist';
+    }
+
+    function personaHatMarkup(persona) {
+      if (!persona || persona.id === PERSONA_NONE) return '';
+      if (persona.hatStyle !== 'rainbow' && !persona.hatColor) return '';
+      const fill = persona.hatStyle === 'rainbow' ? 'url(#persona-rainbow-hat)' : esc(persona.hatColor || persona.accent || '#dbe8ff');
+      const stroke = persona.hatStyle === 'rainbow' ? '#18213a' : '#0b1324';
+      const body = persona.hatStyle === 'rainbow'
+        ? '<defs><linearGradient id="persona-rainbow-hat" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#f43f5e"/><stop offset="16%" stop-color="#fb923c"/><stop offset="32%" stop-color="#facc15"/><stop offset="48%" stop-color="#4ade80"/><stop offset="64%" stop-color="#22d3ee"/><stop offset="80%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#c084fc"/></linearGradient></defs>'
+        : '';
+      return '<svg class="intent-scientist-hat" viewBox="0 0 120 80" aria-hidden="true" focusable="false">' +
+        body +
+        '<path d="M16 54h88c5.5 0 10 4.5 10 10v3H6v-3c0-5.5 4.5-10 10-10z" fill="' + fill + '" stroke="' + stroke + '" stroke-width="2" stroke-linejoin="round"/>' +
+        '<path d="M34 15h52c8 0 14 6 14 14v25H20V29c0-8 6-14 14-14z" fill="' + fill + '" stroke="' + stroke + '" stroke-width="2" stroke-linejoin="round"/>' +
+        '<path d="M24 41h72c8 0 14 5 14 11v2H10v-2c0-6 6-11 14-11z" fill="rgba(255,255,255,0.16)"/>' +
+      '</svg>';
+    }
+
+    function renderScientistHero() {
+      const src = String(intentState.pictureSrc || '').trim();
+      const alt = String(intentState.pictureAlt || selectedScientistName() + ' portrait').trim();
+      const name = selectedScientistName();
+      const persona = personaForId(intentState.personaId);
+      const hat = personaHatMarkup(persona);
+      if (src) {
+        return '<div class="intent-scientist">' +
+          '<img class="intent-scientist-image" src="' + esc(src) + '" alt="' + esc(alt) + '" loading="lazy" decoding="async" />' +
+          hat +
+          '<div class="intent-scientist-overlay">' + esc(name) + '</div>' +
+        '</div>';
+      }
+      return '<div class="intent-scientist intent-scientist-fallback" aria-label="' + esc(alt) + '">' +
+        hat +
+        esc(name.slice(0, 1).toUpperCase()) +
+      '</div>';
+    }
+
+    function allowedPersonaList() {
+      return personaIdsForTemplate(intentState.templateId)
+        .map((id) => PERSONA_MAP.get(id))
+        .filter(Boolean);
+    }
+
+    function personaCard(persona, active) {
+      return '<button type="button" class="persona-select-card ' + (active ? 'active' : '') + '" data-persona-id="' + esc(persona.id) + '" aria-pressed="' + (active ? 'true' : 'false') + '" style="--persona-accent:' + esc(persona.accent) + '">' +
+        '<div class="persona-select-head">' +
+          '<span class="persona-select-dot" aria-hidden="true"></span>' +
+          '<div class="persona-select-name">' + esc(persona.label) + '</div>' +
+        '</div>' +
+        '<div class="persona-select-desc">' + esc(persona.description) + '</div>' +
+      '</button>';
+    }
+
     function renderPersonaSelector() {
-      return '<div class="persona-grid">' +
-        PERSONA_CONFIGS.map((persona) => {
-          const active = normalizePersonaId(intentState.personaId) === persona.id;
-          const classes = ['persona-btn'];
-          if (active) classes.push('active');
-          return '<button type="button" class="' + classes.join(' ') + '" data-persona-id="' + esc(persona.id) + '" aria-pressed="' + (active ? 'true' : 'false') + '" style="--persona-accent:' + esc(persona.accent) + '">' +
-            '<div class="persona-name">' + esc(persona.label) + '</div>' +
-            '<div class="persona-desc">' + esc(persona.description) + '</div>' +
-          '</button>';
-        }).join('') +
+      const personas = allowedPersonaList();
+      const activeId = normalizePersonaForTemplate(intentState.personaId, intentState.templateId);
+      return '<div class="persona-carousel">' +
+        '<button type="button" class="persona-nav" id="persona-prev" aria-label="Previous persona">&#8592;</button>' +
+        '<div id="persona-select-card">' +
+          personaCard(PERSONA_MAP.get(activeId) || PERSONA_MAP.get(PERSONA_NONE), true) +
+        '</div>' +
+        '<button type="button" class="persona-nav" id="persona-next" aria-label="Next persona">&#8594;</button>' +
       '</div>' +
-      '<div class="persona-note">Selected at start only. Changing persona later means killing and respawning the session.</div>';
+      '<div class="persona-note">' +
+        (personas.length > 1
+          ? 'Swipe or use arrows to switch personas for this template.'
+          : 'Only the vanilla persona is available for this template.') +
+        ' Selected at start only. Changing persona later means killing and respawning the session.' +
+      '</div>';
     }
 
     function personaBadge(personaId) {
@@ -2544,9 +2736,11 @@ function renderPage() {
       return body;
     }
 
-    function openIntentModal(name) {
+    function openIntentModal(name, pictureSrc = '') {
       intentState.open = true;
       intentState.name = name;
+      intentState.pictureSrc = pictureSrc || '';
+      intentState.pictureAlt = name ? (name + ' portrait') : '';
       intentState.providerKey = 'codex';
       intentState.templateId = 'new_brainstorm';
       intentState.personaId = PERSONA_NONE;
@@ -2559,6 +2753,8 @@ function renderPage() {
 
     function closeIntentModal() {
       intentState.open = false;
+      intentState.pictureSrc = '';
+      intentState.pictureAlt = '';
       const modal = document.getElementById('intent-modal');
       if (modal) modal.classList.remove('open');
       toggleBodyScroll(false);
@@ -2612,6 +2808,22 @@ function renderPage() {
       renderIntentModal();
     }
 
+    function activePersonaIndex() {
+      const personas = allowedPersonaList();
+      const activeId = normalizePersonaForTemplate(intentState.personaId, intentState.templateId);
+      const idx = personas.findIndex((persona) => persona.id === activeId);
+      return idx >= 0 ? idx : 0;
+    }
+
+    function rotatePersona(direction) {
+      const personas = allowedPersonaList();
+      if (!personas.length) return;
+      const idx = activePersonaIndex();
+      const next = (idx + direction + personas.length) % personas.length;
+      intentState.personaId = personas[next].id;
+      renderIntentModal();
+    }
+
     function providerSelectionCard(provider) {
       const logo = PROVIDER_LOGOS[provider.key] || '';
       const usage = latestUsage ? latestUsage[provider.key] : null;
@@ -2641,9 +2853,14 @@ function renderPage() {
       const title = document.getElementById('intent-title');
       if (title) title.textContent = intentState.name ? ('Start ' + intentState.name) : 'Start Session';
 
+      intentState.personaId = normalizePersonaForTemplate(intentState.personaId, intentState.templateId);
+
       const selectedProvider = PROVIDER_ORDER[activeProviderIndex()];
       const providerHost = document.getElementById('provider-select');
       if (providerHost) providerHost.innerHTML = providerSelectionCard(selectedProvider);
+
+      const scientistHost = document.getElementById('intent-scientist');
+      if (scientistHost) scientistHost.innerHTML = renderScientistHero();
 
       const templateButtons = document.querySelectorAll('[data-template]');
       for (const btn of templateButtons) {
@@ -2732,6 +2949,28 @@ function renderPage() {
       });
     }
 
+    function bindPersonaSwipe() {
+      const card = document.getElementById('persona-select-card');
+      if (!card || card.dataset.swipeBound === '1') return;
+      card.dataset.swipeBound = '1';
+      let startX = null;
+      card.addEventListener('touchstart', function (ev) {
+        if (!ev.touches || !ev.touches[0]) return;
+        startX = ev.touches[0].clientX;
+      }, { passive: true });
+      card.addEventListener('touchend', function (ev) {
+        if (startX === null) return;
+        if (!ev.changedTouches || !ev.changedTouches[0]) {
+          startX = null;
+          return;
+        }
+        const delta = ev.changedTouches[0].clientX - startX;
+        startX = null;
+        if (Math.abs(delta) < 35) return;
+        rotatePersona(delta < 0 ? 1 : -1);
+      });
+    }
+
     function bindIntentModalInteractions() {
       const prev = document.getElementById('provider-prev');
       if (prev && prev.dataset.bound !== '1') {
@@ -2747,6 +2986,23 @@ function renderPage() {
         next.addEventListener('click', function (ev) {
           ev.preventDefault();
           rotateProvider(1);
+        });
+      }
+
+      const personaPrev = document.getElementById('persona-prev');
+      if (personaPrev && personaPrev.dataset.bound !== '1') {
+        personaPrev.dataset.bound = '1';
+        personaPrev.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          rotatePersona(-1);
+        });
+      }
+      const personaNext = document.getElementById('persona-next');
+      if (personaNext && personaNext.dataset.bound !== '1') {
+        personaNext.dataset.bound = '1';
+        personaNext.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          rotatePersona(1);
         });
       }
 
@@ -2792,10 +3048,12 @@ function renderPage() {
           const btn = ev.target.closest('[data-persona-id]');
           if (!btn) return;
           ev.preventDefault();
-          intentState.personaId = normalizePersonaId(btn.getAttribute('data-persona-id'));
+          intentState.personaId = normalizePersonaForTemplate(btn.getAttribute('data-persona-id'), intentState.templateId);
           renderIntentModal();
         });
       }
+
+      bindPersonaSwipe();
     }
 
     function bindDirectoryPickerInteractions() {
@@ -2963,7 +3221,7 @@ function renderPage() {
       const badgeClass = isSpawning ? 'starting' : (isActive ? 'active' : 'idle');
       const badgeText = isSpawning ? 'starting' : (isActive ? 'active' : 'idle');
 
-      return '<article class="session tap ' + (isSpawning ? 'spawning' : '') + '" data-name="' + esc(s.name) + '" data-persona-id="' + esc(personaId) + '" data-active="' + (isActive ? '1' : '0') + '" data-spawning="' + (isSpawning ? '1' : '0') + '">' +
+      return '<article class="session tap ' + (isSpawning ? 'spawning' : '') + '" data-name="' + esc(s.name) + '" data-picture-src="' + esc(pictureSrc) + '" data-persona-id="' + esc(personaId) + '" data-active="' + (isActive ? '1' : '0') + '" data-spawning="' + (isSpawning ? '1' : '0') + '">' +
         '<button type="button" class="kill" ' + (isActive ? '' : 'disabled') + ' data-kill="1" data-name="' + esc(s.name) + '" aria-label="Kill ' + esc(s.name) + '">&times;</button>' +
         '<div class="session-media">' +
           (pictureSrc
@@ -3014,7 +3272,7 @@ function renderPage() {
             window.open(connectUrlForPort(item.publicPort), '_blank', 'noopener,noreferrer');
             return;
           }
-          openIntentModal(item.name);
+          openIntentModal(item.name, card.getAttribute('data-picture-src') || '');
         });
       }
 
@@ -3209,6 +3467,8 @@ export {
   buildProviderLaunchCommand,
   fetchCodexbarUsage,
   normalizePersonaId,
+  normalizePersonaForTemplate,
   personaConfig,
+  personaIdsForTemplate,
   PERSONA_CONFIGS,
 };
