@@ -541,10 +541,17 @@ async function ensureTmuxSlotWindow(sessionName, workdir, shellConfig) {
   }
 
   const hasWindow = await tmuxWindowExists(sessionName, TMUX_SLOT_WINDOW);
-  if (!hasWindow) {
-    const added = await runCommand(TMUX_BIN, ['new-window', '-t', sessionName, '-n', TMUX_SLOT_WINDOW, '-c', workdir, shellCmd], 5000);
-    if (!added.ok) throw new Error(`failed to create tmux window ${TMUX_SLOT_WINDOW} in ${sessionName}: ${added.stderr || 'unknown error'}`);
+  if (hasWindow) {
+    // Window already exists — respawn the pane with the new shell config.
+    const respawned = await runCommand(TMUX_BIN, ['respawn-pane', '-k', '-t', `${sessionName}:${TMUX_SLOT_WINDOW}.0`, '-c', workdir, shellCmd], 5000);
+    if (!respawned.ok)
+      throw new Error(`failed to respawn tmux pane ${sessionName}:${TMUX_SLOT_WINDOW}.0: ${respawned.stderr || 'unknown error'}`);
   } else {
+    // Session exists but no atc window — rename the first window instead of
+    // creating a second tab, then respawn the pane with the hook-enabled shell.
+    const firstWindow = await runCommand(TMUX_BIN, ['list-windows', '-t', sessionName, '-F', '#{window_index}'], 3000);
+    const firstIdx = (firstWindow.stdout || '').trim().split('\n')[0] || '0';
+    await runCommand(TMUX_BIN, ['rename-window', '-t', `${sessionName}:${firstIdx}`, TMUX_SLOT_WINDOW], 3000);
     const respawned = await runCommand(TMUX_BIN, ['respawn-pane', '-k', '-t', `${sessionName}:${TMUX_SLOT_WINDOW}.0`, '-c', workdir, shellCmd], 5000);
     if (!respawned.ok)
       throw new Error(`failed to respawn tmux pane ${sessionName}:${TMUX_SLOT_WINDOW}.0: ${respawned.stderr || 'unknown error'}`);
@@ -844,7 +851,7 @@ async function recomputeDerivedForSlot(slot, stateRecord) {
     provider: lastProvider,
     activeSince: first.ts || stateRecord.spawnedAt || null,
     lastInteractionAt: interactionAt || stateRecord.lastInteractionAt || null,
-    cwd: lastWithCwd?.cwd || tmuxPaneState?.cwd || stateRecord.workdir || null,
+    cwd: tmuxPaneState?.cwd || lastWithCwd?.cwd || stateRecord.workdir || null,
     lastEventType: last.eventType || null,
     eventCount: events.length,
     shellStartedAt: events.find((e) => e.eventType === 'shell_start')?.ts || null,
@@ -1008,10 +1015,10 @@ async function getMergedSessions() {
         st.lastExitAt = new Date().toISOString();
       }
 
-      const displayWorkdir =
-        st.status === 'active' && st.runId && derived && derived.runId === st.runId && typeof derived.cwd === 'string' && derived.cwd
+      const displayWorkdir = tmuxPaneState?.cwd
+        || (st.status === 'active' && st.runId && derived && derived.runId === st.runId && typeof derived.cwd === 'string' && derived.cwd
           ? derived.cwd
-          : tmuxPaneState?.cwd || st.workdir;
+          : st.workdir);
       const displayLastInteraction =
         st.status === 'active' && st.runId && derived && derived.runId === st.runId && typeof derived.lastInteractionAt === 'string'
           ? derived.lastInteractionAt
@@ -1775,7 +1782,6 @@ function renderPage() {
             : '') +
           '<div class="line muted">Active for: ' + esc(s.startedAgo || 'n/a') + ' | Last interaction: ' + esc(s.lastInteractionAgo || 'n/a') + '</div>' +
           '<div class="line muted">Shell: ' + esc(compact((s.telemetry && s.telemetry.lastCommand) ? s.telemetry.lastCommand : 'no command yet', 60)) + '</div>' +
-          '<div class="line muted">Last event: ' + esc((s.telemetry && s.telemetry.lastEventType) ? s.telemetry.lastEventType : 'n/a') + ' | Last cmd duration: ' + esc((s.telemetry && Number.isFinite(Number(s.telemetry.durationMs))) ? (Math.round(Number(s.telemetry.durationMs)) + 'ms') : 'n/a') + '</div>' +
           (s.error ? '<div class="line error">' + esc(s.error) + '</div>' : '') +
           '<div class="action-hint ' + actionClass + '">' + esc(actionText) + '</div>' +
         '</div>' +
