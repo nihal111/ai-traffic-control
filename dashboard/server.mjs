@@ -206,6 +206,21 @@ function personaConfig(personaId) {
   return PERSONA_BY_ID.get(normalizePersonaId(personaId)) || PERSONA_BY_ID.get(PERSONA_NONE);
 }
 
+function normalizePicturePath(picturePath) {
+  const raw = String(picturePath || '').trim();
+  if (!raw) return '';
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return raw.replace(/^\/+/, '');
+}
+
+function sessionPictureSrc(session) {
+  const picturePath = normalizePicturePath(session?.picturePath);
+  if (!picturePath) return '';
+  if (/^https?:\/\//i.test(picturePath)) return picturePath;
+  if (picturePath.startsWith('assets/')) return `/${picturePath}`;
+  return `/assets/${picturePath}`;
+}
+
 async function readPersonaPrompt(personaId) {
   const persona = personaConfig(personaId);
   if (!persona || persona.id === PERSONA_NONE || !persona.promptFile) return null;
@@ -432,6 +447,7 @@ async function readSessionsConfig() {
         publicPort: Number(s.publicPort),
         backendPort: Number(s.backendPort),
         description: s.description ? String(s.description) : '',
+        picturePath: String(s.picturePath || s.pictureUrl || '').trim(),
       }))
       .filter((s) => s.name && Number.isFinite(s.publicPort) && Number.isFinite(s.backendPort));
   } catch {
@@ -1707,7 +1723,50 @@ function renderPage() {
       position: relative;
       overflow: hidden;
       transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
-      min-height: 160px;
+      min-height: 172px;
+      display: grid;
+      grid-template-columns: clamp(112px, 20vw, 148px) minmax(0, 1fr);
+      align-items: stretch;
+    }
+    .session-media {
+      position: relative;
+      min-height: 100%;
+      overflow: hidden;
+      background: radial-gradient(circle at 35% 20%, #20315c, #0d152a 72%);
+      border-right: 1px solid #2d3e66;
+    }
+    .session-media-fallback {
+      display: grid;
+      place-items: center;
+      width: 100%;
+      height: 100%;
+      color: #d8e5ff;
+      font-size: 30px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      background:
+        radial-gradient(circle at 30% 25%, #223763 0%, #152647 45%, #0d152a 100%);
+    }
+    .session-picture {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      object-position: center top;
+    }
+    .session-media::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(180deg, #00000012 0%, #00000000 45%, #00000038 100%);
+      pointer-events: none;
+    }
+    .session-body {
+      min-width: 0;
+      padding: 14px 52px 14px 14px;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
     }
     .session::before {
       content: "";
@@ -1730,7 +1789,6 @@ function renderPage() {
       from { transform: translateX(-100%); }
       to { transform: translateX(100%); }
     }
-    .session-inner { padding: 14px 52px 14px 14px; }
     .head {
       display: flex;
       align-items: flex-start;
@@ -2123,7 +2181,9 @@ function renderPage() {
       .mini { grid-template-columns: 62px 34px minmax(0, 1.35fr) minmax(84px, 0.9fr); gap: 5px; }
       .mini-label, .mini-pct, .mini-reset { font-size: 10px; }
       .windows { grid-template-columns: 1fr; }
-      .session-inner { padding-right: 46px; }
+      .session { grid-template-columns: 1fr; }
+      .session-media { min-height: 148px; border-right: 0; border-bottom: 1px solid #2d3e66; }
+      .session-body { padding: 14px 46px 14px 14px; }
       .name { font-size: 16px; }
       .template-grid { grid-template-columns: 1fr; }
     }
@@ -2405,6 +2465,16 @@ function renderPage() {
 
     function personaForId(personaId) {
       return PERSONA_MAP.get(normalizePersonaId(personaId)) || PERSONA_MAP.get(PERSONA_NONE);
+    }
+
+    function sessionPictureSrc(session) {
+      const raw = String(session && session.picturePath ? session.picturePath : '').trim();
+      if (!raw) return '';
+      if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+      let cleaned = raw;
+      while (cleaned.startsWith('/')) cleaned = cleaned.slice(1);
+      if (cleaned.startsWith('assets/')) return '/' + cleaned;
+      return '/assets/' + cleaned;
     }
 
     function renderPersonaSelector() {
@@ -2866,6 +2936,8 @@ function renderPage() {
       const isSpawning = spawning.has(s.name);
       const hasAgent = !!(s.telemetry && s.telemetry.agentType && s.telemetry.agentType !== 'none');
       const personaId = normalizePersonaId(s.personaId);
+      const pictureSrc = sessionPictureSrc(s);
+      const pictureAlt = s.name + ' portrait';
       const actionText = isSpawning ? 'Starting terminal…' : (isActive ? 'Tap to connect' : 'Tap to start');
       const actionClass = isSpawning ? 'color-starting' : (isActive ? 'color-active' : 'color-idle');
       const badgeClass = isSpawning ? 'starting' : (isActive ? 'active' : 'idle');
@@ -2873,7 +2945,12 @@ function renderPage() {
 
       return '<article class="session tap ' + (isSpawning ? 'spawning' : '') + '" data-name="' + esc(s.name) + '" data-persona-id="' + esc(personaId) + '" data-active="' + (isActive ? '1' : '0') + '" data-spawning="' + (isSpawning ? '1' : '0') + '">' +
         '<button type="button" class="kill" ' + (isActive ? '' : 'disabled') + ' data-kill="1" data-name="' + esc(s.name) + '" aria-label="Kill ' + esc(s.name) + '">&times;</button>' +
-        '<div class="session-inner">' +
+        '<div class="session-media">' +
+          (pictureSrc
+            ? '<img class="session-picture" src="' + esc(pictureSrc) + '" alt="' + esc(pictureAlt) + '" loading="lazy" decoding="async" />'
+            : '<div class="session-media-fallback" aria-hidden="true">' + esc(String(s.name || '?').trim().slice(0, 1).toUpperCase()) + '</div>') +
+        '</div>' +
+        '<div class="session-body">' +
           '<div class="head">' +
             '<div class="name">' + esc(s.name) + '</div>' +
             '<div class="head-badges">' +

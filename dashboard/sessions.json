@@ -1,6 +1,6 @@
 [
-  { "name": "Feynman", "publicPort": 7001, "backendPort": 8001, "description": "Feynman session" },
-  { "name": "Einstein", "publicPort": 7002, "backendPort": 8002, "description": "Einstein session" },
-  { "name": "Gauss", "publicPort": 7003, "backendPort": 8003, "description": "Gauss session" },
-  { "name": "Fermi", "publicPort": 7004, "backendPort": 8004, "description": "Fermi session" }
+  { "name": "Feynman", "publicPort": 7001, "backendPort": 8001, "description": "Feynman session", "picturePath": "scientists/feynman.jpg" },
+  { "name": "Einstein", "publicPort": 7002, "backendPort": 8002, "description": "Einstein session", "picturePath": "scientists/einstein.jpg" },
+  { "name": "Gauss", "publicPort": 7003, "backendPort": 8003, "description": "Gauss session", "picturePath": "scientists/gauss.jpg" },
+  { "name": "Fermi", "publicPort": 7004, "backendPort": 8004, "description": "Fermi session", "picturePath": "scientists/fermi.jpg" }
 ]
