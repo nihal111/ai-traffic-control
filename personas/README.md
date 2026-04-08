@@ -10,5 +10,6 @@ Current personas:
 - `tester.md`
 - `reviewer.md`
 - `slot-machine-bandit.md`
+- `documenter.md`
 
 These prompts are starting points. They should evolve as we observe real sessions and refine the behavior.

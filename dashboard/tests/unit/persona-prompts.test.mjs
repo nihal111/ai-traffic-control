@@ -15,7 +15,7 @@ test('persona aliases normalize to the new slot machine bandit id', () => {
   assert.equal(normalizePersonaId('Slot Machine Bandit'), 'slot_machine_bandit');
   assert.equal(personaConfig('slot_machine_bandit').label, 'Slot Machine Bandit');
   assert.deepEqual(personaIdsForTemplate('new_brainstorm'), ['none', 'brainstormer']);
-  assert.deepEqual(personaIdsForTemplate('continue_work'), ['none', 'refactor', 'tester', 'reviewer', 'slot_machine_bandit']);
+  assert.deepEqual(personaIdsForTemplate('continue_work'), ['none', 'refactor', 'tester', 'reviewer', 'slot_machine_bandit', 'documenter']);
   assert.equal(normalizePersonaForTemplate('tester', 'new_brainstorm'), 'none');
   assert.equal(normalizePersonaForTemplate('tester', 'continue_work'), 'tester');
 });

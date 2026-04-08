@@ -93,12 +93,20 @@ const PERSONA_CONFIGS = [
     hatStyle: 'rainbow',
     promptFile: 'slot-machine-bandit.md',
   },
+  {
+    id: 'documenter',
+    label: 'Documenter',
+    description: 'Write clear docs, explain complex systems, and sharpen READMEs.',
+    accent: '#14b8a6',
+    hatColor: '#14b8a6',
+    promptFile: 'documenter.md',
+  },
 ];
 const PERSONA_BY_ID = new Map(PERSONA_CONFIGS.map((persona) => [persona.id, persona]));
 const PERSONA_SELECTABLE = PERSONA_CONFIGS.filter((persona) => persona.id !== PERSONA_NONE);
 const TEMPLATE_PERSONA_IDS = {
   [TEMPLATE_NEW_BRAINSTORM]: [PERSONA_NONE, 'brainstormer'],
-  [TEMPLATE_CONTINUE_WORK]: [PERSONA_NONE, 'refactor', 'tester', 'reviewer', 'slot_machine_bandit'],
+  [TEMPLATE_CONTINUE_WORK]: [PERSONA_NONE, 'refactor', 'tester', 'reviewer', 'slot_machine_bandit', 'documenter'],
 };
 const PERSONA_ALIASES = new Map([
   ['lucky_dip_explorer', 'slot_machine_bandit'],
@@ -2753,7 +2761,7 @@ function renderPage() {
 
     function personaIdsForTemplate(templateId) {
       if (templateId === '${TEMPLATE_NEW_BRAINSTORM}') return [PERSONA_NONE, 'brainstormer'];
-      if (templateId === '${TEMPLATE_CONTINUE_WORK}') return [PERSONA_NONE, 'refactor', 'tester', 'reviewer', 'slot_machine_bandit'];
+      if (templateId === '${TEMPLATE_CONTINUE_WORK}') return [PERSONA_NONE, 'refactor', 'tester', 'reviewer', 'slot_machine_bandit', 'documenter'];
       return [PERSONA_NONE];
     }
 
