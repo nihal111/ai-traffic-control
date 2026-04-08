@@ -28,7 +28,7 @@ const USER_ZSHRC_PATH = process.env.ATC_USER_ZSHRC || path.join(process.env.HOME
 const USER_HISTORY_FILE = process.env.ATC_USER_HISTORY_FILE || path.join(process.env.HOME || '', '.zsh_history');
 const REFRESH_MS = 8000;
 const USAGE_TTL_MS = 10000;
-const TELEMETRY_INGEST_MS = Number(process.env.TELEMETRY_INGEST_MS || 20000);
+const TELEMETRY_INGEST_MS = Number(process.env.TELEMETRY_INGEST_MS || 2000);
 const TITLE_POLL_MS = Number(process.env.TITLE_POLL_MS || 300000);
 const SLOT_RUN_RETENTION = Number(process.env.SLOT_RUN_RETENTION || 3);
 
@@ -131,36 +131,67 @@ function parseWindow(windowValue, fallbackMinutes = null) {
   };
 }
 
-async function fetchCodexbarUsage(provider, source = 'auto') {
+async function fetchCodexbarUsage(provider, source = 'auto', runCommandFn = runCommand) {
+  const parseResult = (raw) => {
+    let parsed = null;
+    if (raw?.stdout && String(raw.stdout).trim()) {
+      try {
+        parsed = JSON.parse(raw.stdout);
+      } catch {
+        parsed = null;
+      }
+    }
+
+    const root = Array.isArray(parsed) ? parsed[0] : parsed;
+    if (root && typeof root === 'object') {
+      if (root.error) return { ok: false, error: root.error.message || 'provider error', provider };
+
+      const usage = root.usage || null;
+      const dashboard = root.openaiDashboard || null;
+      const primary = usage?.primary || dashboard?.primaryLimit || null;
+      const secondary = usage?.secondary || dashboard?.secondaryLimit || null;
+
+      return {
+        ok: true,
+        provider: (provider || '').toLowerCase(),
+        source: root.source || source || 'auto',
+        plan: usage?.loginMethod || dashboard?.accountPlan || null,
+        primary: parseWindow(primary),
+        secondary: parseWindow(secondary),
+        updatedAt: usage?.updatedAt || null,
+        fetchedAt: new Date().toISOString(),
+      };
+    }
+
+    if (!raw?.ok) return { ok: false, error: raw?.stderr || 'codexbar usage failed', provider };
+    return { ok: false, error: 'codexbar returned empty payload', provider };
+  };
+
+  const shouldAttemptGeminiRefresh = (errorMessage) => {
+    if (String(provider || '').toLowerCase() !== 'gemini') return false;
+    const msg = String(errorMessage || '').toLowerCase();
+    return (
+      msg.includes('could not extract oauth credentials from gemini cli') ||
+      msg.includes('could not find gemini cli oauth configuration')
+    );
+  };
+
   const args = ['usage', '--provider', provider, '--format', 'json'];
   if (source) args.push('--source', source);
-  const raw = await runCommand('codexbar', args);
-  if (!raw.ok) return { ok: false, error: raw.stderr || 'codexbar usage failed', provider };
+  const raw = await runCommandFn('codexbar', args);
+  let result = parseResult(raw);
 
-  try {
-    const parsed = JSON.parse(raw.stdout);
-    const root = Array.isArray(parsed) ? parsed[0] : parsed;
-    if (!root || typeof root !== 'object') return { ok: false, error: 'codexbar returned empty payload', provider };
-    if (root.error) return { ok: false, error: root.error.message || 'provider error', provider };
-
-    const usage = root.usage || null;
-    const dashboard = root.openaiDashboard || null;
-    const primary = usage?.primary || dashboard?.primaryLimit || null;
-    const secondary = usage?.secondary || dashboard?.secondaryLimit || null;
-
-    return {
-      ok: true,
-      provider: (provider || '').toLowerCase(),
-      source: root.source || source || 'auto',
-      plan: usage?.loginMethod || dashboard?.accountPlan || null,
-      primary: parseWindow(primary),
-      secondary: parseWindow(secondary),
-      updatedAt: usage?.updatedAt || null,
-      fetchedAt: new Date().toISOString(),
-    };
-  } catch (error) {
-    return { ok: false, error: `failed to parse codexbar json: ${error.message}`, provider };
+  if (shouldAttemptGeminiRefresh(result.error)) {
+    // Gemini CLI refreshes ~/.gemini/oauth_creds.json when invoked.
+    const refresh = await runCommandFn('gemini', ['-p', 'ok', '--output-format', 'json'], 25000);
+    if (refresh.ok) {
+      const retriedRaw = await runCommandFn('codexbar', args);
+      result = parseResult(retriedRaw);
+      if (result.ok) return { ...result, recoveredViaGeminiRefresh: true };
+    }
   }
+
+  return result;
 }
 
 function decorateUsageWindows(payload, labels) {
@@ -523,6 +554,39 @@ async function ensureTmuxSlotWindow(sessionName, workdir, shellConfig) {
   if (!selected.ok) throw new Error(`failed to select tmux window ${sessionName}:${TMUX_SLOT_WINDOW}: ${selected.stderr || 'unknown error'}`);
 }
 
+async function readTmuxSlotPaneState(slotName) {
+  if (!ENABLE_TMUX_BACKEND) return null;
+  const sessionName = tmuxSessionNameForSlot(slotName);
+  const result = await runCommand(
+    TMUX_BIN,
+    ['list-panes', '-t', sessionName, '-F', '#{window_name}\t#{pane_active}\t#{pane_current_path}\t#{session_activity}'],
+    3000
+  );
+  if (!result.ok) return null;
+
+  const rows = (result.stdout || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [windowName, paneActive, paneCurrentPath, sessionActivity] = line.split('\t');
+      return {
+        windowName: windowName || '',
+        paneActive: paneActive === '1',
+        paneCurrentPath: paneCurrentPath || null,
+        sessionActivity: Number(sessionActivity),
+      };
+    });
+  if (rows.length === 0) return null;
+
+  const preferred = rows.find((row) => row.windowName === TMUX_SLOT_WINDOW) || rows.find((row) => row.paneActive) || rows[0];
+  const activityMs = Number.isFinite(preferred.sessionActivity) && preferred.sessionActivity > 0 ? preferred.sessionActivity * 1000 : null;
+  return {
+    cwd: preferred.paneCurrentPath || null,
+    lastInteractionAt: activityMs ? new Date(activityMs).toISOString() : null,
+  };
+}
+
 function buildAtcZshrc(env) {
   return [
     '#!/usr/bin/env zsh',
@@ -713,7 +777,7 @@ function generateTitleFromEvents(events) {
 
   const provider = [...recent].reverse().find((e) => e.provider)?.provider;
   if (provider) return `${String(provider).toUpperCase()} session`;
-  return 'Interactive shell session';
+  return '';
 }
 
 function extractContextWindowPct(events) {
@@ -754,6 +818,7 @@ async function recomputeDerivedForSlot(slot, stateRecord) {
   const lastStop = [...events].reverse().find((e) => e.eventType === 'Stop');
   const turnCount = events.filter((e) => e.eventType === 'UserPromptSubmit').length;
   const contextWindowPct = extractContextWindowPct(events);
+  const tmuxPaneState = await readTmuxSlotPaneState(slot.name);
   const titlePath = runtime.titleFile;
 
   let title = '';
@@ -768,13 +833,18 @@ async function recomputeDerivedForSlot(slot, stateRecord) {
     await fs.writeFile(titlePath, `${title}\n`, 'utf8');
   }
 
+  const eventLastTs = last.ts ? new Date(last.ts).getTime() : NaN;
+  const tmuxLastTs = tmuxPaneState?.lastInteractionAt ? new Date(tmuxPaneState.lastInteractionAt).getTime() : NaN;
+  const interactionAt =
+    Number.isFinite(tmuxLastTs) && (!Number.isFinite(eventLastTs) || tmuxLastTs > eventLastTs) ? tmuxPaneState.lastInteractionAt : last.ts;
+
   const derived = {
     slot: slot.name,
     runId: stateRecord.runId,
     provider: lastProvider,
     activeSince: first.ts || stateRecord.spawnedAt || null,
-    lastInteractionAt: last.ts || stateRecord.lastInteractionAt || null,
-    cwd: lastWithCwd?.cwd || stateRecord.workdir || null,
+    lastInteractionAt: interactionAt || stateRecord.lastInteractionAt || null,
+    cwd: lastWithCwd?.cwd || tmuxPaneState?.cwd || stateRecord.workdir || null,
     lastEventType: last.eventType || null,
     eventCount: events.length,
     shellStartedAt: events.find((e) => e.eventType === 'shell_start')?.ts || null,
@@ -919,7 +989,10 @@ async function getMergedSessions() {
     cfg.map(async (slot) => {
       const st = state.sessions[slot.name] || defaultSessionState(slot);
       const runtime = slotRuntimePaths(slot.name);
-      const derived = await readJsonSafe(runtime.derivedFile, null);
+      if (st.status === 'active' && st.runId) {
+        await recomputeDerivedForSlot(slot, st);
+      }
+      const [derived, tmuxPaneState] = await Promise.all([readJsonSafe(runtime.derivedFile, null), readTmuxSlotPaneState(slot.name)]);
       const active = await checkPortOpen(slot.publicPort);
       const backendActive = await checkPortOpen(slot.backendPort);
       const spawnedTs = st.spawnedAt ? new Date(st.spawnedAt).getTime() : 0;
@@ -938,11 +1011,11 @@ async function getMergedSessions() {
       const displayWorkdir =
         st.status === 'active' && st.runId && derived && derived.runId === st.runId && typeof derived.cwd === 'string' && derived.cwd
           ? derived.cwd
-          : st.workdir;
+          : tmuxPaneState?.cwd || st.workdir;
       const displayLastInteraction =
         st.status === 'active' && st.runId && derived && derived.runId === st.runId && typeof derived.lastInteractionAt === 'string'
           ? derived.lastInteractionAt
-          : st.lastInteractionAt;
+          : tmuxPaneState?.lastInteractionAt || st.lastInteractionAt;
       const displayActiveSince =
         st.status === 'active' && st.runId && derived && derived.runId === st.runId && typeof derived.activeSince === 'string'
           ? derived.activeSince
@@ -1679,6 +1752,7 @@ function renderPage() {
     function sessionCard(s) {
       const isActive = s.status === 'active' && s.backendActive;
       const isSpawning = spawning.has(s.name);
+      const hasAgent = !!(s.telemetry && s.telemetry.agentType && s.telemetry.agentType !== 'none');
       const actionText = isSpawning ? 'Starting terminal…' : (isActive ? 'Tap to connect' : 'Tap to spawn');
       const actionClass = isSpawning ? 'color-starting' : (isActive ? 'color-active' : 'color-idle');
       const badgeClass = isSpawning ? 'starting' : (isActive ? 'active' : 'idle');
@@ -1693,9 +1767,12 @@ function renderPage() {
           '</div>' +
           '<div class="line"><strong>Task:</strong> ' + esc(s.taskTitle || 'Not set') + '</div>' +
           '<div class="line"><strong>Workdir:</strong> ' + esc(s.workdir || 'Not set') + '</div>' +
-          '<div class="line muted">Port ' + esc(s.publicPort) + ' -> backend ' + esc(s.backendPort) + '</div>' +
-          '<div class="line muted">Agent: ' + esc(s.agentType || 'none') + ' | Turns: ' + esc((s.telemetry && s.telemetry.turnCount) ? s.telemetry.turnCount : 0) + '</div>' +
-          '<div class="line muted">Context window: ' + esc((s.telemetry && Number.isFinite(Number(s.telemetry.contextWindowPct))) ? (Math.round(Number(s.telemetry.contextWindowPct)) + '%') : 'N/A') + '</div>' +
+          (hasAgent
+            ? '<div class="line muted">Agent: ' + esc(s.agentType || 'none') + ' | Turns: ' + esc((s.telemetry && s.telemetry.turnCount) ? s.telemetry.turnCount : 0) + '</div>'
+            : '') +
+          (hasAgent
+            ? '<div class="line muted">Context window: ' + esc((s.telemetry && Number.isFinite(Number(s.telemetry.contextWindowPct))) ? (Math.round(Number(s.telemetry.contextWindowPct)) + '%') : 'N/A') + '</div>'
+            : '') +
           '<div class="line muted">Active for: ' + esc(s.startedAgo || 'n/a') + ' | Last interaction: ' + esc(s.lastInteractionAgo || 'n/a') + '</div>' +
           '<div class="line muted">Shell: ' + esc(compact((s.telemetry && s.telemetry.lastCommand) ? s.telemetry.lastCommand : 'no command yet', 60)) + '</div>' +
           '<div class="line muted">Last event: ' + esc((s.telemetry && s.telemetry.lastEventType) ? s.telemetry.lastEventType : 'n/a') + ' | Last cmd duration: ' + esc((s.telemetry && Number.isFinite(Number(s.telemetry.durationMs))) ? (Math.round(Number(s.telemetry.durationMs)) + 'ms') : 'n/a') + '</div>' +
@@ -1866,17 +1943,25 @@ const server = http.createServer(async (req, res) => {
   json(res, 404, { error: 'not found' });
 });
 
-await loadState();
-await ingestTelemetry().catch(() => {});
-await refreshTitles().catch(() => {});
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`dashboard listening on http://0.0.0.0:${PORT}`);
-});
+async function startDashboardServer() {
+  await loadState();
+  await ingestTelemetry().catch(() => {});
+  await refreshTitles().catch(() => {});
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`dashboard listening on http://0.0.0.0:${PORT}`);
+  });
 
-setInterval(() => {
-  ingestTelemetry().catch(() => {});
-}, TELEMETRY_INGEST_MS);
+  setInterval(() => {
+    ingestTelemetry().catch(() => {});
+  }, TELEMETRY_INGEST_MS);
 
-setInterval(() => {
-  refreshTitles().catch(() => {});
-}, TITLE_POLL_MS);
+  setInterval(() => {
+    refreshTitles().catch(() => {});
+  }, TITLE_POLL_MS);
+}
+
+if (process.env.DASHBOARD_TEST_IMPORT !== '1') {
+  await startDashboardServer();
+}
+
+export { fetchCodexbarUsage };
