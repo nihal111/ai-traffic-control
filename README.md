@@ -1,31 +1,61 @@
 # AI Traffic Control
 
-Run your personal AI agents continuously, and manage everything from one browser dashboard.
+Run real CLI agent workflows from your phone without giving up terminal power.
 
-**Why this over Termius:** you get a live control-plane view first, instead of repeated connect -> SSH -> `tmux` just to check status.
+AI Traffic Control is a mobile-first control plane for people who rely on Codex/Claude/Gemini in the CLI and want the same operational control away from their desk.
 
-AI Traffic Control is built for an individual operator with their own provider subscriptions who wants to be productive on the go:
-- Keep multiple `tmux`-backed scientist slots running all day.
-- Monitor active, idle, and unborn sessions at a glance.
-- Resume or restart work quickly from mobile or desktop.
-- Use hot-dial assistants (like Calendar Manager and Second Brain) for narrow, repeatable tasks.
-- Track provider usage across Codex, Claude, and Gemini, including 5-hour and weekly windows where available, to make smarter subscription decisions.
+## Why This Exists
 
-The goal is simple: let agents handle odds-and-ends in the background while you are away from your desk, and give you a fast way to steer, nudge, and continue that work when needed.
+### Pain Point 1: IM-driven agent interfaces are operationally fragile
 
-Access model: this setup typically relies on Tailscale to reach the machine running the local dashboard (`localhost` on the host). Your phone/laptop connects to that same Tailscale network, which is why the local service is reachable remotely without opening it to the public internet.
+For many users, agent workflows routed through chat apps (for example Telegram/WhatsApp bridges) break down when sessions become long-running, stateful, or tool-heavy.
 
-Security posture: nothing is globally exposed by default. The dashboard and slot endpoints stay inside your private VPN boundary, so there is no public attack surface from open internet ingress. Operational risk is mostly within your own control: agent permissions, provider/tool access, and what you choose to run.
+Common failure modes:
+- Message delivery != reliable execution state.
+- Plugin/channel glitches can block or delay responses.
+- Rich CLI ergonomics (shell tooling, structured logs, tight loops) are hard to preserve inside IM UX.
 
-Project status: active and evolving (expect configuration and workflow changes between commits).
+### Pain Point 2: Traditional mobile terminal tools are not enough
 
-## Dashboard Highlights
+The usual model is: open mobile terminal app -> reconnect -> SSH -> attach tmux -> inspect each session manually.
 
-- **Usage cards per provider:** Unified usage telemetry for Codex, Claude, and Gemini.
-- **Hot-dial custom agents:** Lightweight assistants (for example Calendar Manager and Second Brain) with simplified launch flow.
-- **Scientist fleet states:** Four scientists visible in different lifecycle modes (`active`, `idle`, `unborn`) with persona hats/badges where applicable.
-- **Intent modal:** Structured session start flow with provider/template/persona controls for scientist launches.
-- **AI session title summarizer:** Gemini-based title updates from recent transcript context, written directly to session state.
+That creates friction:
+- High context-switch cost to understand "what needs attention now".
+- No single operator dashboard across multiple agent sessions.
+- Limited workflow customization for hot-starting repeatable agent tasks.
+
+## What AI Traffic Control Gives You
+
+AI Traffic Control combines a browser terminal surface (xterm.js + ttyd + tmux) with an operator dashboard.
+
+Core capabilities:
+- Fleet view of AI sessions with lifecycle states (`active`, `idle`, `unborn`).
+- In-browser terminal control for each slot from mobile or desktop.
+- Provider usage telemetry (Codex/Claude/Gemini) for 5-hour and weekly usage awareness where available.
+- Hot-dial agents for one-tap launches of specialized workflows.
+- Intent modal with provider/template/persona/workdir controls before spawn.
+- Session title summarization from recent transcript context.
+
+Outcome: you can steer serious CLI work on the go, instead of running a degraded “chat bot” version of your workflow.
+
+## At A Glance Comparison
+
+| Workflow Model | Common Friction | AI Traffic Control Difference |
+| --- | --- | --- |
+| IM-based agent bridge | Message transport and execution state can diverge; limited CLI ergonomics | Keeps you in terminal-native workflows with direct session control |
+| Mobile terminal app only | Reconnect and inspect sessions one-by-one; limited fleet visibility | Unified dashboard + slot state + telemetry for fast triage |
+| Raw tmux over SSH | Powerful but high manual overhead from phone | One-tap hot-dials, guided spawn flow, and browser terminal UX |
+
+## Positioning in One Line
+
+AI Traffic Control is a control plane for mobile CLI agent operations, not a chat wrapper.
+
+## Who This Is For
+
+- Builders running multiple long-lived AI coding/research sessions.
+- Operators who need fast intervention loops from phone + desktop.
+- Individuals optimizing subscription quota windows across providers.
+- Users who want deep customization over session launch and runtime behavior.
 
 ## Visual Tour
 
@@ -133,6 +163,17 @@ lsof -nP -iTCP -sTCP:LISTEN | rg ':(7001|7002|7003|7004|8001|8002|8003|8004|1111
 tmux ls | rg 'dashboard-1111'
 curl -sS http://127.0.0.1:1111/api/sessions | jq '{count: (.sessions|length), hasRecentWorkdirs: has("recentWorkdirs")}'
 ```
+
+## Security Model
+
+Typical access model:
+- Dashboard runs locally on the host.
+- Remote phone/laptop access is commonly handled through a private VPN (for example Tailscale).
+
+Security posture:
+- Nothing is publicly exposed by default.
+- Slot endpoints and dashboard remain inside your private network boundary.
+- Main operational risks are in your own agent permissions, tool access, and execution policy.
 
 ## Common Workflows
 
