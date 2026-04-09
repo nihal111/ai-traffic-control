@@ -1,13 +1,72 @@
 # AI Traffic Control
 
-Coordinate multiple long-running terminal sessions from one dashboard, with mobile-friendly `ttyd` access behind `nginx` and `tmux` persistence.
+Run your personal AI agents continuously, and manage everything from one browser dashboard.
 
-This repository is useful if you want to:
-- Run several named terminal slots in parallel (for example: different agents/personas).
-- See slot state and lightweight telemetry in a browser dashboard.
-- Attach from desktop or phone without losing session history.
+**Why this over Termius:** you get a live control-plane view first, instead of repeated connect -> SSH -> `tmux` just to check status.
+
+AI Traffic Control is built for an individual operator with their own provider subscriptions who wants to be productive on the go:
+- Keep multiple `tmux`-backed scientist slots running all day.
+- Monitor active, idle, and unborn sessions at a glance.
+- Resume or restart work quickly from mobile or desktop.
+- Use hot-dial assistants (like Calendar Manager and Second Brain) for narrow, repeatable tasks.
+- Track provider usage across Codex, Claude, and Gemini, including 5-hour and weekly windows where available, to make smarter subscription decisions.
+
+The goal is simple: let agents handle odds-and-ends in the background while you are away from your desk, and give you a fast way to steer, nudge, and continue that work when needed.
+
+Access model: this setup typically relies on Tailscale to reach the machine running the local dashboard (`localhost` on the host). Your phone/laptop connects to that same Tailscale network, which is why the local service is reachable remotely without opening it to the public internet.
+
+Security posture: nothing is globally exposed by default. The dashboard and slot endpoints stay inside your private VPN boundary, so there is no public attack surface from open internet ingress. Operational risk is mostly within your own control: agent permissions, provider/tool access, and what you choose to run.
 
 Project status: active and evolving (expect configuration and workflow changes between commits).
+
+## Dashboard Highlights
+
+- **Usage cards per provider:** Unified usage telemetry for Codex, Claude, and Gemini.
+- **Hot-dial custom agents:** Lightweight assistants (for example Calendar Manager and Second Brain) with simplified launch flow.
+- **Scientist fleet states:** Four scientists visible in different lifecycle modes (`active`, `idle`, `unborn`) with persona hats/badges where applicable.
+- **Intent modal:** Structured session start flow with provider/template/persona controls for scientist launches.
+
+## Visual Tour (Add Screenshots/GIFs Here)
+
+Add images under a folder like `docs/images/` and replace the placeholders below.
+
+### 1) Provider Usage + Hot-Dial Agents
+
+What this should show:
+- Provider-level usage cards for Codex/Claude/Gemini.
+- Calendar Manager + Second Brain hot-dial cards.
+- A short annotation explaining how usage windows support subscription optimization.
+
+Screenshot placeholder:
+- `[TODO: docs/images/dashboard-usage-and-hot-dials.png]`
+
+Future GIF placeholder:
+- `[TODO: docs/images/dashboard-usage-and-hot-dials.gif]`
+
+### 2) Scientist Fleet States
+
+What this should show:
+- Four scientist cards in mixed states (`active`, `idle`, `unborn`).
+- Persona hat/badge examples on selected scientists.
+- Annotation explaining how to identify idling sessions that need intervention.
+
+Screenshot placeholder:
+- `[TODO: docs/images/dashboard-scientist-states.png]`
+
+Future GIF placeholder:
+- `[TODO: docs/images/dashboard-scientist-states.gif]`
+
+### 3) Intent Modal
+
+What this should show:
+- The intent modal with provider/template/persona controls.
+- Annotation describing the quick path from “idle scientist” to “live run”.
+
+Screenshot placeholder:
+- `[TODO: docs/images/dashboard-intent-modal.png]`
+
+Future GIF placeholder:
+- `[TODO: docs/images/dashboard-intent-modal.gif]`
 
 ## Quick Start (5 minutes)
 
