@@ -25,6 +25,23 @@ Events are automatically classified as **routine** or **non-routine** based on t
 ### Authentication
 The workspace uses `credentials.json` and `token.pickle` at the project root for Google Calendar OAuth. The `CalendarClient` class wraps `gcsa.GoogleCalendar`.
 
+### How to call these tools
+
+Always `cd ~/Code/CalendarAutomation` before running Python. The package is `calendar_tools` — import everything from it:
+
+```python
+cd ~/Code/CalendarAutomation && python3 -c "
+from calendar_tools import CalendarClient, daily_briefing, get_events, get_non_routine_events, find_open_slots, create_event, update_event, delete_event
+import json
+
+client = CalendarClient()
+briefing = daily_briefing(client)
+print(json.dumps(briefing, indent=2, default=str))
+"
+```
+
+All datetimes must be timezone-aware. Use `datetime` with `tzlocal.get_localzone()` — never create naive datetimes. Suppress stderr warnings with `2>/dev/null` if output is noisy (Python 3.9 google-auth deprecation warnings are non-blocking).
+
 ## How to behave
 
 - **Be proactive.** When the user says "what's my day look like?" — pull the daily briefing and summarise it clearly. Lead with the non-routine events that need their attention, then mention open slots.
