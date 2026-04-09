@@ -35,7 +35,9 @@ This view shows:
 - Hot-dial agents at the top of the fleet panel.
 - Active scientist cards with current task/workdir context.
 
-[![Dashboard overview](https://drive.usercontent.google.com/download?id=179UyavAANO4LGiaEdBtOUlsnJBh_FJ1a&export=view)](https://drive.google.com/file/d/179UyavAANO4LGiaEdBtOUlsnJBh_FJ1a/view?usp=drivesdk)
+<a href="https://drive.google.com/file/d/179UyavAANO4LGiaEdBtOUlsnJBh_FJ1a/view?usp=drivesdk">
+  <img src="https://drive.usercontent.google.com/download?id=179UyavAANO4LGiaEdBtOUlsnJBh_FJ1a&export=view" alt="Dashboard overview" height="520" />
+</a>
 
 GIF walkthrough: coming soon.
 
@@ -46,7 +48,9 @@ This view shows:
 - Command output stream and prompt loop inside the managed terminal surface.
 - How AI Traffic Control lets you operate terminal sessions without opening a separate terminal app.
 
-[![Browser terminal view](https://drive.usercontent.google.com/download?id=1O7tuYj-3whmwcA4xieL-wykoFh0dZ6Us&export=view)](https://drive.google.com/file/d/1O7tuYj-3whmwcA4xieL-wykoFh0dZ6Us/view?usp=drivesdk)
+<a href="https://drive.google.com/file/d/1O7tuYj-3whmwcA4xieL-wykoFh0dZ6Us/view?usp=drivesdk">
+  <img src="https://drive.usercontent.google.com/download?id=1O7tuYj-3whmwcA4xieL-wykoFh0dZ6Us&export=view" alt="Browser terminal view" height="520" />
+</a>
 
 GIF walkthrough: coming soon.
 
@@ -57,7 +61,9 @@ This view shows:
 - Template and persona controls.
 - Working directory and recent-directory shortcuts before launch.
 
-[![Intent modal](https://drive.usercontent.google.com/download?id=1Hqo1obKcj0XxRYWk16M37dtXOuwwYZVs&export=view)](https://drive.google.com/file/d/1Hqo1obKcj0XxRYWk16M37dtXOuwwYZVs/view?usp=drivesdk)
+<a href="https://drive.google.com/file/d/1Hqo1obKcj0XxRYWk16M37dtXOuwwYZVs/view?usp=drivesdk">
+  <img src="https://drive.usercontent.google.com/download?id=1Hqo1obKcj0XxRYWk16M37dtXOuwwYZVs&export=view" alt="Intent modal" height="520" />
+</a>
 
 GIF walkthrough: coming soon.
 
@@ -68,7 +74,9 @@ This view shows:
 - Fast triage context per scientist (task, workdir, turns, and recency).
 - How to identify sessions that need intervention vs. sessions ready to start.
 
-[![Scientist fleet states](https://drive.usercontent.google.com/download?id=1SPfvSTXpadh0AeBNuQk6TA6mZ963JMDA&export=view)](https://drive.google.com/file/d/1SPfvSTXpadh0AeBNuQk6TA6mZ963JMDA/view?usp=drivesdk)
+<a href="https://drive.google.com/file/d/1SPfvSTXpadh0AeBNuQk6TA6mZ963JMDA/view?usp=drivesdk">
+  <img src="https://drive.usercontent.google.com/download?id=1SPfvSTXpadh0AeBNuQk6TA6mZ963JMDA&export=view" alt="Scientist fleet states" height="520" />
+</a>
 
 GIF walkthrough: coming soon.
 
