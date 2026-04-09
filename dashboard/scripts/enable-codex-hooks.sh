@@ -3,6 +3,10 @@ set -euo pipefail
 
 CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
 CONFIG_FILE="$CODEX_DIR/config.toml"
+HOOKS_FILE="$CODEX_DIR/hooks.json"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+HOOK_FORWARDER="$REPO_ROOT/dashboard/scripts/codex-hook-forwarder.mjs"
 
 mkdir -p "$CODEX_DIR"
 
@@ -60,3 +64,100 @@ END {
 
 mv "$tmp_file" "$CONFIG_FILE"
 echo "enabled codex_hooks in $CONFIG_FILE"
+
+# Install global Codex hooks so sessions started in other workdirs still forward
+# UserPromptSubmit/Stop events into the dashboard writer.
+cat > "$HOOKS_FILE" <<JSON
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ATC_PROVIDER=codex node \"$HOOK_FORWARDER\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ATC_PROVIDER=codex node \"$HOOK_FORWARDER\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Read|Write|Edit|MultiEdit|Glob|Grep|LS|WebFetch|WebSearch|Task|TodoWrite|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ATC_PROVIDER=codex node \"$HOOK_FORWARDER\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Read|Write|Edit|MultiEdit|Glob|Grep|LS|WebFetch|WebSearch|Task|TodoWrite|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ATC_PROVIDER=codex node \"$HOOK_FORWARDER\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ATC_PROVIDER=codex node \"$HOOK_FORWARDER\""
+          }
+        ]
+      }
+    ]
+  }
+}
+JSON
+
+echo "wrote global hooks to $HOOKS_FILE"
+
+# ── Claude global hooks ────────────────────────────────────────
+# Claude's project-level hooks (.claude/settings.json in the repo) only fire
+# when Claude is launched from the ATC project directory.  Install hooks into
+# the global ~/.claude/settings.json so sessions spawned from any CWD still
+# forward events to the dashboard.
+CLAUDE_DIR="$HOME/.claude"
+CLAUDE_SETTINGS="$CLAUDE_DIR/settings.json"
+TOOL_MATCHER="Bash|Read|Write|Edit|MultiEdit|Glob|Grep|LS|WebFetch|WebSearch|Task|TodoWrite|NotebookEdit"
+
+mkdir -p "$CLAUDE_DIR"
+
+# Merge hooks into existing settings (preserve model, permissions, etc.)
+node -e "
+  const fs = require('fs');
+  const settingsPath = process.argv[1];
+  const forwarder = process.argv[2];
+  const matcher = process.argv[3];
+  const cmd = 'ATC_PROVIDER=claude node \"' + forwarder + '\"';
+  const hooks = {
+    SessionStart: [{ hooks: [{ type: 'command', command: cmd }] }],
+    UserPromptSubmit: [{ hooks: [{ type: 'command', command: cmd }] }],
+    PreToolUse: [{ matcher, hooks: [{ type: 'command', command: cmd }] }],
+    PostToolUse: [{ matcher, hooks: [{ type: 'command', command: cmd }] }],
+    Stop: [{ hooks: [{ type: 'command', command: cmd }] }],
+  };
+  let existing = {};
+  try { existing = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
+  existing.hooks = hooks;
+  fs.writeFileSync(settingsPath, JSON.stringify(existing, null, 2) + '\n');
+" "$CLAUDE_SETTINGS" "$HOOK_FORWARDER" "$TOOL_MATCHER"
+
+echo "merged claude hooks into $CLAUDE_SETTINGS"

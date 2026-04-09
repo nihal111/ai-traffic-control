@@ -4,8 +4,9 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 
 // ── Summarizer trigger config ──────────────────────────────────
-const SUMMARY_TRIGGER_INTERVAL = Number(process.env.ATC_SUMMARY_TRIGGER_INTERVAL || 5);
+const SUMMARY_TRIGGER_INTERVAL = Number(process.env.ATC_SUMMARY_TRIGGER_INTERVAL || 1);
 const SUMMARIZER_SCRIPT = path.join(path.dirname(new URL(import.meta.url).pathname), 'summarize-title.mjs');
+const STATE_FILE = process.env.SESSIONS_STATE_FILE || path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'state', 'sessions-state.json');
 
 function ensureParent(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -154,7 +155,8 @@ const shouldSummarize =
 
 if (
   shouldSummarize &&
-  currentDir &&
+  slot !== 'unknown' &&
+  !process.env.ATC_NO_SUMMARIZER &&
   fs.existsSync(SUMMARIZER_SCRIPT)
 ) {
   const child = spawn(process.execPath, [SUMMARIZER_SCRIPT], {
@@ -163,7 +165,8 @@ if (
     env: {
       ...process.env,
       ATC_EVENTS_FILE: eventsFile,
-      ATC_CURRENT_DIR: currentDir,
+      ATC_SLOT: slot,
+      ATC_STATE_FILE: STATE_FILE,
     },
   });
   child.unref();

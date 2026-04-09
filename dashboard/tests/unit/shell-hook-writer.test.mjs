@@ -13,7 +13,7 @@ const WRITER = path.resolve(__dirname, '../../scripts/shell-hook-writer.mjs');
 function runWriter({ env = {}, stdin = '' } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [WRITER], {
-      env: { ...process.env, ...env },
+      env: { ...process.env, ATC_NO_SUMMARIZER: '1', ...env },
       stdio: ['pipe', 'ignore', 'pipe'],
     });
 
