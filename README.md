@@ -26,47 +26,55 @@ Project status: active and evolving (expect configuration and workflow changes b
 - **Scientist fleet states:** Four scientists visible in different lifecycle modes (`active`, `idle`, `unborn`) with persona hats/badges where applicable.
 - **Intent modal:** Structured session start flow with provider/template/persona controls for scientist launches.
 
-## Visual Tour (Add Screenshots/GIFs Here)
+## Visual Tour
 
-Add images under a folder like `docs/images/` and replace the placeholders below.
+### 1) Dashboard At A Glance (Usage + Hot-Dials + Scientist Status)
 
-### 1) Provider Usage + Hot-Dial Agents
+This view shows:
+- Provider usage cards for Codex/Claude/Gemini.
+- Hot-dial agents at the top of the fleet panel.
+- Active scientist cards with current task/workdir context.
 
-What this should show:
-- Provider-level usage cards for Codex/Claude/Gemini.
-- Calendar Manager + Second Brain hot-dial cards.
-- A short annotation explaining how usage windows support subscription optimization.
+[![Dashboard overview](https://i.ibb.co/DPg9JJLH/Screenshot-20260409-111523-Firefox.jpg)](https://ibb.co/WNpkhhs4)
 
-Screenshot placeholder:
-- `[TODO: docs/images/dashboard-usage-and-hot-dials.png]`
+GIF walkthrough: coming soon.
 
-Future GIF placeholder:
-- `[TODO: docs/images/dashboard-usage-and-hot-dials.gif]`
+### 2) Browser Terminal Session (xterm-based CLI Control)
 
-### 2) Scientist Fleet States
+This view shows:
+- The in-browser terminal used to drive a live CLI session from mobile/desktop.
+- Command output stream and prompt loop inside the managed terminal surface.
+- How AI Traffic Control lets you operate terminal sessions without opening a separate terminal app.
 
-What this should show:
-- Four scientist cards in mixed states (`active`, `idle`, `unborn`).
-- Persona hat/badge examples on selected scientists.
-- Annotation explaining how to identify idling sessions that need intervention.
+[![Browser terminal view](https://i.ibb.co/Mkk11Pnv/Screenshot-20260408-000908-Firefox.jpg)](https://ibb.co/chh882JB)
 
-Screenshot placeholder:
-- `[TODO: docs/images/dashboard-scientist-states.png]`
+GIF walkthrough: coming soon.
 
-Future GIF placeholder:
-- `[TODO: docs/images/dashboard-scientist-states.gif]`
+### 3) Intent Modal (Start Session Flow)
 
-### 3) Intent Modal
+This view shows:
+- Provider selection with live usage context.
+- Template and persona controls.
+- Working directory and recent-directory shortcuts before launch.
 
-What this should show:
-- The intent modal with provider/template/persona controls.
-- Annotation describing the quick path from “idle scientist” to “live run”.
+[![Intent modal](https://i.ibb.co/JwBB28Ct/Screenshot-20260409-112037-Firefox.jpg)](https://ibb.co/q3yy9hxj)
 
-Screenshot placeholder:
-- `[TODO: docs/images/dashboard-intent-modal.png]`
+GIF walkthrough: coming soon.
 
-Future GIF placeholder:
-- `[TODO: docs/images/dashboard-intent-modal.gif]`
+### 4) Scientist Fleet States (`active` / `idle` / `unborn`)
+
+This view shows:
+- Mixed scientist lifecycle states at once (`active`, `idle`, `unborn`).
+- Fast triage context per scientist (task, workdir, turns, and recency).
+- How to identify sessions that need intervention vs. sessions ready to start.
+
+[![Scientist fleet states](https://i.ibb.co/6RX5KJQt/Screenshot-20260409-112204-Firefox.jpg)](https://ibb.co/0js30V59)
+
+GIF walkthrough: coming soon.
+
+### 5) Additional Visuals
+
+- Persona hat/badge deep-dive screenshots: coming soon.
 
 ## Quick Start (5 minutes)
 
