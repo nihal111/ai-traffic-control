@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+
+// ── Summarizer trigger config ──────────────────────────────────
+const SUMMARY_TRIGGER_INTERVAL = Number(process.env.ATC_SUMMARY_TRIGGER_INTERVAL || 5);
+const SUMMARIZER_SCRIPT = path.join(path.dirname(new URL(import.meta.url).pathname), 'summarize-title.mjs');
 
 function ensureParent(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -115,6 +120,12 @@ if (event.command) {
 if (event.durationMs !== null) nextMeta.lastDurationMs = event.durationMs;
 if (event.eventType === 'shell_start') nextMeta.shellStartedAt = nowIso;
 
+// Track user prompt count separately for summarizer trigger
+const isUserPrompt = event.eventType === 'UserPromptSubmit';
+if (isUserPrompt) {
+  nextMeta.userPromptCount = Number(nextMeta.userPromptCount || 0) + 1;
+}
+
 writeJsonAtomic(metaFile, nextMeta);
 
 const nextDerived = {
@@ -133,3 +144,27 @@ const nextDerived = {
 };
 
 writeJsonAtomic(derivedFile, nextDerived);
+
+// ── Trigger AI title summarizer on 1st prompt, then every N after ──
+// Fires at userPromptCount: 1, 1+N, 1+2N, ... (i.e. 1, 6, 11, 16 for N=5)
+const shouldSummarize =
+  isUserPrompt &&
+  nextMeta.userPromptCount > 0 &&
+  (nextMeta.userPromptCount === 1 || (nextMeta.userPromptCount - 1) % SUMMARY_TRIGGER_INTERVAL === 0);
+
+if (
+  shouldSummarize &&
+  currentDir &&
+  fs.existsSync(SUMMARIZER_SCRIPT)
+) {
+  const child = spawn(process.execPath, [SUMMARIZER_SCRIPT], {
+    stdio: 'ignore',
+    detached: true,
+    env: {
+      ...process.env,
+      ATC_EVENTS_FILE: eventsFile,
+      ATC_CURRENT_DIR: currentDir,
+    },
+  });
+  child.unref();
+}

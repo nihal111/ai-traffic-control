@@ -1176,10 +1176,8 @@ async function recomputeDerivedForSlot(slot, stateRecord) {
     title = '';
   }
 
-  if (!title) {
-    title = generateTitleFromEvents(events);
-    await fs.writeFile(titlePath, `${title}\n`, 'utf8');
-  }
+  // title.txt is written by the AI summarizer (summarize-title.mjs).
+  // When empty, the dashboard falls back to st.taskTitle ("Fresh X session").
 
   const eventLastTs = last.ts ? new Date(last.ts).getTime() : NaN;
   const tmuxLastTs = tmuxPaneState?.lastInteractionAt ? new Date(tmuxPaneState.lastInteractionAt).getTime() : NaN;
@@ -1222,17 +1220,13 @@ async function ingestTelemetry() {
 }
 
 async function refreshTitles() {
+  // Titles are now written exclusively by the AI summarizer (summarize-title.mjs).
+  // This function just recomputes derived state so new titles are picked up.
   const [cfg, state] = await Promise.all([readSessionsConfig(), loadState()]);
   await Promise.all(
     cfg.map(async (slot) => {
       const st = state.sessions[slot.name];
       if (!st || st.status !== 'active' || !st.runId) return;
-      const runtime = slotRuntimePaths(slot.name);
-      const events = await readEvents(runtime.eventsFile, st.runId);
-      if (events.length === 0) return;
-      const title = generateTitleFromEvents(events);
-      if (!title) return;
-      await fs.writeFile(runtime.titleFile, `${title}\n`, 'utf8');
       await recomputeDerivedForSlot(slot, st);
     })
   );
@@ -1455,7 +1449,7 @@ async function spawnSlotByName(name, options = {}) {
   st.provider = provider;
   st.templateId = templateId;
   st.personaId = personaId;
-  if (taskTitle) st.taskTitle = taskTitle;
+  st.taskTitle = taskTitle || `Fresh ${provider} session`;
   if (agentType) st.agentType = agentType;
   st.agentPromptFile = agentPromptFile;
   st.workdir = workdir;
