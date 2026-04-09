@@ -112,6 +112,41 @@ const PERSONA_ALIASES = new Map([
   ['lucky_dip_explorer', 'slot_machine_bandit'],
   ['lucky-dip-explorer', 'slot_machine_bandit'],
 ]);
+const HOT_DIAL_AGENTS = [
+  {
+    id: 'calendar_manager',
+    title: 'Calendar Manager',
+    description: 'Personal scheduling assistant tuned for priorities and Google Calendar workflows.',
+    icon: 'calendar',
+    emoji: '📅',
+    enabled: true,
+  },
+  {
+    id: 'second_brain',
+    title: 'Second Brain',
+    description: 'Think partner for exploring ideas and retrieving context from your Obsidian vault.',
+    icon: 'brain',
+    emoji: '🧠',
+    enabled: true,
+  },
+  {
+    id: 'placeholder_1',
+    title: 'Coming Soon',
+    description: 'Reserved slot for a future specialized assistant.',
+    icon: 'placeholder',
+    emoji: '➕',
+    enabled: false,
+  },
+  {
+    id: 'placeholder_2',
+    title: 'Coming Soon',
+    description: 'Reserved slot for a future specialized assistant.',
+    icon: 'placeholder',
+    emoji: '➕',
+    enabled: false,
+  },
+];
+const HOT_DIAL_BY_ID = new Map(HOT_DIAL_AGENTS.filter((agent) => agent.enabled).map((agent) => [agent.id, agent]));
 
 let usageCache = { value: null, fetchedAt: 0, pending: null };
 
@@ -1391,6 +1426,8 @@ async function spawnSlotByName(name, options = {}) {
   const templateProvided = typeof options.templateId === 'string' && options.templateId.trim();
   const templateId = normalizeTemplateId(options.templateId, TEMPLATE_CONTINUE_WORK);
   const personaId = normalizePersonaId(options.personaId, PERSONA_NONE);
+  const taskTitle = typeof options.taskTitle === 'string' && options.taskTitle.trim() ? options.taskTitle.trim() : null;
+  const agentType = typeof options.agentType === 'string' && options.agentType.trim() ? options.agentType.trim() : null;
   const requestedWorkdir = typeof options.workdir === 'string' ? options.workdir : '';
   const effectiveWorkdirInput = requestedWorkdir.trim() || (templateProvided ? HOME_DIRECTORY : (st.workdir || DEFAULT_WORKDIR));
   const workdir = await resolveWorkdirForSpawn(templateId, effectiveWorkdirInput);
@@ -1408,6 +1445,8 @@ async function spawnSlotByName(name, options = {}) {
   st.provider = provider;
   st.templateId = templateId;
   st.personaId = personaId;
+  if (taskTitle) st.taskTitle = taskTitle;
+  if (agentType) st.agentType = agentType;
   st.workdir = workdir;
   if (templateId === TEMPLATE_CONTINUE_WORK) appendRecentWorkdir(state, workdir);
   await rotateSlotCurrent(slot.name, st.runId);
@@ -1437,6 +1476,35 @@ async function spawnSlotByName(name, options = {}) {
   st.lastInteractionAt = st.spawnedAt;
   state.sessions[slot.name] = st;
   await saveState(state);
+}
+
+async function launchHotDialAgent(dialId, provider) {
+  const agent = HOT_DIAL_BY_ID.get(String(dialId || '').trim());
+  if (!agent) throw new Error('unknown hot dial agent');
+
+  const [cfg, state] = await Promise.all([readSessionsConfig(), loadState()]);
+  let selectedSlot = null;
+  for (const slot of cfg) {
+    const st = state.sessions[slot.name] || defaultSessionState(slot);
+    if (st.status === 'active') continue;
+    const backendUp = await checkPortOpen(slot.backendPort);
+    if (backendUp) continue;
+    selectedSlot = slot;
+    break;
+  }
+
+  if (!selectedSlot) throw new Error('no idle scientist slots available');
+
+  await spawnSlotByName(selectedSlot.name, {
+    provider: normalizeProvider(provider),
+    templateId: TEMPLATE_NEW_BRAINSTORM,
+    personaId: PERSONA_NONE,
+    workdir: HOME_DIRECTORY,
+    taskTitle: agent.title,
+    agentType: agent.id,
+  });
+
+  return { slotName: selectedSlot.name, agentId: agent.id };
 }
 
 async function killSlotByName(name) {
@@ -1538,6 +1606,7 @@ function renderPage() {
         linear-gradient(180deg, var(--bg0) 0%, var(--bg1) 100%);
       min-height: 100vh;
       padding: 16px;
+      overflow-anchor: none;
     }
     body.modal-open {
       overflow: hidden;
@@ -1804,6 +1873,93 @@ function renderPage() {
     @keyframes usage-spin {
       from { transform: rotate(0deg); }
       to { transform: rotate(360deg); }
+    }
+
+    .agent-dials {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px;
+    }
+    .agent-dial-card {
+      border: 1px solid #385189;
+      border-radius: 12px;
+      background: linear-gradient(145deg, #18274a 0%, #101a33 100%);
+      min-height: 58px;
+      padding: 6px;
+      text-align: center;
+      color: #dce8ff;
+      cursor: pointer;
+      display: grid;
+      gap: 3px;
+      align-content: center;
+      justify-items: center;
+    }
+    .agent-dial-card:hover {
+      border-color: #61a3ff;
+      box-shadow: 0 0 0 1px #61a3ff33 inset;
+    }
+    .agent-dial-card:active { transform: scale(0.99); }
+    .agent-dial-placeholder {
+      border-style: dashed;
+      border-color: #49608e;
+      color: #88a2d1;
+      cursor: default;
+      background: linear-gradient(145deg, #13203e 0%, #10172c 100%);
+    }
+    .agent-dial-icon {
+      width: 20px;
+      height: 20px;
+      display: block;
+      color: #cfe0ff;
+    }
+    .agent-dial-emoji {
+      font-size: 20px;
+      line-height: 1;
+    }
+    .agent-dial-title {
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.2;
+      color: #d6e4ff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
+    }
+    .agent-card {
+      border: 1px solid #3c548f;
+      border-radius: 14px;
+      background: linear-gradient(145deg, #162347 0%, #0e1831 100%);
+      min-height: 126px;
+      padding: 10px;
+      display: grid;
+      justify-items: center;
+      align-content: center;
+      gap: 6px;
+      text-align: center;
+    }
+    .agent-card-icon {
+      width: 42px;
+      height: 42px;
+      color: #dbe8ff;
+    }
+    .agent-card-emoji {
+      font-size: 42px;
+      line-height: 1;
+    }
+    .agent-card-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #eef4ff;
+    }
+    .agent-description {
+      border: 1px solid #344975;
+      border-radius: 10px;
+      background: #101b33;
+      padding: 10px;
+      color: #c8d9fb;
+      font-size: 13px;
+      line-height: 1.35;
     }
 
     .sessions { display: grid; gap: 10px; }
@@ -2460,6 +2616,11 @@ function renderPage() {
       .title { font-size: 22px; }
       .title .decor { font-size: 18px; }
       .provider { grid-template-columns: 50px 1fr; }
+      .agent-dials { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+      .agent-dial-card { min-height: 44px; padding: 4px; border-radius: 10px; }
+      .agent-dial-title { display: none; }
+      .agent-dial-icon { width: 18px; height: 18px; }
+      .agent-dial-emoji { font-size: 18px; }
       .provider-logo {
         width: 50px;
         height: 50px;
@@ -2499,6 +2660,10 @@ function renderPage() {
 
     <section class="panel">
       <div class="usage-stack" id="usage-grid"></div>
+    </section>
+
+    <section style="margin-top:8px;">
+      <div class="agent-dials" id="agent-dials"></div>
     </section>
 
     <section class="panel" style="margin-top:12px;">
@@ -2580,6 +2745,41 @@ function renderPage() {
     </div>
   </div>
 
+  <div class="modal-overlay" id="agent-modal">
+    <div class="modal">
+      <div class="modal-head">
+        <div class="modal-title" id="agent-title">Launch Agent</div>
+        <button type="button" class="modal-close" id="agent-close" aria-label="Close agent modal">&times;</button>
+      </div>
+      <div class="intent-top-row">
+        <div class="intent-block">
+          <div class="intent-label">Agent</div>
+          <div id="agent-hero"></div>
+        </div>
+        <div class="intent-block">
+          <div class="intent-label">Provider</div>
+          <div class="provider-carousel">
+            <button type="button" class="selector-nav selector-nav-left" id="agent-provider-prev" aria-label="Previous provider">
+              <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3L5 8l5 5"/></svg>
+            </button>
+            <div id="agent-provider-select"></div>
+            <button type="button" class="selector-nav selector-nav-right" id="agent-provider-next" aria-label="Next provider">
+              <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="intent-block">
+        <div class="intent-label">Description</div>
+        <div class="agent-description" id="agent-description"></div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" id="agent-cancel">Cancel</button>
+        <button type="button" class="btn-primary" id="agent-confirm">Launch agent</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="kill-modal">
     <div class="modal">
       <div class="modal-head">
@@ -2607,6 +2807,7 @@ function renderPage() {
       { key: 'claude', title: 'Claude' },
       { key: 'gemini', title: 'Gemini' },
     ];
+    const HOT_DIAL_AGENTS = ${JSON.stringify(HOT_DIAL_AGENTS)};
     let latestUsage = {};
     const intentState = {
       open: false,
@@ -2628,6 +2829,11 @@ function renderPage() {
     const killState = {
       open: false,
       name: '',
+    };
+    const agentState = {
+      open: false,
+      dialId: '',
+      providerKey: 'codex',
     };
 
     let bodyScrollLockDepth = 0;
@@ -2678,6 +2884,22 @@ function renderPage() {
         .replaceAll('>', '&gt;')
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
+    }
+
+    function dialIconSvg(kind, klass = 'agent-dial-icon') {
+      if (kind === 'calendar') {
+        return '<svg class="' + esc(klass) + '" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+          '<rect x="3" y="5" width="18" height="16" rx="2" ry="2" fill="none" stroke="currentColor" stroke-width="1.8"/>' +
+          '<path d="M8 3v4M16 3v4M3 10h18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>' +
+          '</svg>';
+      }
+      if (kind === 'brain') {
+        return '<svg class="' + esc(klass) + '" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+          '<path d="M12 3c-1.8 0-3.2 1.4-3.2 3.2 0 .2 0 .4.1.6-2.1.2-3.7 2-3.7 4.2 0 1.5.8 2.8 2.1 3.6-.1.3-.2.7-.2 1 0 1.8 1.4 3.2 3.2 3.2.9 0 1.8-.4 2.4-1 .6.6 1.5 1 2.4 1 1.8 0 3.2-1.4 3.2-3.2 0-.4-.1-.7-.2-1 1.3-.8 2.1-2.1 2.1-3.6 0-2.2-1.6-4-3.7-4.2.1-.2.1-.4.1-.6C15.2 4.4 13.8 3 12 3Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>' +
+          '<path d="M12 5.2v13.6M9.6 9c0 1 .8 1.8 1.8 1.8H12M14.4 9c0 1-.8 1.8-1.8 1.8H12M9.9 14.4h1.4M12.7 14.4h1.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+          '</svg>';
+      }
+      return '';
     }
 
     const PROVIDER_LOGOS = {
@@ -2936,6 +3158,35 @@ function renderPage() {
       return '<span class="persona-badge" data-persona-badge="1" style="--persona-accent:' + esc(persona.accent) + '">' + esc(persona.label) + '</span>';
     }
 
+    function hotDialById(dialId) {
+      return HOT_DIAL_AGENTS.find((agent) => agent.id === dialId) || null;
+    }
+
+    function hotDialCard(agent) {
+      const icon = dialIconSvg(agent.icon);
+      const glyph = icon || '<span class="agent-dial-emoji">' + esc(agent.emoji || '✨') + '</span>';
+      if (!agent.enabled) {
+        return '<div class="agent-dial-card agent-dial-placeholder" title="' + esc(agent.description || '') + '">' +
+          glyph +
+          '<div class="agent-dial-title">' + esc(agent.title || 'Coming Soon') + '</div>' +
+        '</div>';
+      }
+      return '<button type="button" class="agent-dial-card" data-agent-dial-id="' + esc(agent.id) + '" title="' + esc(agent.description || '') + '">' +
+        glyph +
+        '<div class="agent-dial-title">' + esc(agent.title || 'Agent') + '</div>' +
+      '</button>';
+    }
+
+    function renderHotDials() {
+      const host = document.getElementById('agent-dials');
+      if (!host) return;
+      const next = HOT_DIAL_AGENTS.map(hotDialCard).join('');
+      if (host.innerHTML !== next) {
+        host.innerHTML = next;
+        bindHotDialInteractions();
+      }
+    }
+
     function hostForPort(port) {
       return window.location.protocol + '//' + window.location.hostname + ':' + port;
     }
@@ -2980,12 +3231,38 @@ function renderPage() {
     }
 
     function closeIntentModal() {
+      const restoreY = bodyScrollLockY;
       intentState.open = false;
       intentState.pictureSrc = '';
       intentState.pictureAlt = '';
       const modal = document.getElementById('intent-modal');
       if (modal) modal.classList.remove('open');
-      toggleBodyScroll(false);
+      if (!pickerState.open && !killState.open && !agentState.open) {
+        toggleBodyScroll(false);
+        window.scrollTo(0, restoreY);
+        setTimeout(function () { window.scrollTo(0, restoreY); }, 0);
+        setTimeout(function () { window.scrollTo(0, restoreY); }, 60);
+      }
+    }
+
+    function openAgentModal(dialId) {
+      const agent = hotDialById(dialId);
+      if (!agent || !agent.enabled) return;
+      agentState.open = true;
+      agentState.dialId = agent.id;
+      agentState.providerKey = 'codex';
+      renderAgentModal();
+      const modal = document.getElementById('agent-modal');
+      if (modal) modal.classList.add('open');
+      toggleBodyScroll(true);
+    }
+
+    function closeAgentModal() {
+      agentState.open = false;
+      agentState.dialId = '';
+      const modal = document.getElementById('agent-modal');
+      if (modal) modal.classList.remove('open');
+      if (!intentState.open && !pickerState.open && !killState.open) toggleBodyScroll(false);
     }
 
     function openDirPicker() {
@@ -3003,7 +3280,7 @@ function renderPage() {
       pickerState.open = false;
       const modal = document.getElementById('dir-picker-modal');
       if (modal) modal.classList.remove('open');
-      if (!intentState.open && !killState.open) toggleBodyScroll(false);
+      if (!intentState.open && !killState.open && !agentState.open) toggleBodyScroll(false);
     }
 
     function openKillModal(name) {
@@ -3021,7 +3298,7 @@ function renderPage() {
       killState.name = '';
       const modal = document.getElementById('kill-modal');
       if (modal) modal.classList.remove('open');
-      toggleBodyScroll(false);
+      if (!intentState.open && !pickerState.open && !agentState.open) toggleBodyScroll(false);
     }
 
     function activeProviderIndex() {
@@ -3034,6 +3311,18 @@ function renderPage() {
       const next = (idx + direction + PROVIDER_ORDER.length) % PROVIDER_ORDER.length;
       intentState.providerKey = PROVIDER_ORDER[next].key;
       renderIntentModal();
+    }
+
+    function activeAgentProviderIndex() {
+      const idx = PROVIDER_ORDER.findIndex((p) => p.key === agentState.providerKey);
+      return idx >= 0 ? idx : 0;
+    }
+
+    function rotateAgentProvider(direction) {
+      const idx = activeAgentProviderIndex();
+      const next = (idx + direction + PROVIDER_ORDER.length) % PROVIDER_ORDER.length;
+      agentState.providerKey = PROVIDER_ORDER[next].key;
+      renderAgentModal();
     }
 
     function activePersonaIndex() {
@@ -3052,11 +3341,11 @@ function renderPage() {
       renderIntentModal();
     }
 
-    function providerSelectionCard(provider) {
+    function providerSelectionCard(provider, cardId = 'provider-select-card') {
       const logo = PROVIDER_LOGOS[provider.key] || '';
       const usage = latestUsage ? latestUsage[provider.key] : null;
       if (!usage || !usage.ok) {
-        return '<div class="provider-select-card" id="provider-select-card">' +
+        return '<div class="provider-select-card" id="' + esc(cardId) + '">' +
           '<div class="provider-select-head">' +
             '<img class="provider-select-logo" src="' + esc(logo) + '" alt="' + esc(provider.title) + ' logo" loading="lazy" width="56" height="56" />' +
             '<div><div class="provider-select-name">' + esc(provider.title) + '</div><div class="provider-select-plan">Usage unavailable</div></div>' +
@@ -3065,7 +3354,7 @@ function renderPage() {
         '</div>';
       }
       const plan = compactPlan(usage.plan || 'connected');
-      return '<div class="provider-select-card" id="provider-select-card">' +
+      return '<div class="provider-select-card" id="' + esc(cardId) + '">' +
         '<div class="provider-select-head">' +
           '<img class="provider-select-logo" src="' + esc(logo) + '" alt="' + esc(provider.title) + ' logo" loading="lazy" width="56" height="56" />' +
           '<div><div class="provider-select-name">' + esc(provider.title) + '</div><div class="provider-select-plan">' + esc(plan) + '</div></div>' +
@@ -3085,7 +3374,7 @@ function renderPage() {
 
       const selectedProvider = PROVIDER_ORDER[activeProviderIndex()];
       const providerHost = document.getElementById('provider-select');
-      if (providerHost) providerHost.innerHTML = providerSelectionCard(selectedProvider);
+      if (providerHost) providerHost.innerHTML = providerSelectionCard(selectedProvider, 'provider-select-card');
 
       const scientistHost = document.getElementById('intent-scientist');
       if (scientistHost) scientistHost.innerHTML = renderScientistHero();
@@ -3120,7 +3409,35 @@ function renderPage() {
       }
 
       bindIntentModalInteractions();
-      bindProviderSwipe();
+      bindProviderSwipeCard('provider-select-card', rotateProvider);
+    }
+
+    function renderAgentModal() {
+      const agent = hotDialById(agentState.dialId);
+      if (!agent) return;
+
+      const title = document.getElementById('agent-title');
+      if (title) title.textContent = 'Launch ' + agent.title;
+
+      const hero = document.getElementById('agent-hero');
+      if (hero) {
+        const icon = dialIconSvg(agent.icon, 'agent-card-icon');
+        const glyph = icon || '<span class="agent-card-emoji">' + esc(agent.emoji || '✨') + '</span>';
+        hero.innerHTML = '<div class="agent-card">' +
+          glyph +
+          '<div class="agent-card-title">' + esc(agent.title) + '</div>' +
+        '</div>';
+      }
+
+      const description = document.getElementById('agent-description');
+      if (description) description.textContent = agent.description || '';
+
+      const selectedProvider = PROVIDER_ORDER[activeAgentProviderIndex()];
+      const providerHost = document.getElementById('agent-provider-select');
+      if (providerHost) providerHost.innerHTML = providerSelectionCard(selectedProvider, 'agent-provider-select-card');
+
+      bindAgentModalInteractions();
+      bindProviderSwipeCard('agent-provider-select-card', rotateAgentProvider);
     }
 
     async function loadDirectory(targetPath) {
@@ -3155,8 +3472,8 @@ function renderPage() {
       bindDirectoryPickerInteractions();
     }
 
-    function bindProviderSwipe() {
-      const card = document.getElementById('provider-select-card');
+    function bindProviderSwipeCard(cardId, rotateFn) {
+      const card = document.getElementById(cardId);
       if (!card || card.dataset.swipeBound === '1') return;
       card.dataset.swipeBound = '1';
       let startX = null;
@@ -3173,7 +3490,7 @@ function renderPage() {
         const delta = ev.changedTouches[0].clientX - startX;
         startX = null;
         if (Math.abs(delta) < 35) return;
-        rotateProvider(delta < 0 ? 1 : -1);
+        rotateFn(delta < 0 ? 1 : -1);
       });
     }
 
@@ -3197,6 +3514,39 @@ function renderPage() {
         if (Math.abs(delta) < 35) return;
         rotatePersona(delta < 0 ? 1 : -1);
       });
+    }
+
+    function bindHotDialInteractions() {
+      const cards = document.querySelectorAll('[data-agent-dial-id]');
+      for (const card of cards) {
+        if (card.dataset.bound === '1') continue;
+        card.dataset.bound = '1';
+        card.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          const dialId = card.getAttribute('data-agent-dial-id');
+          if (!dialId) return;
+          openAgentModal(dialId);
+        });
+      }
+    }
+
+    function bindAgentModalInteractions() {
+      const prev = document.getElementById('agent-provider-prev');
+      if (prev && prev.dataset.bound !== '1') {
+        prev.dataset.bound = '1';
+        prev.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          rotateAgentProvider(-1);
+        });
+      }
+      const next = document.getElementById('agent-provider-next');
+      if (next && next.dataset.bound !== '1') {
+        next.dataset.bound = '1';
+        next.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          rotateAgentProvider(1);
+        });
+      }
     }
 
     function bindIntentModalInteractions() {
@@ -3317,6 +3667,7 @@ function renderPage() {
         intentConfirm.addEventListener('click', async function (ev) {
           ev.preventDefault();
           if (!intentState.name) return;
+          const preservedScroll = bodyScrollLockY;
           const payload = {
             provider: intentState.providerKey,
             templateId: intentState.templateId,
@@ -3325,6 +3676,31 @@ function renderPage() {
           };
           closeIntentModal();
           await spawnSession(intentState.name, payload);
+          window.scrollTo(0, preservedScroll);
+          requestAnimationFrame(function () {
+            window.scrollTo(0, preservedScroll);
+          });
+        });
+      }
+
+      const agentClose = document.getElementById('agent-close');
+      if (agentClose) agentClose.addEventListener('click', function (ev) { ev.preventDefault(); closeAgentModal(); });
+      const agentCancel = document.getElementById('agent-cancel');
+      if (agentCancel) agentCancel.addEventListener('click', function (ev) { ev.preventDefault(); closeAgentModal(); });
+      const agentOverlay = document.getElementById('agent-modal');
+      if (agentOverlay) {
+        agentOverlay.addEventListener('click', function (ev) {
+          if (ev.target === agentOverlay) closeAgentModal();
+        });
+      }
+      const agentConfirm = document.getElementById('agent-confirm');
+      if (agentConfirm) {
+        agentConfirm.addEventListener('click', async function (ev) {
+          ev.preventDefault();
+          if (!agentState.dialId) return;
+          const payload = { dialId: agentState.dialId, provider: agentState.providerKey };
+          closeAgentModal();
+          await launchHotDialAgent(payload);
         });
       }
 
@@ -3422,6 +3798,16 @@ function renderPage() {
       }
     }
 
+    async function launchHotDialAgent(options) {
+      try {
+        await apiPost('/api/agents/spawn', options || {});
+      } catch (err) {
+        alert('Agent launch failed: ' + err.message);
+      } finally {
+        await refresh();
+      }
+    }
+
     async function killSession(name) {
       if (refreshing.has(name)) return;
       refreshing.add(name);
@@ -3512,6 +3898,7 @@ function renderPage() {
             window.open(connectUrlForPort(item.publicPort), '_blank', 'noopener,noreferrer');
             return;
           }
+          window.scrollTo(0, 0);
           openIntentModal(item.name, card.getAttribute('data-picture-src') || '');
         });
       }
@@ -3572,6 +3959,7 @@ function renderPage() {
     }
 
     bindStaticModalInteractions();
+    renderHotDials();
     refresh();
     setInterval(refresh, ${REFRESH_MS});
   </script>
@@ -3652,6 +4040,25 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       const message = error.message || 'spawn failed';
       const status = message.includes('workdir') || message.includes('directory') || message.includes('session not found') ? 400 : 500;
+      json(res, status, { error: message });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/agents/spawn' && req.method === 'POST') {
+    try {
+      const body = await readJsonBody(req);
+      const dialId = String(body.dialId || '').trim();
+      if (!dialId) {
+        json(res, 400, { error: 'dialId is required' });
+        return;
+      }
+      const provider = normalizeProvider(body.provider);
+      const launched = await launchHotDialAgent(dialId, provider);
+      json(res, 200, { ok: true, ...launched });
+    } catch (error) {
+      const message = error.message || 'agent launch failed';
+      const status = message.includes('unknown hot dial agent') || message.includes('idle scientist slots') ? 400 : 500;
       json(res, status, { error: message });
     }
     return;
