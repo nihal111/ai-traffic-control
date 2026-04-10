@@ -14,5 +14,5 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   tmux kill-session -t "$SESSION"
 fi
 
-tmux new-session -d -s "$SESSION" zsh -lc "DASHBOARD_PORT=$PORT node '$ROOT_DIR/server.mjs'"
-echo "started dashboard on :$PORT in tmux session $SESSION"
+tmux new-session -d -s "$SESSION" zsh -lc "DASHBOARD_PORT=$PORT node '$ROOT_DIR/server.mjs' $@"
+echo "started dashboard on :$PORT in tmux session $SESSION with args: $@"
