@@ -4024,12 +4024,38 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     try {
-      const data = await fs.readFile(fullPath);
+      const [data, stat] = await Promise.all([fs.readFile(fullPath), fs.stat(fullPath)]);
       const ext = path.extname(fullPath).toLowerCase();
-      const mime = ext === '.svg' ? 'image/svg+xml' : ext === '.png' ? 'image/png' : 'application/octet-stream';
+      const mime =
+        ext === '.svg'
+          ? 'image/svg+xml'
+          : ext === '.png'
+            ? 'image/png'
+            : ext === '.jpg' || ext === '.jpeg'
+              ? 'image/jpeg'
+              : ext === '.webp'
+                ? 'image/webp'
+                : ext === '.gif'
+                  ? 'image/gif'
+                  : 'application/octet-stream';
+      const etag = `"${stat.size}-${Math.floor(stat.mtimeMs)}"`;
+      const lastModified = stat.mtime.toUTCString();
+      const ifNoneMatch = req.headers['if-none-match'];
+      const ifModifiedSince = req.headers['if-modified-since'];
+      if (ifNoneMatch === etag || (ifModifiedSince && new Date(ifModifiedSince).getTime() >= stat.mtime.getTime())) {
+        res.writeHead(304, {
+          ETag: etag,
+          'Last-Modified': lastModified,
+          'Cache-Control': 'public, max-age=3600, must-revalidate',
+        });
+        res.end();
+        return;
+      }
       res.writeHead(200, {
         'Content-Type': mime,
-        'Cache-Control': 'no-store, max-age=0',
+        'Cache-Control': 'public, max-age=3600, must-revalidate',
+        ETag: etag,
+        'Last-Modified': lastModified,
         'Content-Length': data.length,
       });
       res.end(data);
