@@ -1,7 +1,7 @@
 # Handoff - AI Traffic Control Mobile ttyd Stack
 
 Date: 2026-04-07
-Owner context: Nihal mobile terminal customization work
+Owner context: mobile terminal customization work
 
 ## Project rename note
 This project was renamed from `MobileDev` to `AiTrafficControl` (display name: `AI Traffic Control`).

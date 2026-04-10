@@ -10,7 +10,7 @@ Privacy note: documentation must not include real names or real email addresses 
 
 Always restart the running dashboard process.
 
-1. `cd /Users/nihal/Code/AiTrafficControl/dashboard`
+1. `cd ~/Code/AiTrafficControl/dashboard`
 2. `tmux kill-session -t dashboard-1111 2>/dev/null || true`
 3. `./scripts/start-dashboard.sh`
 4. Verify process is live:
@@ -27,7 +27,7 @@ Important:
 
 Rebuild and reload dashboard-managed nginx session proxy:
 
-1. `cd /Users/nihal/Code/AiTrafficControl/dashboard`
+1. `cd ~/Code/AiTrafficControl/dashboard`
 2. `./scripts/start-ttyd-sessions.sh`
 3. Validate listeners:
    - `lsof -nP -iTCP -sTCP:LISTEN | rg ':(7001|7002|7003|7004|8001|8002|8003|8004|1111)\b'`
@@ -39,10 +39,10 @@ Important behavior:
 ### 1.3 If hook wiring changes (`.codex/hooks.json`, `.claude/settings.json`, `dashboard/scripts/codex-hook-forwarder.mjs`, `dashboard/scripts/shell-hook-writer.mjs`)
 
 1. Ensure Codex hooks feature is enabled locally:
-   - `cd /Users/nihal/Code/AiTrafficControl`
+   - `cd ~/Code/AiTrafficControl`
    - `./dashboard/scripts/enable-codex-hooks.sh`
 2. Run dashboard tests:
-   - `cd /Users/nihal/Code/AiTrafficControl/dashboard`
+   - `cd ~/Code/AiTrafficControl/dashboard`
    - `npm test`
 3. Verify hook output files still update during a spawned session:
    - `dashboard/runtime/slots/<slot>/current/events.jsonl`
@@ -71,10 +71,10 @@ Or from repo root:
    - `nginx-ttyd/nginx.conf`
    - `dashboard/scripts/start-ttyd-sessions.sh` (template for generated session nginx config)
 2. Regenerate session nginx config:
-   - `cd /Users/nihal/Code/AiTrafficControl/dashboard`
+   - `cd ~/Code/AiTrafficControl/dashboard`
    - `./scripts/start-ttyd-sessions.sh`
 3. Reload standalone nginx stack:
-   - `cd /Users/nihal/Code/AiTrafficControl/nginx-ttyd`
+   - `cd ~/Code/AiTrafficControl/nginx-ttyd`
    - `./scripts/start.sh`
 4. Hard-refresh browser tabs.
 

@@ -96,9 +96,9 @@ tmux new-session -d -s ttyd-backend \
   '/opt/homebrew/bin/ttyd -W -i 127.0.0.1 -p 7682 -t scrollback 100000 -t disableResizeOverlay true /bin/bash'
 
 # Start or reload nginx
-/opt/homebrew/opt/nginx/bin/nginx -p /Users/nihal/Code/AiTrafficControl/nginx-ttyd/ -c /Users/nihal/Code/AiTrafficControl/nginx-ttyd/nginx.conf
+/opt/homebrew/opt/nginx/bin/nginx -p ~/Code/AiTrafficControl/nginx-ttyd/ -c ~/Code/AiTrafficControl/nginx-ttyd/nginx.conf
 # or reload if already running:
-/opt/homebrew/opt/nginx/bin/nginx -p /Users/nihal/Code/AiTrafficControl/nginx-ttyd/ -c /Users/nihal/Code/AiTrafficControl/nginx-ttyd/nginx.conf -s reload
+/opt/homebrew/opt/nginx/bin/nginx -p ~/Code/AiTrafficControl/nginx-ttyd/ -c ~/Code/AiTrafficControl/nginx-ttyd/nginx.conf -s reload
 ```
 
 ## Service cleanup
