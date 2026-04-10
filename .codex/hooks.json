@@ -21,28 +21,6 @@
         ]
       }
     ],
-    "PreToolUse": [
-      {
-        "matcher": "Bash|Read|Write|Edit|MultiEdit|Glob|Grep|LS|WebFetch|WebSearch|Task|TodoWrite|NotebookEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "ATC_PROVIDER=codex node \"$(git rev-parse --show-toplevel)/dashboard/scripts/codex-hook-forwarder.mjs\""
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Bash|Read|Write|Edit|MultiEdit|Glob|Grep|LS|WebFetch|WebSearch|Task|TodoWrite|NotebookEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "ATC_PROVIDER=codex node \"$(git rev-parse --show-toplevel)/dashboard/scripts/codex-hook-forwarder.mjs\""
-          }
-        ]
-      }
-    ],
     "Stop": [
       {
         "hooks": [

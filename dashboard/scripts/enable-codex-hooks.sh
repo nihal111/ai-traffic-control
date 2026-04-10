@@ -91,28 +91,6 @@ cat > "$HOOKS_FILE" <<JSON
         ]
       }
     ],
-    "PreToolUse": [
-      {
-        "matcher": "Bash|Read|Write|Edit|MultiEdit|Glob|Grep|LS|WebFetch|WebSearch|Task|TodoWrite|NotebookEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "ATC_PROVIDER=codex node \"$HOOK_FORWARDER\""
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Bash|Read|Write|Edit|MultiEdit|Glob|Grep|LS|WebFetch|WebSearch|Task|TodoWrite|NotebookEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "ATC_PROVIDER=codex node \"$HOOK_FORWARDER\""
-          }
-        ]
-      }
-    ],
     "Stop": [
       {
         "hooks": [
@@ -136,8 +114,6 @@ echo "wrote global hooks to $HOOKS_FILE"
 # forward events to the dashboard.
 CLAUDE_DIR="$HOME/.claude"
 CLAUDE_SETTINGS="$CLAUDE_DIR/settings.json"
-TOOL_MATCHER="Bash|Read|Write|Edit|MultiEdit|Glob|Grep|LS|WebFetch|WebSearch|Task|TodoWrite|NotebookEdit"
-
 mkdir -p "$CLAUDE_DIR"
 
 # Merge hooks into existing settings (preserve model, permissions, etc.)
@@ -145,19 +121,16 @@ node -e "
   const fs = require('fs');
   const settingsPath = process.argv[1];
   const forwarder = process.argv[2];
-  const matcher = process.argv[3];
   const cmd = 'ATC_PROVIDER=claude node \"' + forwarder + '\"';
   const hooks = {
     SessionStart: [{ hooks: [{ type: 'command', command: cmd }] }],
     UserPromptSubmit: [{ hooks: [{ type: 'command', command: cmd }] }],
-    PreToolUse: [{ matcher, hooks: [{ type: 'command', command: cmd }] }],
-    PostToolUse: [{ matcher, hooks: [{ type: 'command', command: cmd }] }],
     Stop: [{ hooks: [{ type: 'command', command: cmd }] }],
   };
   let existing = {};
   try { existing = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
   existing.hooks = hooks;
   fs.writeFileSync(settingsPath, JSON.stringify(existing, null, 2) + '\n');
-" "$CLAUDE_SETTINGS" "$HOOK_FORWARDER" "$TOOL_MATCHER"
+" "$CLAUDE_SETTINGS" "$HOOK_FORWARDER"
 
 echo "merged claude hooks into $CLAUDE_SETTINGS"
