@@ -1221,7 +1221,7 @@ async function recomputeDerivedForSlot(slot, stateRecord) {
     lastUserPromptAt: lastPrompt?.ts || null,
     lastAssistantStopAt: lastStop?.ts || null,
     turnCount,
-    agentType: lastProvider || 'none',
+    agentType: HOT_DIAL_BY_ID.has(stateRecord?.agentType) ? stateRecord.agentType : 'none',
     contextWindowPct,
     paneFingerprint,
     paneOutputAt,
@@ -1457,8 +1457,8 @@ async function spawnSlotByName(name, options = {}) {
   st.templateId = templateId;
   st.personaId = personaId;
   st.taskTitle = taskTitle || `Fresh ${provider} session`;
-  if (agentType) st.agentType = agentType;
-  st.agentPromptFile = agentPromptFile;
+  st.agentType = agentType || 'none';
+  st.agentPromptFile = agentPromptFile || null;
   st.workdir = workdir;
   if (templateId === TEMPLATE_CONTINUE_WORK) appendRecentWorkdir(state, workdir);
   await rotateSlotCurrent(slot.name, st.runId);
@@ -1536,6 +1536,8 @@ async function killSlotByName(name) {
   st.runId = null;
   st.error = null;
   st.personaId = PERSONA_NONE;
+  st.agentType = 'none';
+  st.agentPromptFile = null;
   st.lastExitAt = new Date().toISOString();
   st.spawnedAt = null;
   st.firstInteractionAt = null;
@@ -2056,10 +2058,22 @@ function renderPage() {
       pointer-events: none;
     }
     .session:active { transform: scale(0.99); }
-    .session.tap:hover { border-color: #4bc6ff; box-shadow: 0 0 0 1px #4bc6ff22 inset; cursor: pointer; }
-    .session.tap:hover::before { transform: translateX(100%); }
-    .session.spawning { border-color: #5a70b3; box-shadow: 0 0 0 1px #5a70b333 inset; }
+    @media (hover: hover) and (pointer: fine) {
+      .session.tap:not(.spawning):not(.killing):hover {
+        border-color: #4bc6ff;
+        box-shadow: 0 0 0 1px #4bc6ff22 inset;
+        cursor: pointer;
+      }
+    }
+    .session.spawning { border-color: #2f9a66; box-shadow: 0 0 0 1px #2f9a6644 inset; }
     .session.spawning::before {
+      background: linear-gradient(90deg, #0000 0%, #38cc8966 50%, #0000 100%);
+      animation: atc-shimmer 900ms linear infinite;
+      transform: translateX(-100%);
+    }
+    .session.killing { border-color: #b64040; box-shadow: 0 0 0 1px #b6404044 inset; }
+    .session.killing::before {
+      background: linear-gradient(90deg, #0000 0%, #f56c6c66 50%, #0000 100%);
       animation: atc-shimmer 900ms linear infinite;
       transform: translateX(-100%);
     }
@@ -2122,7 +2136,7 @@ function renderPage() {
       letter-spacing: 0.3px;
     }
     .badge.active { border-color: #0f8e68; background: #0a3f31; color: #8ef6d3; }
-    .badge.starting { border-color: #4a4d78; background: #20274a; color: #d5ddff; }
+    .badge.starting { border-color: #2f9a66; background: #133e2a; color: #a8f0cf; }
     .badge.idle { border-color: #72570f; background: #3f300c; color: #ffd98a; }
     .badge.unborn { border-color: #444; background: #222; color: #888; }
     .persona-badge {
@@ -2212,7 +2226,8 @@ function renderPage() {
     }
     .color-idle { color: var(--amber); }
     .color-active { color: var(--green); }
-    .color-starting { color: #cdd8ff; }
+    .color-starting { color: #a8f0cf; }
+    .color-killing { color: #ff9b9b; }
     .error { color: var(--red); }
 
     .modal-overlay {
@@ -2833,6 +2848,7 @@ function renderPage() {
   <script>
     const refreshing = new Set();
     const spawning = new Set();
+    const killing = new Set();
     const HOME_DIRECTORY = ${JSON.stringify(HOME_DIRECTORY)};
     const PERSONA_NONE = ${JSON.stringify(PERSONA_NONE)};
     const PERSONA_CONFIGS = ${JSON.stringify(PERSONA_CONFIGS)};
@@ -2870,6 +2886,8 @@ function renderPage() {
       dialId: '',
       providerKey: 'codex',
     };
+    let latestSessionsByName = new Map();
+    let sessionInteractionsBound = false;
 
     let bodyScrollLockDepth = 0;
     let bodyScrollLockY = 0;
@@ -2883,12 +2901,8 @@ function renderPage() {
         if (bodyScrollLockDepth > 1) return;
         bodyScrollLockY = window.scrollY || window.pageYOffset || 0;
         body.classList.add('modal-open');
-        body.style.position = 'fixed';
-        body.style.top = '-' + bodyScrollLockY + 'px';
-        body.style.left = '0';
-        body.style.right = '0';
-        body.style.width = '100%';
         body.style.overflow = 'hidden';
+        body.style.touchAction = 'none';
         return;
       }
 
@@ -2898,18 +2912,9 @@ function renderPage() {
 
       const activeEl = document.activeElement;
       if (activeEl && typeof activeEl.blur === 'function') activeEl.blur();
-      const restoreY = bodyScrollLockY;
       body.classList.remove('modal-open');
-      body.style.position = '';
-      body.style.top = '';
-      body.style.left = '';
-      body.style.right = '';
-      body.style.width = '';
       body.style.overflow = '';
-      window.scrollTo(0, restoreY);
-      requestAnimationFrame(function () {
-        window.scrollTo(0, restoreY);
-      });
+      body.style.touchAction = '';
     }
 
     function esc(v) {
@@ -3234,6 +3239,19 @@ function renderPage() {
       return base + sep + 'atc_connect=' + Date.now();
     }
 
+    function focusSessionCard(name, behavior = 'auto') {
+      if (!name) return;
+      const selector = '.session.tap[data-name="' + CSS.escape(String(name)) + '"]';
+      const scrollToCard = function () {
+        const card = document.querySelector(selector);
+        if (!card || typeof card.scrollIntoView !== 'function') return false;
+        card.scrollIntoView({ behavior, block: 'center', inline: 'nearest' });
+        return true;
+      };
+      if (scrollToCard()) return;
+      requestAnimationFrame(scrollToCard);
+    }
+
     async function apiPost(path, payload) {
       const res = await fetch(path, {
         method: 'POST',
@@ -3268,7 +3286,6 @@ function renderPage() {
     }
 
     function closeIntentModal() {
-      const restoreY = bodyScrollLockY;
       intentState.open = false;
       intentState.pictureSrc = '';
       intentState.pictureAlt = '';
@@ -3276,9 +3293,6 @@ function renderPage() {
       if (modal) modal.classList.remove('open');
       if (!pickerState.open && !killState.open && !agentState.open) {
         toggleBodyScroll(false);
-        window.scrollTo(0, restoreY);
-        setTimeout(function () { window.scrollTo(0, restoreY); }, 0);
-        setTimeout(function () { window.scrollTo(0, restoreY); }, 60);
       }
     }
 
@@ -3704,7 +3718,7 @@ function renderPage() {
         intentConfirm.addEventListener('click', async function (ev) {
           ev.preventDefault();
           if (!intentState.name) return;
-          const preservedScroll = bodyScrollLockY;
+          const targetName = intentState.name;
           const payload = {
             provider: intentState.providerKey,
             templateId: intentState.templateId,
@@ -3712,11 +3726,7 @@ function renderPage() {
             workdir: intentState.templateId === 'continue_work' ? intentState.workdir : HOME_DIRECTORY,
           };
           closeIntentModal();
-          await spawnSession(intentState.name, payload);
-          window.scrollTo(0, preservedScroll);
-          requestAnimationFrame(function () {
-            window.scrollTo(0, preservedScroll);
-          });
+          await spawnSession(targetName, payload, { autoScroll: true });
         });
       }
 
@@ -3737,7 +3747,7 @@ function renderPage() {
           if (!agentState.dialId) return;
           const payload = { dialId: agentState.dialId, provider: agentState.providerKey };
           closeAgentModal();
-          await launchHotDialAgent(payload);
+          await launchHotDialAgent(payload, { autoScroll: true });
         });
       }
 
@@ -3788,7 +3798,7 @@ function renderPage() {
           if (!killState.name) return;
           const target = killState.name;
           closeKillModal();
-          await killSession(target);
+          await killSession(target, { autoScroll: true });
         });
       }
     }
@@ -3813,10 +3823,11 @@ function renderPage() {
       }
     }
 
-    async function spawnSession(name, options) {
+    async function spawnSession(name, options, uiOptions = {}) {
       if (refreshing.has(name)) return;
       refreshing.add(name);
       spawning.add(name);
+      if (uiOptions && uiOptions.autoScroll) focusSessionCard(name);
       refresh().catch(() => {});
       try {
         const payload = { name: name, ...(options || {}) };
@@ -3828,6 +3839,7 @@ function renderPage() {
         spawning.delete(name);
         refreshing.delete(name);
         await refresh();
+        if (uiOptions && uiOptions.autoScroll) focusSessionCard(name);
         setTimeout(refresh, 350);
         setTimeout(refresh, 900);
         setTimeout(refresh, 1600);
@@ -3835,32 +3847,50 @@ function renderPage() {
       }
     }
 
-    async function launchHotDialAgent(options) {
+    async function launchHotDialAgent(options, uiOptions = {}) {
+      let slotName = '';
       try {
-        await apiPost('/api/agents/spawn', options || {});
+        const result = await apiPost('/api/agents/spawn', options || {});
+        slotName = String(result && result.slotName ? result.slotName : '').trim();
+        if (slotName) {
+          spawning.add(slotName);
+          if (uiOptions && uiOptions.autoScroll) focusSessionCard(slotName);
+        }
       } catch (err) {
         alert('Agent launch failed: ' + err.message);
       } finally {
+        if (slotName) spawning.delete(slotName);
         await refresh();
+        if (slotName && uiOptions && uiOptions.autoScroll) {
+          focusSessionCard(slotName);
+        }
       }
     }
 
-    async function killSession(name) {
+    async function killSession(name, uiOptions = {}) {
       if (refreshing.has(name)) return;
       refreshing.add(name);
+      killing.add(name);
+      if (uiOptions && uiOptions.autoScroll) focusSessionCard(name);
+      refresh().catch(() => {});
       try {
         await apiPost('/api/sessions/kill', { name: name });
       } catch (err) {
         alert('Kill failed for ' + name + ': ' + err.message);
       } finally {
+        killing.delete(name);
         refreshing.delete(name);
         await refresh();
+        if (uiOptions && uiOptions.autoScroll) {
+          focusSessionCard(name);
+        }
       }
     }
 
     function sessionCard(s) {
       const hasBackend = s.status === 'active' && s.backendActive;
       const isSpawning = spawning.has(s.name);
+      const isKilling = killing.has(s.name);
       const FIVE_MIN = 5 * 60 * 1000;
       const isActive = hasBackend && s.lastInteractionMs != null && s.lastInteractionMs < FIVE_MIN;
       const isIdle = hasBackend && !isActive;
@@ -3872,8 +3902,8 @@ function renderPage() {
       const pictureAlt = s.name + ' portrait';
       const rawTaskTitle = String(s.taskTitle || '').trim();
       const taskTitle = rawTaskTitle && !/^shell:\s*/i.test(rawTaskTitle) ? rawTaskTitle : 'Not set';
-      const actionText = isSpawning ? 'Starting terminal…' : (hasBackend ? 'Tap to connect' : 'Tap to start');
-      const actionClass = isSpawning ? 'color-starting' : (isActive ? 'color-active' : (isIdle ? 'color-idle' : 'color-unborn'));
+      const actionText = isKilling ? 'Stopping terminal…' : (isSpawning ? 'Starting terminal…' : (hasBackend ? 'Tap to connect' : 'Tap to start'));
+      const actionClass = isKilling ? 'color-killing' : (isSpawning ? 'color-starting' : (isActive ? 'color-active' : (isIdle ? 'color-idle' : 'color-unborn')));
       const badgeClass = sessionState;
       const badgeText = sessionState;
       const hat = personaHatMarkup(personaForId(personaId), 'session');
@@ -3883,8 +3913,26 @@ function renderPage() {
       const providerLogoSrc = providerLogoMap[providerKey] || providerLogoMap.codex;
       const agentIconKind = (s.agentType === 'calendar_manager') ? 'calendar' : (s.agentType === 'second_brain') ? 'brain' : null;
       const agentTypeTag = agentIconKind && !isUnborn ? '<span class="agent-type-tag">' + dialIconSvg(agentIconKind, 'agent-type-icon') + '</span>' : '';
+      const renderKey = [
+        sessionState,
+        hasBackend ? '1' : '0',
+        isSpawning ? '1' : '0',
+        isKilling ? '1' : '0',
+        personaId,
+        pictureSrc,
+        taskTitle,
+        s.workdir || '',
+        providerKey,
+        hasAgent ? '1' : '0',
+        String(s.agentType || ''),
+        String((s.telemetry && s.telemetry.turnCount) ? s.telemetry.turnCount : 0),
+        String((s.telemetry && Number.isFinite(Number(s.telemetry.contextWindowPct))) ? Math.round(Number(s.telemetry.contextWindowPct)) : 'na'),
+        s.startedAgo || 'n/a',
+        s.lastInteractionAgo || 'n/a',
+        s.error || '',
+      ].join('::');
 
-      return '<article class="session tap state-' + esc(sessionState) + (isSpawning ? ' spawning' : '') + '" data-name="' + esc(s.name) + '" data-picture-src="' + esc(pictureSrc) + '" data-persona-id="' + esc(personaId) + '" data-active="' + (hasBackend ? '1' : '0') + '" data-spawning="' + (isSpawning ? '1' : '0') + '">' +
+      return '<article class="session tap state-' + esc(sessionState) + (isSpawning ? ' spawning' : '') + (isKilling ? ' killing' : '') + '" data-name="' + esc(s.name) + '" data-picture-src="' + esc(pictureSrc) + '" data-persona-id="' + esc(personaId) + '" data-active="' + (hasBackend ? '1' : '0') + '" data-spawning="' + (isSpawning ? '1' : '0') + '" data-killing="' + (isKilling ? '1' : '0') + '" data-render-key="' + esc(renderKey) + '">' +
         agentTypeTag +
         (!isUnborn ? '<span class="provider-tag"><img src="' + esc(providerLogoSrc) + '" alt="' + esc(providerKey) + '" width="20" height="20" /></span>' : '') +
         '<button type="button" class="kill" ' + (hasBackend ? '' : 'disabled') + ' data-kill="1" data-name="' + esc(s.name) + '" aria-label="Kill ' + esc(s.name) + '">&times;</button>' +
@@ -3919,40 +3967,45 @@ function renderPage() {
       '</article>';
     }
 
-    function bindSessionInteractions(sessions) {
-      const byName = new Map(sessions.map((s) => [s.name, s]));
-      const cards = document.querySelectorAll('.session.tap');
-      for (const card of cards) {
-        card.addEventListener('click', async function (ev) {
-          const killTarget = ev.target.closest('[data-kill="1"]');
-          if (killTarget) return;
-          const name = card.getAttribute('data-name');
-          const item = byName.get(name);
-          if (!item) return;
+    function makeSessionCardNode(htmlString) {
+      const template = document.createElement('template');
+      template.innerHTML = htmlString.trim();
+      return template.content.firstElementChild;
+    }
 
-          const active = item.status === 'active' && item.backendActive;
-          const isSpawning = spawning.has(item.name);
-          if (isSpawning) return;
-          if (active) {
-            await prewarmPublicEndpoint(item.publicPort);
-            window.open(connectUrlForPort(item.publicPort), '_blank', 'noopener,noreferrer');
-            return;
-          }
-          window.scrollTo(0, 0);
-          openIntentModal(item.name, card.getAttribute('data-picture-src') || '');
-        });
-      }
+    function bindSessionInteractions() {
+      if (sessionInteractionsBound) return;
+      const sessionsEl = document.getElementById('sessions');
+      if (!sessionsEl) return;
+      sessionInteractionsBound = true;
 
-      const kills = document.querySelectorAll('[data-kill="1"]');
-      for (const btn of kills) {
-        btn.addEventListener('click', async function (ev) {
+      sessionsEl.addEventListener('click', async function (ev) {
+        const killBtn = ev.target.closest('[data-kill="1"]');
+        if (killBtn) {
           ev.stopPropagation();
-          if (btn.hasAttribute('disabled')) return;
-          const name = btn.getAttribute('data-name');
-          if (!name) return;
-          openKillModal(name);
-        });
-      }
+          if (killBtn.hasAttribute('disabled')) return;
+          const killName = killBtn.getAttribute('data-name');
+          if (!killName) return;
+          openKillModal(killName);
+          return;
+        }
+
+        const card = ev.target.closest('.session.tap');
+        if (!card || !sessionsEl.contains(card)) return;
+        const name = card.getAttribute('data-name');
+        const item = latestSessionsByName.get(name);
+        if (!item) return;
+
+        const active = item.status === 'active' && item.backendActive;
+        const isSpawning = spawning.has(item.name);
+        if (isSpawning) return;
+        if (active) {
+          await prewarmPublicEndpoint(item.publicPort);
+          window.open(connectUrlForPort(item.publicPort), '_blank', 'noopener,noreferrer');
+          return;
+        }
+        openIntentModal(item.name, card.getAttribute('data-picture-src') || '');
+      });
     }
 
     function renderUsageGrid(usage) {
@@ -3972,13 +4025,49 @@ function renderPage() {
 
     function renderSessions(sessionsPayload) {
       const sessions = sessionsPayload.sessions || [];
+      latestSessionsByName = new Map(sessions.map(function (s) { return [s.name, s]; }));
       const latestRecent = Array.isArray(sessionsPayload.recentWorkdirs) ? sessionsPayload.recentWorkdirs : [];
       recentWorkdirs.splice(0, recentWorkdirs.length, ...latestRecent);
       const sessionsEl = document.getElementById('sessions');
-      const nextSessionsHtml = sessions.map(sessionCard).join('') || '<div class="line muted">No sessions configured.</div>';
-      if (sessionsEl && sessionsEl.innerHTML !== nextSessionsHtml) {
-        sessionsEl.innerHTML = nextSessionsHtml;
-        bindSessionInteractions(sessions);
+      if (!sessionsEl) return;
+
+      if (sessions.length === 0) {
+        const emptyHtml = '<div class="line muted">No sessions configured.</div>';
+        if (sessionsEl.innerHTML !== emptyHtml) sessionsEl.innerHTML = emptyHtml;
+        return;
+      }
+
+      const existingCards = new Map();
+      const existingElements = Array.from(sessionsEl.children).filter(function (el) {
+        return el.matches && el.matches('.session.tap[data-name]');
+      });
+      for (const el of existingElements) {
+        existingCards.set(el.getAttribute('data-name'), el);
+      }
+
+      sessions.forEach(function (s, index) {
+        const nextNode = makeSessionCardNode(sessionCard(s));
+        const nextKey = nextNode ? nextNode.getAttribute('data-render-key') : '';
+        const existing = existingCards.get(s.name);
+        let cardEl = existing;
+        if (!cardEl) {
+          cardEl = nextNode;
+        } else if ((cardEl.getAttribute('data-render-key') || '') !== (nextKey || '')) {
+          cardEl.replaceWith(nextNode);
+          cardEl = nextNode;
+        }
+
+        const anchoredAt = sessionsEl.children[index] || null;
+        if (cardEl !== anchoredAt) sessionsEl.insertBefore(cardEl, anchoredAt);
+      });
+
+      const validNames = new Set(sessions.map(function (s) { return s.name; }));
+      for (const el of Array.from(sessionsEl.children)) {
+        if (!el.matches || !el.matches('.session.tap[data-name]')) {
+          el.remove();
+          continue;
+        }
+        if (!validNames.has(el.getAttribute('data-name'))) el.remove();
       }
     }
 
@@ -3999,6 +4088,7 @@ function renderPage() {
     }
 
     bindStaticModalInteractions();
+    bindSessionInteractions();
     renderHotDials();
     refresh();
     setInterval(refresh, ${REFRESH_MS});
