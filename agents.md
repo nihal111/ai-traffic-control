@@ -33,8 +33,8 @@ Rebuild and reload dashboard-managed nginx session proxy:
    - `lsof -nP -iTCP -sTCP:LISTEN | rg ':(7001|7002|7003|7004|8001|8002|8003|8004|1111)\b'`
 
 Important behavior:
-- `start-ttyd-sessions.sh` resets slot state to idle and rewrites `dashboard/state/sessions-state.json`.
-- Running it intentionally clears active slot runtime metadata and can clear persisted extras stored only in that file.
+- `start-ttyd-sessions.sh` is non-destructive and only regenerates/reloads the nginx session proxy.
+- `reset-ttyd-sessions.sh` is destructive: it kills `800x` ttyd backends, rewrites `dashboard/state/sessions-state.json`, and intentionally clears active slot runtime metadata.
 
 ### 1.3 If hook wiring changes (`.codex/hooks.json`, `.claude/settings.json`, `dashboard/scripts/codex-hook-forwarder.mjs`, `dashboard/scripts/shell-hook-writer.mjs`)
 
@@ -91,6 +91,13 @@ Before handing off code changes:
 2. Run relevant test suite(s) for changed area.
 3. Verify key runtime endpoint/listener for that area.
 4. Report exact commands run and verification results in final update.
+5. Use Conventional Commits for every git commit message.
+
+Conventional Commit format:
+- `<type>(<optional-scope>): <summary>`
+- Use lowercase commit types such as `feat`, `fix`, `docs`, `refactor`, `test`, `chore`.
+- Keep the summary concise and imperative.
+- Add a commit body when useful to capture key behavior changes, migrations, or operational implications.
 
 ## 4) Calendar manager integration notes
 

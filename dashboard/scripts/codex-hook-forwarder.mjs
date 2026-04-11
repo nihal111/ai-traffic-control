@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const writerPath = path.join(__dirname, 'shell-hook-writer.mjs');
+const DASHBOARD_HOOKS_DISABLED = process.env.ATC_DISABLE_DASHBOARD_HOOKS === '1';
 
 async function readStdin() {
   return new Promise((resolve) => {
@@ -54,7 +55,9 @@ const raw = await readStdin();
 const payload = parseJson(raw);
 const eventType = payload?.hook_event_name || payload?.hookEventName || process.env.ATC_EVENT_TYPE || 'CodexHook';
 
-await forwardToWriter(raw, eventType);
+if (!DASHBOARD_HOOKS_DISABLED) {
+  await forwardToWriter(raw, eventType);
+}
 
 if (eventType === 'Stop') {
   process.stdout.write('{"continue": true}\n');

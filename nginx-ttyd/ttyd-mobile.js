@@ -10,6 +10,77 @@
   var keyboardOpen = false;
   var keyboardOffsetPx = 0;
   var followBottomTimer = 0;
+  var sessionSummaryTimer = 0;
+  var initialized = false;
+
+  function compactText(value, maxLen) {
+    var text = String(value || "").replace(/\s+/g, " ").trim();
+    if (!text) return "";
+    if (!Number.isFinite(maxLen) || maxLen <= 0 || text.length <= maxLen) return text;
+    return text.slice(0, maxLen - 1) + "\u2026";
+  }
+
+  function sessionMeta() {
+    return window.TTYD_SESSION_META || {};
+  }
+
+  function sessionSummary() {
+    return document.getElementById("ttyd-session-summary");
+  }
+
+  function renderSessionSummary(name, taskTitle) {
+    var root = sessionSummary();
+    if (!root) return;
+    var agentEl = document.getElementById("ttyd-session-summary-agent");
+    var separatorEl = document.getElementById("ttyd-session-summary-separator");
+    var taskEl = document.getElementById("ttyd-session-summary-task");
+    if (!agentEl || !separatorEl || !taskEl) return;
+
+    var agent = compactText(name, 40);
+    var task = compactText(taskTitle, 120);
+    if (!agent && !task) {
+      root.hidden = true;
+      updateLayoutInsets();
+      return;
+    }
+
+    agentEl.textContent = agent || "Session";
+    taskEl.textContent = task || "";
+    separatorEl.hidden = !(agent && task);
+    taskEl.hidden = !task;
+    root.hidden = false;
+    updateLayoutInsets();
+  }
+
+  function applySessionSummaryFromState(payload) {
+    var meta = sessionMeta();
+    var slotName = typeof meta.slotName === "string" ? meta.slotName.trim() : "";
+    var sessions = payload && payload.sessions && typeof payload.sessions === "object" ? payload.sessions : null;
+    var session = sessions && slotName ? sessions[slotName] : null;
+    renderSessionSummary(
+      (session && session.name) || meta.fallbackName || slotName,
+      (session && session.taskTitle) || meta.fallbackTaskTitle || ""
+    );
+  }
+
+  function refreshSessionSummary() {
+    var meta = sessionMeta();
+    if (!meta || (!meta.slotName && !meta.fallbackName)) return;
+    if (!meta.statePath) {
+      renderSessionSummary(meta.fallbackName || meta.slotName || "", meta.fallbackTaskTitle || "");
+      return;
+    }
+
+    fetch(meta.statePath, { cache: "no-store", credentials: "same-origin" })
+      .then(function (response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      })
+      .then(applySessionSummaryFromState)
+      .catch(function () {
+        renderSessionSummary(meta.fallbackName || meta.slotName || "", meta.fallbackTaskTitle || "");
+      });
+  }
 
   function getViewport() {
     return document.querySelector(".xterm .xterm-viewport");
@@ -597,7 +668,9 @@
     { passive: true, capture: true }
   );
 
-  window.addEventListener("load", function () {
+  function initMobileOverlay() {
+    if (initialized) return;
+    initialized = true;
     var flags = mobileFlags();
     var initialFont = readFontSize();
     applyFontSize(initialFont);
@@ -608,8 +681,16 @@
     if (flags.touchscroll) bindTouchScroll();
     if (flags.scrollbar) ensureScrollRail();
     if (flags.history) setTimeout(preloadTmuxHistory, 120);
+    refreshSessionSummary();
+    if (!sessionSummaryTimer) sessionSummaryTimer = window.setInterval(refreshSessionSummary, 10000);
     updateLayoutInsets();
-  });
+  }
+
+  if (document.readyState === "complete" || document.readyState === "interactive") {
+    initMobileOverlay();
+  } else {
+    window.addEventListener("load", initMobileOverlay, { once: true });
+  }
 
   window.addEventListener("resize", function () {
     var flags = mobileFlags();

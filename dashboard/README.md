@@ -10,8 +10,11 @@ Runs a lightweight dashboard on port `1111` to show:
 ## Start
 
 ```bash
-# Reset all slot backends to idle and start/reload nginx proxy (public 700x -> backend 800x)
+# Start/reload nginx proxy (public 700x -> backend 800x) without touching live slot backends
 ./dashboard/scripts/start-ttyd-sessions.sh
+
+# Destructively reset all slot backends to idle, then start/reload nginx proxy
+./dashboard/scripts/reset-ttyd-sessions.sh
 
 # Start dashboard in tmux on :1111
 ./dashboard/scripts/start-dashboard.sh

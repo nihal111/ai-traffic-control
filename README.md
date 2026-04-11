@@ -135,7 +135,7 @@ Required tools on the host machine:
 - `jq` (for one health-check command)
 - `codexbar` (used for provider usage telemetry from Codex/Claude/Gemini)
 
-### 2) Start session proxy + reset slots to idle
+### 2) Start or reload session proxy without resetting live slots
 
 ```bash
 cd ~/Code/AiTrafficControl
@@ -144,9 +144,21 @@ cd ~/Code/AiTrafficControl
 
 What this does:
 - Regenerates dashboard-managed nginx config (`700x -> 800x` port mapping).
+- Preserves live `800x` ttyd backends and existing `dashboard/state/sessions-state.json`.
+
+### 3) Destructively reset session backends and slot state
+
+```bash
+cd ~/Code/AiTrafficControl
+./dashboard/scripts/reset-ttyd-sessions.sh
+```
+
+What this does:
+- Regenerates dashboard-managed nginx config (`700x -> 800x` port mapping).
+- Kills live `800x` ttyd backends.
 - Resets slot runtime state in `dashboard/state/sessions-state.json` to idle defaults.
 
-### 3) Start the dashboard
+### 4) Start the dashboard
 
 ```bash
 cd ~/Code/AiTrafficControl
@@ -157,7 +169,7 @@ Open:
 - Dashboard: `http://127.0.0.1:1111`
 - Mobile/slot endpoints: `http://127.0.0.1:7001` ... `:7004` (from `dashboard/sessions.json`)
 
-### 4) Verify it is healthy
+### 5) Verify it is healthy
 
 ```bash
 lsof -nP -iTCP -sTCP:LISTEN | rg ':(7001|7002|7003|7004|8001|8002|8003|8004|1111)\b'
@@ -255,7 +267,8 @@ Standalone path:
 
 ## Caveats
 
-- `dashboard/scripts/start-ttyd-sessions.sh` intentionally resets slot state to idle and rewrites `dashboard/state/sessions-state.json`.
+- `dashboard/scripts/start-ttyd-sessions.sh` is safe for template/nginx reloads and does not tear down live scientist sessions.
+- `dashboard/scripts/reset-ttyd-sessions.sh` intentionally resets slot state to idle and rewrites `dashboard/state/sessions-state.json`.
 - Changing injected toolbar HTML requires regenerating/reloading nginx configs, not just a browser refresh.
 - If only `nginx-ttyd/ttyd-mobile.css` or `nginx-ttyd/ttyd-mobile.js` changes, a hard refresh is usually enough (or bump `?v=` in nginx config if cached).
 

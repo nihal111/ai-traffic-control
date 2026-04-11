@@ -20,6 +20,43 @@
   box-sizing: border-box;
 }
 
+#ttyd-session-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #15254a;
+  color: #e7efff;
+  font-size: 15px;
+  line-height: 1.2;
+  box-shadow: inset 0 0 0 1px rgba(151, 180, 255, 0.18);
+}
+
+#ttyd-session-summary[hidden] {
+  display: none !important;
+}
+
+#ttyd-session-summary-agent {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+#ttyd-session-summary-separator {
+  color: #8fb2ff;
+  flex: 0 0 auto;
+}
+
+#ttyd-session-summary-task {
+  min-width: 0;
+  flex: 1 1 auto;
+  color: #cbd9ff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 #ttyd-toolbar-main {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));

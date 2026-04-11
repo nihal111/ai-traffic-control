@@ -165,6 +165,51 @@ function writeTempTranscript(content) {
   return { dir, file };
 }
 
+function writeJsonAtomic(filePath, payload) {
+  const tmpFile = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+  fs.writeFileSync(tmpFile, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+  fs.renameSync(tmpFile, filePath);
+}
+
+function extractTitleFromStdout(stdout) {
+  const lines = String(stdout || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const rawLine of lines) {
+    if (rawLine === '```') continue;
+    const line = rawLine.replace(/^title\s*:\s*/i, '').trim();
+    if (!line) continue;
+    const unquoted = line.replace(/^["'`]+|["'`]+$/g, '').replace(/\s+/g, ' ').trim();
+    if (!unquoted) continue;
+    return unquoted.length <= 60 ? unquoted : `${unquoted.slice(0, 59).trimEnd()}…`;
+  }
+  return '';
+}
+
+function updateSessionTitle(title) {
+  if (!title) return false;
+  try {
+    const state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    if (!state || typeof state !== 'object' || !state.sessions || typeof state.sessions !== 'object') {
+      log('abort: state file missing sessions object');
+      return false;
+    }
+    if (!state.sessions[SLOT_NAME] || typeof state.sessions[SLOT_NAME] !== 'object') {
+      log(`abort: slot ${SLOT_NAME} missing from state file`);
+      return false;
+    }
+    state.sessions[SLOT_NAME].taskTitle = title;
+    state.updatedAt = new Date().toISOString();
+    writeJsonAtomic(STATE_FILE, state);
+    return true;
+  } catch (error) {
+    log(`failed to update state file: ${error.message}`);
+    return false;
+  }
+}
+
 // ── Main ───────────────────────────────────────────────────────
 
 log('started');
@@ -195,65 +240,97 @@ const tempTranscript = writeTempTranscript(transcriptContent);
 log(`extracted ${exchanges.length} exchanges; source=${transcriptSource}; invoking gemini`);
 
 const instruction =
-  `You are a helper that updates a session title in a JSON config file. ` +
-  `Read the file ${tempTranscript.file} — it contains the most recent transcript lines ` +
-  `for the "${SLOT_NAME}" coding session.\n\n` +
-  `Based on this transcript, generate a short title (max 60 characters) that summarizes what the user is currently working on.\n\n` +
-  `Then update the file ${STATE_FILE} — it is a JSON file with a "sessions" object. ` +
-  `Find the key "${SLOT_NAME}" inside "sessions" and set its "taskTitle" field to your generated title. ` +
-  `Do not change any other fields. Write the file back with the updated title.\n\n` +
-  `After updating the file, output ONLY the title you chose (nothing else).`;
+  `Read the transcript file ${path.basename(tempTranscript.file)} in the current directory. ` +
+  `It contains the most recent interaction history for the "${SLOT_NAME}" coding session.\n\n` +
+  `Return exactly one short title, max 60 characters, describing the current task. ` +
+  `Do not use quotes, bullets, labels, markdown, code fences, or explanations. ` +
+  `Output only the title text.`;
 
-const summarizeArgs = [];
-if (SUMMARIZER_MODEL) summarizeArgs.push('-m', SUMMARIZER_MODEL);
-summarizeArgs.push('-p', instruction, '--yolo', '--output-format', 'text');
+function runGeminiOnce(model) {
+  return new Promise((resolve) => {
+    const args = [];
+    if (model) args.push('-m', model);
+    args.push('-p', instruction, '--yolo', '--output-format', 'text');
 
-const child = spawn(SUMMARIZER_CMD, summarizeArgs, {
-  stdio: ['ignore', 'pipe', 'pipe'],
-  cwd: path.dirname(STATE_FILE),
-});
+    const child = spawn(SUMMARIZER_CMD, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: tempTranscript.dir,
+      env: {
+        ...process.env,
+        ATC_NO_SUMMARIZER: '1',
+        ATC_DISABLE_DASHBOARD_HOOKS: '1',
+      },
+    });
 
-let stdout = '';
-let stderr = '';
-let closed = false;
-child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    let stdout = '';
+    let stderr = '';
+    let closed = false;
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
 
-const timer = setTimeout(() => {
-  log('timeout — killing gemini');
-  child.kill('SIGTERM');
+    const timer = setTimeout(() => {
+      log(`timeout — killing gemini model=${model || 'default'}`);
+      child.kill('SIGTERM');
 
-  setTimeout(() => {
-    if (!closed) child.kill('SIGKILL');
-  }, 4000);
-}, TIMEOUT_MS);
+      setTimeout(() => {
+        if (!closed) child.kill('SIGKILL');
+      }, 4000);
+    }, TIMEOUT_MS);
 
-child.on('error', (err) => {
-  clearTimeout(timer);
-  log(`spawn error: ${err.message}`);
-});
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      closed = true;
+      resolve({ code: 1, stdout, stderr: `${stderr}\n${err.message}`.trim(), spawnError: err.message });
+    });
 
-child.on('close', (code) => {
-  closed = true;
-  clearTimeout(timer);
+    child.on('close', (code) => {
+      closed = true;
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
 
-  const firstLine = stdout.replace(/\s+/g, ' ').trim().split('\n')[0]?.trim() || '';
-  log(`gemini exited code=${code} stdout_len=${stdout.length} stderr_len=${stderr.length} first_line="${firstLine}"`);
+function isSystemResourceFailure(stderr) {
+  const msg = String(stderr || '').toLowerCase();
+  return msg.includes('too many open files') || msg.includes('kqueue():') || msg.includes('libuv');
+}
 
-  if (stderr.trim()) {
-    // Log first few lines of stderr for debugging
-    const stderrPreview = stderr.trim().split('\n').slice(0, 5).join(' | ');
+const fallbackModel = 'gemini-2.5-flash-lite';
+const attempts = [SUMMARIZER_MODEL];
+if (SUMMARIZER_MODEL !== fallbackModel) attempts.push(fallbackModel);
+
+let result = null;
+for (const model of attempts) {
+  if (result && result.code === 0) break;
+  if (result && !isSystemResourceFailure(result.stderr)) break;
+  if (result) log(`retrying gemini with fallback model=${model}`);
+  result = await runGeminiOnce(model);
+
+  const firstLine = result.stdout.replace(/\s+/g, ' ').trim().split('\n')[0]?.trim() || '';
+  log(`gemini exited code=${result.code} stdout_len=${result.stdout.length} stderr_len=${result.stderr.length} first_line="${firstLine}" model=${model}`);
+
+  if (String(result.stderr || '').trim()) {
+    const stderrPreview = String(result.stderr || '').trim().split('\n').slice(0, 5).join(' | ');
     log(`gemini stderr: ${stderrPreview}`);
   }
 
-  if (code !== 0) {
-    log(`gemini failed with exit code ${code}`);
+  if (result.code !== 0) {
+    log(`gemini failed with exit code ${result.code} model=${model}`);
   }
+}
 
-  try {
-    fs.unlinkSync(tempTranscript.file);
-    fs.rmdirSync(tempTranscript.dir);
-  } catch {
-    // best-effort cleanup
-  }
-});
+const title = result && result.code === 0 ? extractTitleFromStdout(result.stdout) : '';
+if (!title) {
+  log('abort: summarizer did not return a usable title');
+} else if (updateSessionTitle(title)) {
+  log(`updated state title="${title}"`);
+} else {
+  log(`abort: failed to persist title="${title}"`);
+}
+
+try {
+  fs.rmSync(tempTranscript.dir, { recursive: true, force: true });
+} catch {
+  // best-effort cleanup
+}
