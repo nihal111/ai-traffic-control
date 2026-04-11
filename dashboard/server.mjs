@@ -40,6 +40,7 @@ const TEMPLATE_CONTINUE_WORK = 'continue_work';
 const PERSONA_NONE = 'none';
 const PROVIDERS = new Set(['codex', 'claude', 'gemini']);
 const ENABLE_PROVIDER_AUTO_LAUNCH = process.env.ATC_AUTO_LAUNCH_PROVIDER !== '0';
+const DISABLE_CODEX_BAR = process.argv.includes('--no-codexbar') || process.env.ATC_DISABLE_CODEX_BAR === '1';
 const PROVIDER_BOOT_COMMANDS = {
   codex: String(process.env.ATC_PROVIDER_BOOTSTRAP_CODEX || 'codex --dangerously-bypass-approvals-and-sandbox').trim(),
   claude: String(process.env.ATC_PROVIDER_BOOTSTRAP_CLAUDE || 'claude --dangerously-skip-permissions').trim(),
@@ -386,6 +387,10 @@ function parseWindow(windowValue, fallbackMinutes = null) {
 }
 
 async function fetchCodexbarUsage(provider, source = 'auto', runCommandFn = runCommand) {
+  if (DISABLE_CODEX_BAR) {
+    return { ok: false, error: 'Codex Bar disabled', provider };
+  }
+
   const parseResult = (raw) => {
     let parsed = null;
     if (raw?.stdout && String(raw.stdout).trim()) {
