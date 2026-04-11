@@ -68,11 +68,14 @@ function extractExchanges(events, count) {
   const assistantReplies = [];
 
   for (const ev of events) {
-    if (ev.eventType === 'UserPromptSubmit' && ev.payload?.prompt) {
+    if ((ev.eventType === 'UserPromptSubmit' || ev.eventType === 'BeforeAgent') && ev.payload?.prompt) {
       userPrompts.push({ ts: ev.ts, text: ev.payload.prompt });
     }
     if (ev.eventType === 'Stop' && ev.payload?.last_assistant_message) {
       assistantReplies.push({ ts: ev.ts, text: ev.payload.last_assistant_message });
+    }
+    if (ev.eventType === 'AfterAgent' && ev.payload?.prompt_response) {
+      assistantReplies.push({ ts: ev.ts, text: ev.payload.prompt_response });
     }
   }
 

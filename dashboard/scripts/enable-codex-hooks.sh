@@ -16,54 +16,53 @@ if [ ! -f "$CONFIG_FILE" ]; then
 codex_hooks = true
 TOML
   echo "created $CONFIG_FILE with codex_hooks enabled"
-  exit 0
-fi
-
-tmp_file="${CONFIG_FILE}.$$.tmp"
-awk '
-BEGIN {
-  in_features = 0;
-  saw_features = 0;
-  wrote_codex_hooks = 0;
-}
-function write_hook_if_needed() {
-  if (in_features && !wrote_codex_hooks) {
-    print "codex_hooks = true";
-    wrote_codex_hooks = 1;
-  }
-}
-/^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
-  write_hook_if_needed();
-  in_features = ($0 ~ /^[[:space:]]*\[features\][[:space:]]*$/);
-  if (in_features) {
-    saw_features = 1;
+else
+  tmp_file="${CONFIG_FILE}.$$.tmp"
+  awk '
+  BEGIN {
+    in_features = 0;
+    saw_features = 0;
     wrote_codex_hooks = 0;
   }
-  print;
-  next;
-}
-{
-  if (in_features && $0 ~ /^[[:space:]]*codex_hooks[[:space:]]*=/) {
-    if (!wrote_codex_hooks) {
+  function write_hook_if_needed() {
+    if (in_features && !wrote_codex_hooks) {
       print "codex_hooks = true";
       wrote_codex_hooks = 1;
     }
+  }
+  /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
+    write_hook_if_needed();
+    in_features = ($0 ~ /^[[:space:]]*\[features\][[:space:]]*$/);
+    if (in_features) {
+      saw_features = 1;
+      wrote_codex_hooks = 0;
+    }
+    print;
     next;
   }
-  print;
-}
-END {
-  write_hook_if_needed();
-  if (!saw_features) {
-    print "";
-    print "[features]";
-    print "codex_hooks = true";
+  {
+    if (in_features && $0 ~ /^[[:space:]]*codex_hooks[[:space:]]*=/) {
+      if (!wrote_codex_hooks) {
+        print "codex_hooks = true";
+        wrote_codex_hooks = 1;
+      }
+      next;
+    }
+    print;
   }
-}
-' "$CONFIG_FILE" > "$tmp_file"
+  END {
+    write_hook_if_needed();
+    if (!saw_features) {
+      print "";
+      print "[features]";
+      print "codex_hooks = true";
+    }
+  }
+  ' "$CONFIG_FILE" > "$tmp_file"
 
-mv "$tmp_file" "$CONFIG_FILE"
-echo "enabled codex_hooks in $CONFIG_FILE"
+  mv "$tmp_file" "$CONFIG_FILE"
+  echo "enabled codex_hooks in $CONFIG_FILE"
+fi
 
 # Install global Codex hooks so sessions started in other workdirs still forward
 # UserPromptSubmit/Stop events into the dashboard writer.
@@ -134,3 +133,31 @@ node -e "
 " "$CLAUDE_SETTINGS" "$HOOK_FORWARDER"
 
 echo "merged claude hooks into $CLAUDE_SETTINGS"
+
+# ── Gemini global hooks ────────────────────────────────────────
+# Gemini CLI uses ~/.gemini/settings.json for global hooks.
+GEMINI_DIR="$HOME/.gemini"
+GEMINI_SETTINGS="$GEMINI_DIR/settings.json"
+mkdir -p "$GEMINI_DIR"
+
+# Merge hooks into existing settings
+node -e "
+  const fs = require('fs');
+  const settingsPath = process.argv[1];
+  const forwarder = process.argv[2];
+  const cmd = 'ATC_PROVIDER=gemini node \"' + forwarder + '\"';
+  const hooks = {
+    SessionStart: [{ matcher: '*', hooks: [{ type: 'command', command: cmd }] }],
+    BeforeAgent: [{ matcher: '*', hooks: [{ type: 'command', command: cmd }] }],
+    AfterAgent: [{ matcher: '*', hooks: [{ type: 'command', command: cmd }] }],
+    SessionEnd: [{ matcher: '*', hooks: [{ type: 'command', command: cmd }] }],
+  };
+  let existing = {};
+  try { existing = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
+  existing.hooks = hooks;
+  existing.hooksConfig = existing.hooksConfig || {};
+  existing.hooksConfig.enabled = true;
+  fs.writeFileSync(settingsPath, JSON.stringify(existing, null, 2) + '\n');
+" "$GEMINI_SETTINGS" "$HOOK_FORWARDER"
+
+echo "merged gemini hooks into $GEMINI_SETTINGS"

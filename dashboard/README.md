@@ -53,20 +53,23 @@ Spawned sessions inject this env contract:
 `dashboard/scripts/shell-hook-writer.mjs` supports both env-only events (shell hooks) and JSON-over-stdin events (for Codex/Claude native hooks).
 Shell hooks are enabled by default. Set `ENABLE_SHELL_HOOKS=0` only when explicitly debugging shell startup issues.
 
-## Codex hooks (milestone 5)
+## Native hooks (Codex, Claude, Gemini)
 
-This repo includes local Codex hook wiring at `.codex/hooks.json` and a forwarder:
+This repo includes hook wiring and a forwarder:
 - `dashboard/scripts/codex-hook-forwarder.mjs`
 
-Enable the feature flag once on this machine:
+Enable global hooks for all providers on this machine:
 
 ```bash
 ./dashboard/scripts/enable-codex-hooks.sh
 ```
 
-When `codex` runs inside a spawned slot shell, native Codex hook payloads are forwarded into that slot's `events.jsonl` via the same shared writer.
+This script:
+- Enables `codex_hooks` feature in `~/.codex/config.toml` and installs global hooks in `~/.codex/hooks.json`.
+- Installs global hooks in `~/.claude/settings.json`.
+- Installs global hooks and enables hook system in `~/.gemini/settings.json`.
 
-Claude uses repo-local `.claude/settings.json` and the same forwarder, so Codex and Claude events land in the same per-slot schema.
+When a provider runs inside a spawned slot shell, native hook payloads are forwarded into that slot's `events.jsonl` via the same shared writer. This enables AI title summarization and telemetry even for non-shell events (like agent start/stop).
 
 Derived metrics are computed in the dashboard process:
 - `TELEMETRY_INGEST_MS` (default `2000`)

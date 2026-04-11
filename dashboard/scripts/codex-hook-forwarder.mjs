@@ -58,4 +58,6 @@ await forwardToWriter(raw, eventType);
 
 if (eventType === 'Stop') {
   process.stdout.write('{"continue": true}\n');
+} else {
+  process.stdout.write('{}\n');
 }

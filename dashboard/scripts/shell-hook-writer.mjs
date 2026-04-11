@@ -122,7 +122,7 @@ if (event.durationMs !== null) nextMeta.lastDurationMs = event.durationMs;
 if (event.eventType === 'shell_start') nextMeta.shellStartedAt = nowIso;
 
 // Track user prompt count separately for summarizer trigger
-const isUserPrompt = event.eventType === 'UserPromptSubmit';
+const isUserPrompt = event.eventType === 'UserPromptSubmit' || event.eventType === 'BeforeAgent';
 if (isUserPrompt) {
   nextMeta.userPromptCount = Number(nextMeta.userPromptCount || 0) + 1;
 }

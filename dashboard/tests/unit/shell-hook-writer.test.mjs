@@ -120,6 +120,26 @@ test('shell hook writer appends events and updates meta/derived files', async ()
   assert.equal(derived2.cwd, '/tmp/work/subdir');
   assert.equal(derived2.lastEventType, 'UserPromptSubmit');
 
+  await runWriter({
+    env: {
+      ATC_SLOT: 'Feynman',
+      ATC_RUN_ID: 'run-1',
+      ATC_EVENTS_FILE: eventsFile,
+      ATC_META_FILE: metaFile,
+      ATC_DERIVED_FILE: derivedFile,
+      ATC_PROVIDER: 'gemini',
+    },
+    stdin: JSON.stringify({
+      hook_event_name: 'BeforeAgent',
+      prompt: 'What is quantum electrodynamics?',
+    }),
+  });
+
+  const meta3 = await readJson(metaFile);
+  assert.equal(meta3.eventCount, 3);
+  assert.equal(meta3.lastEventType, 'BeforeAgent');
+  assert.equal(meta3.userPromptCount, 2);
+
   await fs.rm(tmp, { recursive: true, force: true });
 });
 

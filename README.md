@@ -133,6 +133,7 @@ Required tools on the host machine:
 - `ttyd`
 - `nginx` (default path assumed by scripts: `/opt/homebrew/opt/nginx/bin/nginx`)
 - `jq` (for one health-check command)
+- `codexbar` (used for provider usage telemetry from Codex/Claude/Gemini)
 
 ### 2) Start session proxy + reset slots to idle
 
