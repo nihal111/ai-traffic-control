@@ -35,6 +35,7 @@ const SUMMARIZER_MODEL = String(process.env.ATC_SUMMARIZER_MODEL || 'gemini-3.1-
 // ── Logging ────────────────────────────────────────────────────
 const LOG_DIR = path.join(path.dirname(STATE_FILE || '.'), '..', 'runtime', 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'summarizer.log');
+const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '';
 
 function log(msg) {
   try {
@@ -165,6 +166,45 @@ function writeTempTranscript(content) {
   return { dir, file };
 }
 
+function parseJsonFile(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function writeJsonPretty(filePath, payload) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+}
+
+function prepareIsolatedGeminiHome(baseDir) {
+  if (!HOME_DIR) return null;
+
+  const sourceGeminiDir = path.join(HOME_DIR, '.gemini');
+  if (!fs.existsSync(sourceGeminiDir)) return null;
+
+  const isolatedHome = path.join(baseDir, 'home');
+  const isolatedGeminiDir = path.join(isolatedHome, '.gemini');
+  fs.mkdirSync(isolatedGeminiDir, { recursive: true });
+
+  for (const name of ['oauth_creds.json', 'google_accounts.json', 'installation_id', 'state.json', 'projects.json', 'trustedFolders.json']) {
+    const src = path.join(sourceGeminiDir, name);
+    const dest = path.join(isolatedGeminiDir, name);
+    if (!fs.existsSync(src)) continue;
+    fs.copyFileSync(src, dest);
+  }
+
+  const sourceSettings = parseJsonFile(path.join(sourceGeminiDir, 'settings.json')) || {};
+  const isolatedSettings = {};
+  if (sourceSettings.security && typeof sourceSettings.security === 'object') {
+    isolatedSettings.security = sourceSettings.security;
+  }
+  writeJsonPretty(path.join(isolatedGeminiDir, 'settings.json'), isolatedSettings);
+  return isolatedHome;
+}
+
 function writeJsonAtomic(filePath, payload) {
   const tmpFile = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
   fs.writeFileSync(tmpFile, JSON.stringify(payload, null, 2) + '\n', 'utf8');
@@ -236,8 +276,10 @@ const transcriptTail = transcriptPath ? readTranscriptExchanges(transcriptPath, 
 const transcriptSource = transcriptTail ? 'native_transcript' : 'events_fallback';
 const transcriptContent = transcriptTail || transcript;
 const tempTranscript = writeTempTranscript(transcriptContent);
+const isolatedGeminiHome = prepareIsolatedGeminiHome(tempTranscript.dir);
 
 log(`extracted ${exchanges.length} exchanges; source=${transcriptSource}; invoking gemini`);
+if (isolatedGeminiHome) log(`prepared isolated gemini home at ${isolatedGeminiHome}`);
 
 const instruction =
   `Read the transcript file ${path.basename(tempTranscript.file)} in the current directory. ` +
@@ -257,6 +299,7 @@ function runGeminiOnce(model) {
       cwd: tempTranscript.dir,
       env: {
         ...process.env,
+        ...(isolatedGeminiHome ? { HOME: isolatedGeminiHome, USERPROFILE: isolatedGeminiHome } : {}),
         ATC_NO_SUMMARIZER: '1',
         ATC_DISABLE_DASHBOARD_HOOKS: '1',
       },
@@ -296,6 +339,20 @@ function isSystemResourceFailure(stderr) {
   return msg.includes('too many open files') || msg.includes('kqueue():') || msg.includes('libuv');
 }
 
+function shouldRetryWithFallback(result) {
+  const stderr = String(result?.stderr || '').toLowerCase();
+  if (isSystemResourceFailure(stderr)) return true;
+  return (
+    stderr.includes('quota_exhausted') ||
+    stderr.includes('quota exhausted') ||
+    stderr.includes('exhausted your capacity') ||
+    stderr.includes('rate limit') ||
+    stderr.includes('resource_exhausted') ||
+    stderr.includes('model not found') ||
+    stderr.includes('unsupported model')
+  );
+}
+
 const fallbackModel = 'gemini-2.5-flash-lite';
 const attempts = [SUMMARIZER_MODEL];
 if (SUMMARIZER_MODEL !== fallbackModel) attempts.push(fallbackModel);
@@ -303,7 +360,7 @@ if (SUMMARIZER_MODEL !== fallbackModel) attempts.push(fallbackModel);
 let result = null;
 for (const model of attempts) {
   if (result && result.code === 0) break;
-  if (result && !isSystemResourceFailure(result.stderr)) break;
+  if (result && !shouldRetryWithFallback(result)) break;
   if (result) log(`retrying gemini with fallback model=${model}`);
   result = await runGeminiOnce(model);
 
