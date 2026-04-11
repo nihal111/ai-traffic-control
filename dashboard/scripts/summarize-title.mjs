@@ -116,6 +116,46 @@ function readLastLines(filePath, lineCount) {
   }
 }
 
+/**
+ * Parse a Claude/Gemini JSONL transcript and extract the last N
+ * user/assistant text exchanges as clean readable text.
+ * Filters out metadata lines (permission-mode, attachments, file-history, etc.)
+ */
+function readTranscriptExchanges(filePath, lineCount) {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const lines = raw.split('\n').filter(Boolean);
+    const messages = [];
+    for (const line of lines) {
+      let obj;
+      try { obj = JSON.parse(line); } catch { continue; }
+      // Only keep actual conversation messages
+      const msg = obj.message || obj;
+      const role = msg.role;
+      if (role !== 'user' && role !== 'assistant') continue;
+      const content = msg.content;
+      let text = '';
+      if (typeof content === 'string') {
+        text = content;
+      } else if (Array.isArray(content)) {
+        text = content
+          .filter((p) => p.type === 'text' && p.text)
+          .map((p) => p.text)
+          .join(' ');
+      }
+      text = text.replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      messages.push({ role, text: truncate(text, 500) });
+    }
+    if (messages.length === 0) return '';
+    // Take the last N messages and format as readable transcript
+    const recent = messages.slice(-lineCount);
+    return recent.map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text}`).join('\n');
+  } catch {
+    return '';
+  }
+}
+
 function writeTempTranscript(content) {
   const baseDir = path.join(path.dirname(STATE_FILE), '.tmp-summarizer');
   fs.mkdirSync(baseDir, { recursive: true });
@@ -147,7 +187,7 @@ for (const ex of exchanges) {
 }
 
 const transcriptPath = extractLatestTranscriptPath(events);
-const transcriptTail = transcriptPath ? readLastLines(transcriptPath, TRANSCRIPT_LINE_COUNT) : '';
+const transcriptTail = transcriptPath ? readTranscriptExchanges(transcriptPath, TRANSCRIPT_LINE_COUNT) : '';
 const transcriptSource = transcriptTail ? 'native_transcript' : 'events_fallback';
 const transcriptContent = transcriptTail || transcript;
 const tempTranscript = writeTempTranscript(transcriptContent);
