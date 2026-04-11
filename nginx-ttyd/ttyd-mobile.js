@@ -12,6 +12,7 @@
   var followBottomTimer = 0;
   var sessionSummaryTimer = 0;
   var initialized = false;
+  var lastToolbarHeight = 0;
 
   function compactText(value, maxLen) {
     var text = String(value || "").replace(/\s+/g, " ").trim();
@@ -38,18 +39,22 @@
 
     var agent = compactText(name, 40);
     var task = compactText(taskTitle, 120);
-    if (!agent && !task) {
+    var shouldHide = !agent && !task;
+    var wasHidden = root.hidden;
+
+    if (shouldHide) {
       root.hidden = true;
-      updateLayoutInsets();
-      return;
+    } else {
+      agentEl.textContent = agent || "Session";
+      taskEl.textContent = task || "";
+      separatorEl.hidden = !(agent && task);
+      taskEl.hidden = !task;
+      root.hidden = false;
     }
 
-    agentEl.textContent = agent || "Session";
-    taskEl.textContent = task || "";
-    separatorEl.hidden = !(agent && task);
-    taskEl.hidden = !task;
-    root.hidden = false;
-    updateLayoutInsets();
+    if (wasHidden !== shouldHide) {
+      updateLayoutInsets();
+    }
   }
 
   function applySessionSummaryFromState(payload) {
@@ -262,6 +267,8 @@
     var tb = toolbar();
     if (!tb) return;
     var h = Math.max(70, Math.round(tb.offsetHeight || 0));
+    if (h === lastToolbarHeight && lastToolbarHeight > 0) return;
+    lastToolbarHeight = h;
     document.documentElement.style.setProperty("--ttyd-toolbar-height", h + "px");
     document.documentElement.style.setProperty("--ttyd-bottom-inset", h + keyboardOffsetPx + "px");
   }
