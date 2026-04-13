@@ -2906,8 +2906,12 @@ function renderPage() {
         if (bodyScrollLockDepth > 1) return;
         bodyScrollLockY = window.scrollY || window.pageYOffset || 0;
         body.classList.add('modal-open');
+        body.style.position = 'fixed';
+        body.style.width = '100%';
+        body.style.top = '-' + bodyScrollLockY + 'px';
+        body.style.left = '0';
+        body.style.right = '0';
         body.style.overflow = 'hidden';
-        body.style.touchAction = 'none';
         return;
       }
 
@@ -2917,9 +2921,18 @@ function renderPage() {
 
       const activeEl = document.activeElement;
       if (activeEl && typeof activeEl.blur === 'function') activeEl.blur();
+      const restoreY = bodyScrollLockY;
       body.classList.remove('modal-open');
+      body.style.position = '';
+      body.style.top = '';
+      body.style.left = '';
+      body.style.right = '';
+      body.style.width = '';
       body.style.overflow = '';
-      body.style.touchAction = '';
+      window.scrollTo(0, restoreY);
+      requestAnimationFrame(function () {
+        window.scrollTo(0, restoreY);
+      });
     }
 
     function esc(v) {
