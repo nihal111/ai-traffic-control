@@ -1,9 +1,9 @@
 import { test, expect } from '@playwright/test';
 import { DashboardHarness, waitFor } from './harness.mjs';
 
-const DASHBOARD_PORT = 19120;
-const BACKEND_PORT = 18130;
-const PUBLIC_PORT = 17130;
+const DASHBOARD_PORT = 19122;
+const BACKEND_PORT = 18132;
+const PUBLIC_PORT = 17132;
 
 const harness = new DashboardHarness({
   dashboardPort: DASHBOARD_PORT,

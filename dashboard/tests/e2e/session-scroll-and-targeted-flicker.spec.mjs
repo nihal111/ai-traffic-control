@@ -91,6 +91,7 @@ test.beforeAll(async () => {
       ENABLE_SHELL_HOOKS: '1',
       ENABLE_TMUX_BACKEND: '1',
       ATC_AUTO_LAUNCH_PROVIDER: '0',
+      ATC_DISABLE_CODEX_BAR: '1',
       REFRESH_MS: '2000',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -166,7 +167,13 @@ test('starting fourth scientist does not force scroll-top and targets only that 
 
   await page.locator('.session.tap[data-name="Delta"]').click();
   await page.waitForSelector('#intent-modal.open');
-  const modalOpenScroll = await page.evaluate(() => window.scrollY);
+  // When the body-scroll-lock is active, body.style.position === 'fixed' and
+  // window.scrollY returns 0. Read the saved offset from body.style.top instead.
+  const modalOpenScroll = await page.evaluate(() => {
+    const body = document.body;
+    if (body.style.position === 'fixed') return Math.abs(parseInt(body.style.top || '0', 10));
+    return window.scrollY;
+  });
   expect(modalOpenScroll).toBeGreaterThan(20);
 
   await page.click('#intent-confirm');

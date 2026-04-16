@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT/dashboard"
+echo "[pre-push] running dashboard test suite..."
+npm test
+echo "[pre-push] all tests passed"

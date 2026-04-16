@@ -130,6 +130,7 @@ export class DashboardHarness {
         ENABLE_SHELL_HOOKS: '1',
         ENABLE_TMUX_BACKEND: '1',
         ATC_AUTO_LAUNCH_PROVIDER: '0',
+        ATC_DISABLE_CODEX_BAR: '1',
         TELEMETRY_INGEST_MS: String(this.telemetryIngestMs),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
