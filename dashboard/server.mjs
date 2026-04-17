@@ -18,6 +18,8 @@ const RUN_DIR = process.env.SESSIONS_RUN_DIR || path.join(__dirname, 'run');
 const RUNTIME_DIR = process.env.SESSIONS_RUNTIME_DIR || path.join(__dirname, 'runtime');
 const REPO_ROOT = path.join(__dirname, '..');
 const PERSONAS_DIR = path.join(REPO_ROOT, 'personas');
+const PROFILES_DIR = path.join(process.env.HOME || '', '.claude-profiles');
+const PROFILES_JSON = path.join(PROFILES_DIR, 'profiles.json');
 const TTYD_BIN = process.env.TTYD_BIN || '/opt/homebrew/bin/ttyd';
 const SHELL_BIN = process.env.SHELL_BIN || '/bin/zsh';
 const TMUX_BIN = process.env.TMUX_BIN || 'tmux';
@@ -153,6 +155,23 @@ const HOT_DIAL_AGENTS = [
   },
 ];
 const HOT_DIAL_BY_ID = new Map(HOT_DIAL_AGENTS.filter((agent) => agent.enabled).map((agent) => [agent.id, agent]));
+
+// ── Profile management (Claude multi-account switching) ────────────────────
+
+function readProfilesJson() {
+  try {
+    const text = fsSync.readFileSync(PROFILES_JSON, 'utf8');
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' ? parsed : { version: 1, active: null, profiles: {} };
+  } catch {
+    return { version: 1, active: null, profiles: {} };
+  }
+}
+
+function getActiveProfile() {
+  const catalog = readProfilesJson();
+  return catalog.active || null;
+}
 
 let usageCache = { value: null, fetchedAt: 0, pending: null };
 
@@ -533,9 +552,11 @@ function refreshUsageSummaryInBackground() {
 
 function getUsageSnapshot() {
   const now = Date.now();
-  if (usageCache.value && now - usageCache.fetchedAt < USAGE_TTL_MS) return usageCache.value;
+  if (usageCache.value && now - usageCache.fetchedAt < USAGE_TTL_MS) {
+    return { ...usageCache.value, activeProfile: getActiveProfile() };
+  }
   refreshUsageSummaryInBackground();
-  return usageCache.value || loadingUsageSummary();
+  return { ...(usageCache.value || loadingUsageSummary()), activeProfile: getActiveProfile() };
 }
 
 async function ensureDir(filePath) {
@@ -1774,6 +1795,7 @@ function renderPage() {
     ];
     const HOT_DIAL_AGENTS = ${JSON.stringify(HOT_DIAL_AGENTS)};
     let latestUsage = {};
+    let latestProfiles = [];
     const intentState = {
       open: false,
       name: '',
@@ -1935,9 +1957,10 @@ function renderPage() {
       '</article>';
     }
 
-    function providerUsageRow(providerKey, title, payload) {
+    function providerUsageRow(providerKey, title, payload, activeProfile, allProfiles) {
       const logo = PROVIDER_LOGOS[providerKey] || '';
       const isExpanded = usageExpanded.has(providerKey);
+      const hasProfiles = providerKey === 'claude' && Array.isArray(allProfiles) && allProfiles.length > 1;
       if (payload && payload.loading) {
         return '<article class="usage-row loading">' +
           '<button type="button" class="usage-toggle" data-toggle-provider="' + esc(providerKey) + '" aria-expanded="false" aria-label="Toggle ' + esc(title) + ' details">' +
@@ -1971,13 +1994,16 @@ function renderPage() {
         '<div class="provider">' +
           '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="78" height="78" />' +
           '<div class="provider-name-wrap">' +
-            '<div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(' + esc(plan) + ')</span></div>' +
+            '<div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(' + esc(plan) + ')</span>' +
+            (hasProfiles && activeProfile ? ' <span class="profile-alias">[' + esc(activeProfile) + ']</span>' : '') +
+            '</div>' +
             '<div class="provider-plan-block">' + esc(plan) + '</div>' +
             '<div class="provider-mini">' +
               miniWindow(payload.primary) +
               miniWindow(payload.secondary) +
             '</div>' +
           '</div>' +
+          (hasProfiles ? '<div class="profile-nav"><button class="profile-prev" type="button" aria-label="Previous profile" title="Previous profile">‹</button><button class="profile-next" type="button" aria-label="Next profile" title="Next profile">›</button></div>' : '') +
         '</div>' +
         '<div class="usage-details">' +
           '<div class="windows">' +
@@ -2000,6 +2026,95 @@ function renderPage() {
           else usageExpanded.add(provider);
           refresh().catch(function () {});
         });
+      }
+    }
+
+    function bindProfileInteractions() {
+      const claudeRow = document.querySelector('.usage-row[data-provider="claude"]');
+      if (!claudeRow) return;
+      const prevBtn = claudeRow.querySelector('.profile-prev');
+      const nextBtn = claudeRow.querySelector('.profile-next');
+      if (!prevBtn || !nextBtn) return;
+      function getNextProfileAlias(direction) {
+        if (!latestProfiles || latestProfiles.length < 2) return null;
+        const current = latestProfiles.findIndex(p => p.alias === latestUsage.activeProfile);
+        if (current < 0) return null;
+        const next = current + direction;
+        if (next < 0) return latestProfiles[latestProfiles.length - 1]?.alias;
+        if (next >= latestProfiles.length) return latestProfiles[0]?.alias;
+        return latestProfiles[next]?.alias;
+      }
+      function switchProfile(direction) {
+        const nextAlias = getNextProfileAlias(direction);
+        if (!nextAlias) return;
+        switchProfileTo(nextAlias);
+      }
+      prevBtn.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); switchProfile(-1); });
+      nextBtn.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); switchProfile(1); });
+      bindProviderSwipeCard(claudeRow, (direction) => switchProfile(direction > 0 ? 1 : -1));
+    }
+
+    function bindProviderSwipeCard(card, onSwipe) {
+      let touchStart = 0;
+      let touchEnd = 0;
+      const threshold = 35;
+      card.style.touchAction = 'pan-y';
+      card.addEventListener('touchstart', (e) => { touchStart = e.changedTouches[0].clientX; });
+      card.addEventListener('touchend', (e) => {
+        touchEnd = e.changedTouches[0].clientX;
+        const diff = touchStart - touchEnd;
+        if (Math.abs(diff) > threshold) onSwipe(diff);
+      });
+    }
+
+    async function switchProfileTo(alias) {
+      const claudeRow = document.querySelector('.usage-row[data-provider="claude"]');
+      if (!claudeRow) return;
+      claudeRow.classList.add('switching');
+      const aliasSpan = claudeRow.querySelector('.profile-alias');
+      const originalText = aliasSpan?.textContent || '';
+      if (aliasSpan) aliasSpan.textContent = '[' + alias + ']';
+      const detailsDiv = claudeRow.querySelector('.usage-details');
+      if (detailsDiv) detailsDiv.style.opacity = '0.5';
+      try {
+        const resp = await fetch('/api/profiles/switch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ alias }),
+        });
+        if (!resp.ok) {
+          if (aliasSpan) aliasSpan.textContent = originalText;
+          if (detailsDiv) detailsDiv.style.opacity = '1';
+          claudeRow.classList.remove('switching');
+          return;
+        }
+        let attempts = 0;
+        const maxAttempts = 30;
+        function pollUsage() {
+          if (attempts >= maxAttempts) {
+            claudeRow.classList.remove('switching');
+            refresh().catch(() => {});
+            return;
+          }
+          fetch('/api/usage').then(r => r.json()).then(usage => {
+            if (usage.activeProfile === alias && usage.claude && usage.claude.ok && !usage.claude.loading) {
+              claudeRow.classList.remove('switching');
+              if (detailsDiv) detailsDiv.style.opacity = '1';
+              refresh().catch(() => {});
+            } else {
+              attempts++;
+              setTimeout(pollUsage, 200);
+            }
+          }).catch(() => {
+            attempts++;
+            setTimeout(pollUsage, 200);
+          });
+        }
+        pollUsage();
+      } catch (error) {
+        if (aliasSpan) aliasSpan.textContent = originalText;
+        if (detailsDiv) detailsDiv.style.opacity = '1';
+        claudeRow.classList.remove('switching');
       }
     }
 
@@ -2938,15 +3053,17 @@ function renderPage() {
     function renderUsageGrid(usage) {
       latestUsage = usage || {};
       const usageGrid = document.getElementById('usage-grid');
+      const activeProfile = usage?.activeProfile || null;
       const rows = [
-        providerUsageRow('codex', 'Codex', latestUsage.codex),
-        providerUsageRow('claude', 'Claude', latestUsage.claude),
-        providerUsageRow('gemini', 'Gemini', latestUsage.gemini),
+        providerUsageRow('codex', 'Codex', latestUsage.codex, activeProfile, []),
+        providerUsageRow('claude', 'Claude', latestUsage.claude, activeProfile, latestProfiles),
+        providerUsageRow('gemini', 'Gemini', latestUsage.gemini, activeProfile, []),
       ];
       const nextUsageHtml = rows.join('');
       if (usageGrid && usageGrid.innerHTML !== nextUsageHtml) {
         usageGrid.innerHTML = nextUsageHtml;
         bindUsageInteractions();
+        bindProfileInteractions();
       }
     }
 
@@ -3011,7 +3128,16 @@ function renderPage() {
           renderUsageGrid(latestUsage);
         });
 
-      await Promise.allSettled([sessionsTask, usageTask]);
+      const profilesTask = fetch('/api/profiles', { cache: 'no-store' })
+        .then(function (resp) { return resp.json(); })
+        .then(function (payload) {
+          if (payload && Array.isArray(payload.profiles)) {
+            latestProfiles = payload.profiles;
+          }
+        })
+        .catch(function () {});
+
+      await Promise.allSettled([sessionsTask, usageTask, profilesTask]);
     }
 
     bindStaticModalInteractions();
@@ -3179,6 +3305,52 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, { ok: true, name });
     } catch (error) {
       json(res, 500, { error: error.message || 'update failed' });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/profiles' && req.method === 'GET') {
+    try {
+      const catalog = readProfilesJson();
+      const profiles = Object.entries(catalog.profiles || {}).map(([alias, meta]) => ({
+        alias,
+        displayName: meta.displayName || alias,
+        email: meta.email || null,
+        createdAt: meta.createdAt || null,
+      }));
+      json(res, 200, { active: catalog.active, profiles });
+    } catch (error) {
+      json(res, 500, { error: error.message || 'profiles read failed' });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/profiles/switch' && req.method === 'POST') {
+    try {
+      const body = await readJsonBody(req);
+      const alias = String(body.alias || '').trim();
+      if (!alias) {
+        json(res, 400, { error: 'alias is required' });
+        return;
+      }
+      const catalog = readProfilesJson();
+      if (!catalog.profiles[alias]) {
+        json(res, 400, { error: `Unknown profile "${alias}"` });
+        return;
+      }
+      // Shell out to atc-profile use <alias>
+      const atcProfilePath = path.join(__dirname, 'scripts', 'atc-profile.mjs');
+      const result = await runCommand('node', [atcProfilePath, 'use', alias], 30000);
+      if (!result.ok) {
+        json(res, 500, { error: result.stderr || 'Profile switch failed' });
+        return;
+      }
+      // Invalidate usage cache to force refresh
+      usageCache = { value: null, fetchedAt: 0, pending: null };
+      refreshUsageSummaryInBackground().catch(() => {});
+      json(res, 200, { ok: true, active: alias });
+    } catch (error) {
+      json(res, 500, { error: error.message || 'switch failed' });
     }
     return;
   }

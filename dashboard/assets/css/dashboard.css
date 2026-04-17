@@ -101,6 +101,7 @@
       gap: 10px;
       min-width: 0;
       padding-right: 34px;
+      position: relative;
     }
     .provider-logo {
       width: 78px;
@@ -113,7 +114,9 @@
       object-fit: contain;
       padding: 12px;
     }
-    .provider-name-wrap { min-width: 0; }
+    .provider-name-wrap {
+      min-width: 0;
+    }
     .provider-name {
       font-size: 16px;
       font-weight: 700;
@@ -137,6 +140,53 @@
       margin-top: 5px;
       display: grid;
       gap: 4px;
+    }
+    .profile-alias {
+      color: #9fb0d4;
+      font-size: 12px;
+      font-weight: 500;
+      margin-left: 4px;
+    }
+    .profile-nav {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      display: flex;
+      gap: 4px;
+      opacity: 0;
+      transition: opacity 200ms ease-out;
+      pointer-events: none;
+    }
+    .usage-row:hover .profile-nav,
+    .usage-row:focus-within .profile-nav {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .profile-prev,
+    .profile-next {
+      background: #2c3c63;
+      color: #e6ecff;
+      border: 1px solid #3d5f8a;
+      border-radius: 6px;
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      font-size: 18px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 160ms ease-out;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .profile-prev:hover,
+    .profile-next:hover {
+      background: #3d5f8a;
+      border-color: #4d7faa;
+    }
+    .profile-prev:active,
+    .profile-next:active {
+      transform: scale(0.95);
     }
     .mini {
       display: grid;
@@ -288,6 +338,13 @@
     @keyframes usage-spin {
       from { transform: rotate(0deg); }
       to { transform: rotate(360deg); }
+    }
+    .usage-row.switching {
+      pointer-events: none;
+    }
+    .usage-row.switching .provider {
+      opacity: 0.5;
+      transition: opacity 100ms ease-out;
     }
 
     .agent-dials {
