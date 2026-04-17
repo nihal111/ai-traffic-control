@@ -1637,17 +1637,31 @@ function renderPage() {
   <title>AI Traffic Control</title>
   <style>${DASHBOARD_CSS}</style>
 </head>
-<body>
+  <body>
   <div class="shell">
     <section class="title-wrap">
-      <h1 class="title"><span class="decor">🗼</span><span class="accent">AI Traffic Control</span><span class="decor">💻</span></h1>
+      <div class="title-kicker">Control Tower</div>
+      <div class="title-head">
+        <div class="title-mark" id="title-mark" aria-hidden="true">
+          <img class="title-mark-gif" id="title-mark-gif" src="/assets/brand/title-logo.gif?v=1" alt="" />
+        </div>
+        <h1 class="title"><span class="accent">AI Traffic Control</span></h1>
+      </div>
     </section>
 
-    <section class="panel">
+    <section class="panel panel-usage">
+      <div class="panel-head">
+        <h2 class="panel-title">Provider Budgets</h2>
+        <div class="panel-meta">Live rolling windows</div>
+      </div>
       <div class="usage-stack" id="usage-grid"></div>
     </section>
 
-    <section style="margin-top:8px;">
+    <section class="panel panel-dials">
+      <div class="panel-head">
+        <h2 class="panel-title">Quick Launch</h2>
+        <div class="panel-meta">Hot-dial agents</div>
+      </div>
       <div class="agent-dials" id="agent-dials"></div>
     </section>
 
@@ -1874,6 +1888,7 @@ function renderPage() {
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
     }
+
 
     function dialIconSvg(kind, klass = 'agent-dial-icon') {
       if (kind === 'calendar') {
@@ -3174,10 +3189,12 @@ const server = http.createServer(async (req, res) => {
           ? 'image/svg+xml'
           : ext === '.css'
             ? 'text/css'
-            : ext === '.js'
-              ? 'text/javascript'
-              : ext === '.png'
-                ? 'image/png'
+              : ext === '.js'
+                ? 'text/javascript'
+                : ext === '.json'
+                  ? 'application/json; charset=utf-8'
+                : ext === '.png'
+                  ? 'image/png'
                 : ext === '.jpg' || ext === '.jpeg'
                   ? 'image/jpeg'
                   : ext === '.webp'
