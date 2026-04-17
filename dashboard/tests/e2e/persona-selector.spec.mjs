@@ -1,17 +1,43 @@
 import { test, expect } from '@playwright/test';
+import net from 'node:net';
 import { DashboardHarness } from './harness.mjs';
 
-const DASHBOARD_PORT = 19114;
-const BACKEND_PORT = 18104;
-const PUBLIC_PORT = 17104;
+async function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = address && typeof address === 'object' ? address.port : null;
+      server.close((err) => {
+        if (err) reject(err);
+        else resolve(port);
+      });
+    });
+  });
+}
 
-const harness = new DashboardHarness({
-  dashboardPort: DASHBOARD_PORT,
-  backendPort: BACKEND_PORT,
-  publicPort: PUBLIC_PORT,
-});
+async function getFreePorts(count) {
+  const ports = [];
+  while (ports.length < count) {
+    const port = await getFreePort();
+    if (port) ports.push(port);
+  }
+  return ports;
+}
+
+let harness;
+let dashboardPort;
 
 test.beforeAll(async () => {
+  const [freeDashboardPort, freeBackendPort, freePublicPort] = await getFreePorts(3);
+  dashboardPort = freeDashboardPort;
+  harness = new DashboardHarness({
+    dashboardPort,
+    backendPort: freeBackendPort,
+    publicPort: freePublicPort,
+  });
   await harness.setup('Einstein');
   await harness.api('/api/sessions/update', 'POST', {
     name: harness.slotName,
@@ -24,7 +50,7 @@ test.afterAll(async () => {
 });
 
 test('persona cycles within the allowed template set and persists in session state', async ({ page }) => {
-  await page.goto(`http://127.0.0.1:${DASHBOARD_PORT}`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`http://127.0.0.1:${dashboardPort}`, { waitUntil: 'domcontentloaded' });
 
   await page.locator('.session.tap').first().click();
   await expect(page.locator('#intent-modal')).toHaveClass(/open/);
