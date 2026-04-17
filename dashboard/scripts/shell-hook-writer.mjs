@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
@@ -37,6 +38,15 @@ function writeJsonAtomic(filePath, payload) {
   fs.renameSync(tmpPath, filePath);
 }
 
+function sharedFallbackRuntimeRoot() {
+  const explicitRoot = String(process.env.ATC_RUNTIME_ROOT || '').trim();
+  if (explicitRoot) return explicitRoot;
+  const user = String(process.env.USER || process.env.LOGNAME || 'shared')
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, '-');
+  return path.join(os.tmpdir(), 'ai-traffic-control', user, 'dashboard-runtime');
+}
+
 function readStdinJson() {
   try {
     const stat = fs.fstatSync(0);
@@ -52,7 +62,7 @@ function readStdinJson() {
 }
 
 function resolveOutputFiles(currentDir) {
-  const fallbackRoot = path.join(process.cwd(), 'dashboard', 'runtime');
+  const fallbackRoot = sharedFallbackRuntimeRoot();
   const fallbackEvents = currentDir ? path.join(currentDir, 'events.jsonl') : path.join(fallbackRoot, 'unassigned-events.jsonl');
   return {
     eventsFile: process.env.ATC_EVENTS_FILE || fallbackEvents,

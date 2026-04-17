@@ -180,3 +180,50 @@ test('shell hook writer tolerates malformed stdin JSON and falls back to unknown
 
   await fs.rm(tmp, { recursive: true, force: true });
 });
+
+test('shell hook writer fallback files can live outside the current working tree', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'atc-shell-hook-cwd-'));
+  const runtimeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'atc-shell-hook-runtime-'));
+
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [WRITER], {
+      cwd: tmp,
+      env: {
+        ...process.env,
+        ATC_NO_SUMMARIZER: '1',
+        ATC_SLOT: 'unknown',
+        ATC_RUN_ID: 'run-fallback',
+        ATC_RUNTIME_ROOT: runtimeRoot,
+        ATC_EVENT_TYPE: 'UserPromptSubmit',
+        ATC_EVENT_CWD: tmp,
+      },
+      stdio: ['pipe', 'ignore', 'pipe'],
+    });
+
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`writer exited with ${code}: ${stderr}`));
+    });
+    child.stdin.end();
+  });
+
+  const eventsFile = path.join(runtimeRoot, 'unassigned-events.jsonl');
+  const metaFile = path.join(runtimeRoot, 'meta-fallback.json');
+  const derivedFile = path.join(runtimeRoot, 'derived-fallback.json');
+
+  const eventsRaw = await fs.readFile(eventsFile, 'utf8');
+  assert.match(eventsRaw, /UserPromptSubmit/);
+  const meta = await readJson(metaFile);
+  const derived = await readJson(derivedFile);
+  assert.equal(meta.lastEventType, 'UserPromptSubmit');
+  assert.equal(derived.lastEventType, 'UserPromptSubmit');
+
+  await assert.rejects(fs.access(path.join(tmp, 'dashboard', 'runtime', 'unassigned-events.jsonl')));
+  await fs.rm(tmp, { recursive: true, force: true });
+  await fs.rm(runtimeRoot, { recursive: true, force: true });
+});

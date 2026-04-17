@@ -52,9 +52,16 @@ Spawned sessions inject this env contract:
 - `ATC_EVENTS_FILE`
 - `ATC_META_FILE`
 - `ATC_DERIVED_FILE`
+- `ATC_RUNTIME_ROOT`
 
 `dashboard/scripts/shell-hook-writer.mjs` supports both env-only events (shell hooks) and JSON-over-stdin events (for Codex/Claude native hooks).
 Shell hooks are enabled by default. Set `ENABLE_SHELL_HOOKS=0` only when explicitly debugging shell startup issues.
+
+If `ATC_CURRENT_DIR` is unset and explicit output file paths are not provided, the fallback runtime files are written to a shared tmp-backed directory instead of `./dashboard/runtime/` under the current working directory. By default this is:
+
+```text
+${TMPDIR:-/tmp}/ai-traffic-control/<user>/dashboard-runtime/
+```
 
 ## Native hooks (Codex, Claude, Gemini)
 
