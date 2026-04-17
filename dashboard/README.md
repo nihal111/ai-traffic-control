@@ -138,6 +138,73 @@ Notes:
 - Flags above were verified from local CLI help output (`codex --help`, `claude --help`, `gemini --help`).
 - `ttyd` client title is pinned per slot via `titleFixed=<scientist-name>` in spawn code, so browser tabs show the scientist name.
 
+## Claude Account Profile Management
+
+If you have multiple Claude Pro/Max accounts, use `atc-profile` to switch between them from the CLI (and soon from the dashboard card itself).
+
+### Register a profile
+
+First, log into the Claude account you want to register:
+
+```bash
+claude /login
+```
+
+Then register it under an alias:
+
+```bash
+node dashboard/scripts/atc-profile.mjs add primary --email you@example.com
+```
+
+Repeat for each account:
+
+```bash
+claude /login    # log into a different Claude account
+node dashboard/scripts/atc-profile.mjs add secondary --email other@example.com
+```
+
+### List registered profiles
+
+```bash
+node dashboard/scripts/atc-profile.mjs list
+```
+
+Output shows all profiles with the active one marked with `*`:
+
+```
+Profiles:
+ * primary    <you@example.com>    (added 04/16/2026)
+   secondary  <other@example.com>  (added 04/16/2026)
+```
+
+### Switch profiles
+
+```bash
+node dashboard/scripts/atc-profile.mjs use secondary
+```
+
+This swaps the macOS Keychain entry so new `claude` sessions use the switched account. Already-running sessions keep their original account.
+
+### Check the current profile
+
+```bash
+node dashboard/scripts/atc-profile.mjs current
+```
+
+### How it works
+
+Profiles are stored in `~/.claude-profiles/`:
+
+```
+~/.claude-profiles/
+├── profiles.json          # catalog: aliases, emails, active marker
+├── primary.cred           # OAuth credential blob for "primary"
+├── secondary.cred         # OAuth credential blob for "secondary"
+└── .backup/               # timestamped backups before each switch
+```
+
+On macOS, Claude Code stores OAuth tokens in the system Keychain under service name `"Claude Code-credentials"`. Switching profiles atomically swaps that Keychain entry. All other `~/.claude` contents (settings, hooks, projects) remain shared across profiles.
+
 ## Where to edit this later
 
 If you want to change spawn behavior in the future, edit:
