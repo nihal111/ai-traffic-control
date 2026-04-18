@@ -189,7 +189,10 @@ test('shell hook writer fallback files can live outside the current working tree
     const child = spawn(process.execPath, [WRITER], {
       cwd: tmp,
       env: {
-        ...process.env,
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        USER: process.env.USER,
+        LOGNAME: process.env.LOGNAME,
         ATC_NO_SUMMARIZER: '1',
         ATC_SLOT: 'unknown',
         ATC_RUN_ID: 'run-fallback',
