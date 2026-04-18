@@ -263,6 +263,30 @@ function buildClaudeRefreshMeta(lastAttemptMs, intervalMs = CLAUDE_USAGE_MIN_INT
   };
 }
 
+function mergeClaudeUsageWindow(primaryWindow, fallbackWindow) {
+  if (!primaryWindow && !fallbackWindow) return null;
+  const base = primaryWindow && typeof primaryWindow === 'object' ? primaryWindow : {};
+  const fallback = fallbackWindow && typeof fallbackWindow === 'object' ? fallbackWindow : {};
+  return {
+    ...fallback,
+    ...base,
+    // Keep CLI-derived consumption as authoritative when available.
+    usedPercent: Number.isFinite(Number(base.usedPercent))
+      ? Number(base.usedPercent)
+      : Number.isFinite(Number(fallback.usedPercent))
+        ? Number(fallback.usedPercent)
+        : 0,
+    // Backfill reset metadata when CLI omits it.
+    resetsAt: base.resetsAt || fallback.resetsAt || null,
+    resetDescription: base.resetDescription || fallback.resetDescription || null,
+    windowMinutes: Number.isFinite(Number(base.windowMinutes))
+      ? Number(base.windowMinutes)
+      : Number.isFinite(Number(fallback.windowMinutes))
+        ? Number(fallback.windowMinutes)
+        : null,
+  };
+}
+
 async function fetchClaudeUsageRateLimited({ force = false } = {}) {
   const catalog = readProfilesJson();
   const activeAlias = String(catalog.active || '').trim();
@@ -297,7 +321,18 @@ async function fetchClaudeUsageRateLimited({ force = false } = {}) {
   const attemptedAtMs = Date.now();
   const attemptedAtIso = new Date(attemptedAtMs).toISOString();
   // Claude profile switching must read CLI-scoped usage so account changes are reflected.
-  const live = await fetchCodexbarUsage('claude', 'cli');
+  let live = await fetchCodexbarUsage('claude', 'cli');
+  if (live?.ok && (!live?.primary?.resetsAt || !live?.secondary?.resetsAt)) {
+    const webFallback = await fetchCodexbarUsage('claude', 'web');
+    if (webFallback?.ok) {
+      live = {
+        ...live,
+        primary: mergeClaudeUsageWindow(live.primary, webFallback.primary),
+        secondary: mergeClaudeUsageWindow(live.secondary, webFallback.secondary),
+        tertiary: mergeClaudeUsageWindow(live.tertiary, webFallback.tertiary),
+      };
+    }
+  }
   const resolvedLive =
     live?.ok && !String(live.plan || '').trim() && profileSubscriptionType
       ? { ...live, plan: profileSubscriptionType }
