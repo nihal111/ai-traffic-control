@@ -347,7 +347,7 @@ function cmdCurrent() {
   }
 }
 
-function cmdUse(alias, options = {}) {
+function switchProfile(alias, options = {}) {
   if (!alias) die('Usage: atc-profile use <alias>');
   const syncActive = !!options.syncActive;
   const force = !!options.force;
@@ -433,8 +433,9 @@ function cmdRemove(alias) {
   console.log(`✓ Profile "${alias}" removed.`);
 }
 
-function cmdVerify(alias) {
-  if (!alias) die('Usage: atc-profile verify <alias>');
+function cmdUse(alias, options = {}) {
+  if (!alias) die('Usage: atc-profile use <alias>');
+  const syncActive = !!options.syncActive;
 
   let catalog = loadCatalog();
   const profile = catalog.profiles?.[alias];
@@ -447,7 +448,7 @@ function cmdVerify(alias) {
     die(`Profile "${alias}" has no email registered.\nRe-register it with: atc-profile add ${alias} --email you@example.com`);
   }
 
-  cmdUse(alias, { force: true });
+  switchProfile(alias, { force: true, syncActive });
   catalog = loadCatalog();
 
   let parsed;
@@ -466,7 +467,7 @@ function cmdVerify(alias) {
       const stderr = typeof error?.stderr === 'string' ? error.stderr.trim() : '';
       const stdout = typeof error?.stdout === 'string' ? error.stdout.trim() : '';
       const detail = stderr || stdout || error.message || 'unknown auth status failure';
-      die(`verify failed: could not read Claude auth status (${detail})`);
+      die(`use failed: could not read Claude auth status (${detail})`);
     }
     try {
       const out = execFileSync('node', [parserPath, '--json'], {
@@ -484,23 +485,23 @@ function cmdVerify(alias) {
       const stderr = typeof fallbackErr?.stderr === 'string' ? fallbackErr.stderr.trim() : '';
       const stdout = typeof fallbackErr?.stdout === 'string' ? fallbackErr.stdout.trim() : '';
       const detail = stderr || stdout || fallbackErr.message || 'unknown parser failure';
-      die(`verify failed: could not read Claude status (${detail})`);
+      die(`use failed: could not read Claude status (${detail})`);
     }
   }
 
   const observedEmail = typeof parsed?.email === 'string' ? parsed.email.trim().toLowerCase() : '';
   if (!observedEmail) {
-    die('verify failed: /status returned no email.');
+    die('use failed: /status returned no email.');
   }
 
   if (observedEmail !== expectedEmail) {
-    console.error(`✗ Verify failed for "${alias}".`);
+    console.error(`✗ Use failed for "${alias}".`);
     console.error(`  Expected: ${expectedEmail}`);
     console.error(`  Observed: ${observedEmail}`);
     process.exit(2);
   }
 
-  console.log(`✓ Verify passed for "${alias}".`);
+  console.log(`✓ Use passed for "${alias}".`);
   console.log(`  Email: ${observedEmail}`);
   if (parsed?.orgName || parsed?.organization) {
     console.log(`  Organization: ${parsed.orgName || parsed.organization}`);
@@ -559,7 +560,6 @@ switch (command) {
   case 'list':    cmdList(); break;
   case 'current': cmdCurrent(); break;
   case 'use':     cmdUse(arg, { syncActive }); break;
-  case 'verify':  cmdVerify(arg); break;
   case 'remove':  cmdRemove(arg); break;
   case 'wipe':    cmdWipe(confirmYes); break;
   default:
@@ -569,8 +569,7 @@ Commands:
   add <alias> [--email you@example.com]   register the currently-logged-in account under <alias>
   list            show all profiles (* = active)
   current         print the active profile alias
-  use <alias> [--sync-active] switch to a different profile
-  verify <alias>  switch + validate /status email matches alias email
+  use <alias> [--sync-active] switch + validate /status email matches alias email
   remove <alias>  delete a profile (cannot remove the active profile)
   wipe --yes      delete Claude Keychain cred + all saved atc-profile creds/catalog
 `);

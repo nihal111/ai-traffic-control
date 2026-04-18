@@ -263,7 +263,7 @@ function buildClaudeRefreshMeta(lastAttemptMs, intervalMs = CLAUDE_USAGE_MIN_INT
   };
 }
 
-async function fetchClaudeUsageRateLimited() {
+async function fetchClaudeUsageRateLimited({ force = false } = {}) {
   const catalog = readProfilesJson();
   const activeAlias = String(catalog.active || '').trim();
   const activeMeta = activeAlias && catalog.profiles ? catalog.profiles[activeAlias] : null;
@@ -275,14 +275,14 @@ async function fetchClaudeUsageRateLimited() {
   const lastAttemptIso = cachedUsage.lastAttemptAt || cachedUsage.fetchedAt || null;
   const lastAttemptMs = lastAttemptIso ? Date.parse(lastAttemptIso) : NaN;
   const hasRecentAttempt =
-    Number.isFinite(lastAttemptMs) && Date.now() - lastAttemptMs < CLAUDE_USAGE_MIN_INTERVAL_MS;
+    !force && Number.isFinite(lastAttemptMs) && Date.now() - lastAttemptMs < CLAUDE_USAGE_MIN_INTERVAL_MS;
   const lastAttemptAtIso = Number.isFinite(lastAttemptMs) ? new Date(lastAttemptMs).toISOString() : null;
 
   if (hasRecentAttempt) {
     return {
       ...cachedUsage,
       provider: 'claude',
-      source: 'cli-cache',
+      source: cachedUsage.source || 'oauth-cache',
       loading: false,
       throttled: true,
       ...(lastAttemptAtIso ? { lastAttemptAt: lastAttemptAtIso } : {}),
@@ -366,6 +366,62 @@ async function fetchProviderUsageRateLimited(provider, source, intervalMs) {
   state.lastResult = merged;
   saveUsageRateCacheToDisk();
   return merged;
+}
+
+async function fetchProviderUsageOnce(providerKey, { force = false } = {}) {
+  const normalized = String(providerKey || '').toLowerCase();
+  if (!PROVIDERS.has(normalized)) {
+    return { ok: false, provider: normalized, loading: false, error: 'Unknown provider' };
+  }
+
+  const intervalMs =
+    normalized === 'claude'
+      ? CLAUDE_USAGE_MIN_INTERVAL_MS
+      : normalized === 'gemini'
+        ? GEMINI_USAGE_MIN_INTERVAL_MS
+        : CODEX_USAGE_MIN_INTERVAL_MS;
+
+  if (force && providerUsageRateCache[normalized]) {
+    providerUsageRateCache[normalized].lastAttemptAtMs = 0;
+    saveUsageRateCacheToDisk();
+  }
+
+  if (normalized === 'claude') {
+    return decorateUsageWindows(await fetchClaudeUsageRateLimited({ force }), ['5-hour', 'weekly']);
+  }
+  if (normalized === 'gemini') {
+    return decorateUsageWindows(await fetchProviderUsageRateLimited('gemini', 'auto', intervalMs), ['24h primary', '24h secondary']);
+  }
+  return decorateUsageWindows(await fetchProviderUsageRateLimited('codex', 'cli', intervalMs), ['5-hour', 'weekly']);
+}
+
+async function refreshSingleProviderInBackground(providerKey, { force = false } = {}) {
+  const normalized = String(providerKey || '').toLowerCase();
+  if (!PROVIDERS.has(normalized)) {
+    return usageCache.value || loadingUsageSummary();
+  }
+  try {
+    const nextPayload = await fetchProviderUsageOnce(normalized, { force });
+    const current = usageCache.value || buildBootUsageSummaryFromCaches();
+    const nextValue = {
+      ...current,
+      fetchedAt: new Date().toISOString(),
+      [normalized]: nextPayload,
+    };
+    if (normalized === 'claude') {
+      const claudeEmailFallback = getActiveProfileEmail();
+      if (nextValue.claude?.ok && !String(nextValue.claude.accountEmail || '').trim() && claudeEmailFallback) {
+        nextValue.claude = { ...nextValue.claude, accountEmail: claudeEmailFallback };
+      }
+      saveActiveProfileUsageCache(nextValue.claude);
+    }
+    usageCache = { value: nextValue, fetchedAt: Date.now(), pending: null };
+    return nextValue;
+  } catch (error) {
+    const fallback = usageCache.value || errorUsageSummary(error?.message || 'Usage unavailable');
+    usageCache = { value: fallback, fetchedAt: Date.now(), pending: null };
+    return fallback;
+  }
 }
 
 function saveActiveProfileUsageCache(claudeUsageValue) {
@@ -751,7 +807,10 @@ async function fetchCodexbarUsage(provider, source = 'auto', runCommandFn = runC
     return runCommandFn('codexbar', args, timeoutMs);
   };
 
-  const commandTimeoutMs = 12000;
+  const commandTimeoutMs =
+    providerKey === 'claude' && String(source || '').toLowerCase() === 'cli'
+      ? Number(process.env.ATC_CLAUDE_CODEXBAR_TIMEOUT_MS || 25000)
+      : 12000;
   let raw = await callCodexbar(source, commandTimeoutMs);
   let result = parseResult(raw);
 
@@ -2410,8 +2469,11 @@ function renderPage() {
         '</div>';
       };
       const actions = '<div class="usage-actions">' +
-        (hasProfiles
+        (isExpanded && hasProfiles
           ? '<button type="button" class="usage-switch-btn" data-open-profile-switch="1" aria-label="Switch Claude account">Switch Account</button>'
+          : '') +
+        (isExpanded
+          ? '<button type="button" class="usage-refresh-btn" data-refresh-provider="' + esc(providerKey) + '" aria-label="Refresh ' + esc(title) + ' usage">↻</button>'
           : '') +
         '<button type="button" class="usage-toggle" data-toggle-provider="' + esc(providerKey) + '" aria-expanded="' + (isExpanded ? 'true' : 'false') + '" aria-label="Toggle ' + esc(title) + ' details">' +
           '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5"/></svg>' +
@@ -2499,6 +2561,16 @@ function renderPage() {
           openProfileSwitchModal();
         });
       }
+      const refreshButtons = document.querySelectorAll('[data-refresh-provider]');
+      for (const btn of refreshButtons) {
+        btn.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const provider = btn.getAttribute('data-refresh-provider');
+          if (!provider) return;
+          manualRefreshProvider(provider);
+        });
+      }
     }
 
     let usageRefreshTicker = null;
@@ -2525,7 +2597,7 @@ function renderPage() {
         const pct = Math.max(0, Math.min(100, ((intervalMs - remainingMs) / intervalMs) * 100));
         const text = el.querySelector('.usage-refresh-text');
         const ring = el.querySelector('.usage-refresh-ring');
-        if (text) text.textContent = remainingSec > 0 ? ('Next ' + providerTitle + ' refresh in ' + formatMmSs(remainingSec)) : 'Refreshing now...';
+        if (text) text.textContent = remainingSec > 0 ? formatMmSs(remainingSec) : 'Refreshing now...';
         if (ring) ring.style.setProperty('--refresh-pct', String(pct));
         if (remainingSec <= 0 && providerKey) {
           const nowMs = Date.now();
@@ -2667,6 +2739,21 @@ function renderPage() {
         renderUsageGrid(latestUsage);
         renderProfileSwitchModal();
       }
+    }
+
+    async function manualRefreshProvider(provider) {
+      const providerKey = String(provider || '').toLowerCase();
+      if (!providerKey) return;
+      try {
+        await fetch('/api/usage/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider: providerKey, force: true }),
+        });
+      } catch (_error) {
+        // ignore and fall through to refresh current snapshot
+      }
+      await refresh();
     }
 
     function compact(v, max) {
@@ -3829,6 +3916,23 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === '/api/usage/refresh' && req.method === 'POST') {
+    try {
+      const body = await readJsonBody(req);
+      const provider = String(body.provider || '').trim().toLowerCase();
+      const force = body.force !== false;
+      if (!PROVIDERS.has(provider)) {
+        json(res, 400, { error: 'valid provider is required' });
+        return;
+      }
+      const usage = await refreshSingleProviderInBackground(provider, { force });
+      json(res, 200, { ok: true, provider, usage: getUsageSnapshot() || usage });
+    } catch (error) {
+      json(res, 500, { error: error.message || 'usage refresh failed' });
+    }
+    return;
+  }
+
   if (url.pathname === '/api/sessions' && req.method === 'GET') {
     const [sessions, recentWorkdirs] = await Promise.all([getMergedSessions(), readRecentWorkdirsFromState()]);
     json(res, 200, { sessions, recentWorkdirs, fetchedAt: new Date().toISOString() });
@@ -3959,7 +4063,8 @@ const server = http.createServer(async (req, res) => {
         json(res, 400, { error: `Unknown profile "${alias}"` });
         return;
       }
-      // Shell out to atc-profile use <alias>
+      // Shell out to atc-profile use <alias> so the UI follows the same
+      // path as manual CLI account validation before refreshing usage.
       const atcProfilePath = path.join(__dirname, 'scripts', 'atc-profile.mjs');
       const result = await runCommand('node', [atcProfilePath, 'use', alias], 30000);
       if (!result.ok) {

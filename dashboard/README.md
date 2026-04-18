@@ -183,7 +183,8 @@ Profiles:
 node dashboard/scripts/atc-profile.mjs use secondary
 ```
 
-This swaps the macOS Keychain entry so new `claude` sessions use the switched account. Already-running sessions keep their original account.
+This switches and validates the profile by checking `claude auth status --json` against the alias email.
+Already-running sessions keep their original account.
 
 ### Check the current profile
 

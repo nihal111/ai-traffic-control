@@ -217,7 +217,26 @@
       cursor: pointer;
       white-space: nowrap;
     }
+    .usage-refresh-btn {
+      width: 34px;
+      height: 34px;
+      border-radius: 6px;
+      border: 1px solid #7c6f64;
+      background: #3c3836;
+      color: #ebdbb2;
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1;
+    }
     .usage-switch-btn:hover {
+      background: #504945;
+      border-color: #928374;
+    }
+    .usage-refresh-btn:hover {
       background: #504945;
       border-color: #928374;
     }
@@ -524,6 +543,9 @@
     }
     .usage-refresh-text {
       white-space: nowrap;
+      min-width: 38px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
     }
     .usage-refresh-ring {
       width: 15px;
@@ -1404,6 +1426,7 @@
     }
     .usage-toggle,
     .usage-switch-btn,
+    .usage-refresh-btn,
     .selector-nav {
       border-color: #49483e;
       background: #232526;
@@ -1526,6 +1549,11 @@
         height: 32px;
         padding: 0 8px;
         font-size: 10px;
+      }
+      .usage-refresh-btn {
+        width: 32px;
+        height: 32px;
+        font-size: 14px;
       }
       .agent-dials { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
       .agent-dial-card { min-height: 44px; padding: 4px; border-radius: 8px; }
