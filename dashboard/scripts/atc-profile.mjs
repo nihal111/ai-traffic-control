@@ -186,6 +186,32 @@ function fetchClaudeAccountStateFromBlob(blob) {
   };
 }
 
+function extractClaudeOauthAccessToken(blob) {
+  const parsed = parseCredentialBlob(blob);
+  const token = String(parsed?.claudeAiOauth?.accessToken || '').trim();
+  if (!token) return null;
+  return token;
+}
+
+function classifyClaudeCodexbarToken(token) {
+  const value = String(token || '').trim();
+  if (!value) return null;
+  const lower = value.toLowerCase();
+  if (lower.startsWith('bearer sk-ant-oat') || lower.startsWith('sk-ant-oat')) return 'oauth';
+  if (value.includes('=') || lower.includes('cookie:') || lower.startsWith('sk-ant-sid')) return 'web';
+  return 'unknown';
+}
+
+function resolveCodexbarTokenForProfile(profile, blob = null) {
+  const sessionKey = String(profile?.webAuth?.sessionKey || '').trim();
+  if (sessionKey) return sessionKey;
+  const profileToken = String(profile?.codexbarToken?.token || '').trim();
+  if (profileToken) return profileToken;
+  const oauth = extractClaudeOauthAccessToken(blob);
+  if (oauth) return oauth;
+  return null;
+}
+
 function ensureProfileAuthState(catalog, alias, blob = null) {
   const profile = catalog?.profiles?.[alias];
   if (!profile) {
@@ -245,12 +271,13 @@ function ensureCodexbarClaudeProvider(config) {
   return provider;
 }
 
-function syncCodexbarTokenAccount(alias, sessionKey, { setActive = false } = {}) {
+function syncCodexbarTokenAccount(alias, token, { setActive = false, webAuth = null } = {}) {
   const label = profileCookieLabel(alias);
-  const trimmedToken = String(sessionKey || '').trim();
+  const trimmedToken = String(token || '').trim();
   if (!trimmedToken) {
-    throw new Error(`cannot sync codexbar token account for "${alias}" without a Claude sessionKey`);
+    throw new Error(`cannot sync codexbar token account for "${alias}" without a token`);
   }
+  const tokenKind = classifyClaudeCodexbarToken(trimmedToken);
   const nowSec = Math.floor(Date.now() / 1000);
   const config = readCodexbarConfig();
   const provider = ensureCodexbarClaudeProvider(config);
@@ -277,8 +304,16 @@ function syncCodexbarTokenAccount(alias, sessionKey, { setActive = false } = {})
   if (setActive) {
     const activeIdx = accounts.findIndex((entry) => String(entry?.label || '').trim() === label);
     provider.tokenAccounts.activeIndex = activeIdx >= 0 ? activeIdx : 0;
-    provider.cookieSource = 'manual';
-    provider.cookieHeader = `sessionKey=${trimmedToken}`;
+    // For session-key accounts, keep manual cookie mode pointed at this alias.
+    // For OAuth accounts, disable cookie mode and clear any stale manual header.
+    if (tokenKind === 'oauth') {
+      provider.cookieSource = 'off';
+      delete provider.cookieHeader;
+    } else {
+      const sessionKey = String(webAuth?.sessionKey || '').trim() || trimmedToken;
+      provider.cookieSource = 'manual';
+      provider.cookieHeader = sessionKey.includes('=') ? sessionKey : `sessionKey=${sessionKey}`;
+    }
   } else if (!Number.isFinite(Number(provider.tokenAccounts.activeIndex))) {
     provider.tokenAccounts.activeIndex = 0;
   }
@@ -437,9 +472,7 @@ function cmdAdd(alias) {
   }
 
   const catalog = loadCatalog();
-  if (catalog.profiles[alias]) {
-    die(`Profile "${alias}" already exists. Delete the .cred file manually to re-register.`);
-  }
+  const existingProfile = catalog.profiles[alias] || null;
 
   const blob = keychainExport();
   const authState = fetchClaudeAccountStateFromBlob(blob);
@@ -449,9 +482,12 @@ function cmdAdd(alias) {
   }
   const normalizedEmail = observedEmail;
   const webAuth = captureClaudeWebAuth();
+  const oauthAccessToken = extractClaudeOauthAccessToken(blob);
+  const codexbarToken = webAuth.sessionKey || oauthAccessToken;
 
-  // Warn if this credential is identical to an existing profile.
+  // Warn if this credential is identical to a different existing profile.
   for (const existing of Object.keys(catalog.profiles)) {
+    if (existing === alias) continue;
     const existingBlob = fs.existsSync(credPath(existing))
       ? fs.readFileSync(credPath(existing), 'utf8').trim()
       : null;
@@ -460,17 +496,35 @@ function cmdAdd(alias) {
     }
   }
 
+  // Existing alias can be refreshed in-place, but do not silently rebind to a
+  // different account email.
+  if (existingProfile) {
+    const existingEmail = String(existingProfile.email || '').trim().toLowerCase();
+    if (existingEmail && existingEmail !== normalizedEmail) {
+      die(
+        `Profile "${alias}" is bound to ${existingEmail}, but current login is ${normalizedEmail}.\n` +
+        `Use a different alias, or remove "${alias}" first to rebind it.`
+      );
+    }
+  }
+
   saveCredential(alias, blob);
-  const codexbarAccountLabel = syncCodexbarTokenAccount(alias, webAuth.sessionKey, { setActive: true });
+  const codexbarAccountLabel = syncCodexbarTokenAccount(alias, codexbarToken, { setActive: true, webAuth });
 
   catalog.profiles[alias] = {
+    ...(existingProfile && typeof existingProfile === 'object' ? existingProfile : {}),
     displayName: alias,
     ...(normalizedEmail ? { email: normalizedEmail } : {}),
     authState,
     webAuth,
+    codexbarToken: {
+      kind: classifyClaudeCodexbarToken(codexbarToken) || 'unknown',
+      token: codexbarToken,
+      capturedAt: new Date().toISOString(),
+    },
     codexbarAccountLabel,
     usageCache: placeholderUsageCache(normalizedEmail),
-    createdAt: new Date().toISOString(),
+    createdAt: existingProfile?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
   // `add` represents "register what I am currently logged into right now".
@@ -479,9 +533,11 @@ function cmdAdd(alias) {
   applyClaudeGlobalAuthState(authState);
   saveCatalog(catalog);
 
-  console.log(`✓ Profile "${alias}" registered.${catalog.active === alias ? ' (set as active)' : ''}`);
+  const verb = existingProfile ? 'updated' : 'registered';
+  console.log(`✓ Profile "${alias}" ${verb}.${catalog.active === alias ? ' (set as active)' : ''}`);
   console.log(`  Email: ${normalizedEmail}`);
   console.log(`  Web token source: ${webAuth.source} (${webAuth.host || 'claude.ai'})`);
+  console.log(`  Codexbar token type: ${classifyClaudeCodexbarToken(codexbarToken) || 'unknown'}`);
   console.log(`  Codexbar account label: ${codexbarAccountLabel}`);
 }
 
@@ -565,8 +621,15 @@ function switchProfile(alias, options = {}) {
   keychainDelete();
   keychainImport(targetBlob);
   applyClaudeGlobalAuthState(authState);
-  const token = String(catalog.profiles?.[alias]?.webAuth?.sessionKey || '').trim();
-  if (token) syncCodexbarTokenAccount(alias, token, { setActive: true });
+  const token = resolveCodexbarTokenForProfile(catalog.profiles?.[alias], targetBlob);
+  if (token) {
+    catalog.profiles[alias].codexbarToken = {
+      kind: classifyClaudeCodexbarToken(token) || 'unknown',
+      token,
+      capturedAt: new Date().toISOString(),
+    };
+    syncCodexbarTokenAccount(alias, token, { setActive: true, webAuth: catalog.profiles?.[alias]?.webAuth || null });
+  }
 
   // 3. Update catalog.
   catalog.active = alias;
@@ -713,8 +776,15 @@ function cmdSyncWeb(alias) {
   }
   const webAuth = captureClaudeWebAuth();
   catalog.profiles[alias].webAuth = webAuth;
-  catalog.profiles[alias].codexbarAccountLabel = syncCodexbarTokenAccount(alias, webAuth.sessionKey, {
+  const activeToken = webAuth.sessionKey || resolveCodexbarTokenForProfile(catalog.profiles[alias], loadCredential(alias));
+  catalog.profiles[alias].codexbarToken = {
+    kind: classifyClaudeCodexbarToken(activeToken) || 'unknown',
+    token: activeToken,
+    capturedAt: new Date().toISOString(),
+  };
+  catalog.profiles[alias].codexbarAccountLabel = syncCodexbarTokenAccount(alias, activeToken, {
     setActive: catalog.active === alias,
+    webAuth,
   });
   catalog.profiles[alias].updatedAt = new Date().toISOString();
   saveCatalog(catalog);
@@ -722,6 +792,7 @@ function cmdSyncWeb(alias) {
   console.log(`✓ Synced Claude web token for "${alias}".`);
   console.log(`  Source: ${webAuth.source}`);
   console.log(`  sessionKey: ${maskSecret(webAuth.sessionKey)}`);
+  console.log(`  Codexbar token type: ${catalog.profiles[alias].codexbarToken.kind}`);
   console.log(`  Codexbar account label: ${catalog.profiles[alias].codexbarAccountLabel}`);
 }
 

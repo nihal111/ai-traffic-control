@@ -142,6 +142,8 @@ Notes:
 
 If you have multiple Claude Pro/Max accounts, use `atc-profile` to switch between them from the CLI (and soon from the dashboard card itself).
 
+Detailed runbook: `dashboard/docs/claude-account-switching.md`
+
 ### Register a profile
 
 First, log into the Claude account you want to register:
@@ -185,6 +187,10 @@ node dashboard/scripts/atc-profile.mjs use secondary
 
 This switches and validates the profile by checking `claude auth status --json` against the alias email.
 Already-running sessions keep their original account.
+
+Usage checks:
+- Recommended (browser-independent): `codexbar usage --provider claude --source oauth --format json --pretty`
+- Optional (depends on saved Firefox `sessionKey`): `codexbar usage --provider claude --source web --format json --pretty`
 
 ### Check the current profile
 

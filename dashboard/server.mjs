@@ -320,24 +320,32 @@ async function fetchClaudeUsageRateLimited({ force = false } = {}) {
 
   const attemptedAtMs = Date.now();
   const attemptedAtIso = new Date(attemptedAtMs).toISOString();
-  // Account-scoped web usage should be authoritative for profile switching.
-  let live = await fetchCodexbarUsage('claude', 'web');
+  // Prefer OAuth (profile-scoped via Claude CLI credential) to avoid browser
+  // session churn invalidating saved web session keys across accounts.
+  let live = await fetchCodexbarUsage('claude', 'oauth');
   if (!live?.ok) {
-    const cliFallback = await fetchCodexbarUsage('claude', 'cli');
-    if (cliFallback?.ok && (!cliFallback?.primary?.resetsAt || !cliFallback?.secondary?.resetsAt)) {
-      const webFallback = await fetchCodexbarUsage('claude', 'web');
-      if (webFallback?.ok) {
-        live = {
-          ...cliFallback,
-          primary: mergeClaudeUsageWindow(cliFallback.primary, webFallback.primary),
-          secondary: mergeClaudeUsageWindow(cliFallback.secondary, webFallback.secondary),
-          tertiary: mergeClaudeUsageWindow(cliFallback.tertiary, webFallback.tertiary),
-        };
+    // Secondary fallback: web (may still work if profile's saved sessionKey is valid).
+    const webFallback = await fetchCodexbarUsage('claude', 'web');
+    if (webFallback?.ok) {
+      live = webFallback;
+    } else {
+      // Last fallback: CLI, then enrich reset metadata from web when possible.
+      const cliFallback = await fetchCodexbarUsage('claude', 'cli');
+      if (cliFallback?.ok && (!cliFallback?.primary?.resetsAt || !cliFallback?.secondary?.resetsAt)) {
+        const webForResets = await fetchCodexbarUsage('claude', 'web');
+        if (webForResets?.ok) {
+          live = {
+            ...cliFallback,
+            primary: mergeClaudeUsageWindow(cliFallback.primary, webForResets.primary),
+            secondary: mergeClaudeUsageWindow(cliFallback.secondary, webForResets.secondary),
+            tertiary: mergeClaudeUsageWindow(cliFallback.tertiary, webForResets.tertiary),
+          };
+        } else {
+          live = cliFallback;
+        }
       } else {
         live = cliFallback;
       }
-    } else {
-      live = cliFallback;
     }
   }
   const resolvedLive =
