@@ -203,12 +203,13 @@ function classifyClaudeCodexbarToken(token) {
 }
 
 function resolveCodexbarTokenForProfile(profile, blob = null) {
-  const sessionKey = String(profile?.webAuth?.sessionKey || '').trim();
-  if (sessionKey) return sessionKey;
   const profileToken = String(profile?.codexbarToken?.token || '').trim();
-  if (profileToken) return profileToken;
+  if (profileToken && classifyClaudeCodexbarToken(profileToken) === 'oauth') return profileToken;
   const oauth = extractClaudeOauthAccessToken(blob);
   if (oauth) return oauth;
+  const sessionKey = String(profile?.webAuth?.sessionKey || '').trim();
+  if (sessionKey) return sessionKey;
+  if (profileToken) return profileToken;
   return null;
 }
 
@@ -483,7 +484,7 @@ function cmdAdd(alias) {
   const normalizedEmail = observedEmail;
   const webAuth = captureClaudeWebAuth();
   const oauthAccessToken = extractClaudeOauthAccessToken(blob);
-  const codexbarToken = webAuth.sessionKey || oauthAccessToken;
+  const codexbarToken = oauthAccessToken || webAuth.sessionKey;
 
   // Warn if this credential is identical to a different existing profile.
   for (const existing of Object.keys(catalog.profiles)) {
@@ -776,7 +777,7 @@ function cmdSyncWeb(alias) {
   }
   const webAuth = captureClaudeWebAuth();
   catalog.profiles[alias].webAuth = webAuth;
-  const activeToken = webAuth.sessionKey || resolveCodexbarTokenForProfile(catalog.profiles[alias], loadCredential(alias));
+  const activeToken = resolveCodexbarTokenForProfile(catalog.profiles[alias], loadCredential(alias));
   catalog.profiles[alias].codexbarToken = {
     kind: classifyClaudeCodexbarToken(activeToken) || 'unknown',
     token: activeToken,
