@@ -14,6 +14,7 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.DASHBOARD_PORT || 1111);
 const SESSIONS_FILE = process.env.SESSIONS_FILE || path.join(__dirname, 'sessions.json');
 const STATE_FILE = process.env.SESSIONS_STATE_FILE || path.join(__dirname, 'state', 'sessions-state.json');
+const USAGE_RATE_CACHE_FILE = process.env.USAGE_RATE_CACHE_FILE || path.join(__dirname, 'state', 'usage-rate-cache.json');
 const RUN_DIR = process.env.SESSIONS_RUN_DIR || path.join(__dirname, 'run');
 const RUNTIME_DIR = process.env.SESSIONS_RUNTIME_DIR || path.join(__dirname, 'runtime');
 const REPO_ROOT = path.join(__dirname, '..');
@@ -34,6 +35,9 @@ const USER_ZSHRC_PATH = process.env.ATC_USER_ZSHRC || path.join(process.env.HOME
 const USER_HISTORY_FILE = process.env.ATC_USER_HISTORY_FILE || path.join(process.env.HOME || '', '.zsh_history');
 const REFRESH_MS = 8000;
 const USAGE_TTL_MS = 10000;
+const CLAUDE_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_CLAUDE_USAGE_MIN_INTERVAL_MS || 120000);
+const CODEX_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_CODEX_USAGE_MIN_INTERVAL_MS || 120000);
+const GEMINI_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_GEMINI_USAGE_MIN_INTERVAL_MS || 120000);
 const TELEMETRY_INGEST_MS = Number(process.env.TELEMETRY_INGEST_MS || 2000);
 const SLOT_RUN_RETENTION = Number(process.env.SLOT_RUN_RETENTION || 3);
 const RECENT_WORKDIR_LIMIT = 5;
@@ -126,6 +130,9 @@ const HOT_DIAL_AGENTS = [
     enabled: true,
     promptFile: 'calendar-manager.md',
     workdir: SECOND_BRAIN_DIR,
+    promptHint: 'Optional first instruction for calendar actions. Example:',
+    promptPlaceholder:
+      'Create a 45-minute meeting called "Q2 planning with XYZ" next Tuesday at 2:00 PM PT, invite teammate.one@example.com and teammate.two@example.com, and add it to my calendar.',
   },
   {
     id: 'second_brain',
@@ -136,6 +143,9 @@ const HOT_DIAL_AGENTS = [
     enabled: true,
     promptFile: null,
     workdir: SECOND_BRAIN_DIR,
+    promptHint: 'Optional first instruction for Obsidian retrieval or note creation. Example:',
+    promptPlaceholder:
+      'Find my latest notes about AI Traffic Control and create a new Obsidian note titled "Weekly planning - April 21" with action items and open questions.',
   },
   {
     id: 'placeholder_1',
@@ -159,13 +169,65 @@ const HOT_DIAL_BY_ID = new Map(HOT_DIAL_AGENTS.filter((agent) => agent.enabled).
 // ── Profile management (Claude multi-account switching) ────────────────────
 
 function readProfilesJson() {
+  let mutated = false;
   try {
     const text = fsSync.readFileSync(PROFILES_JSON, 'utf8');
     const parsed = JSON.parse(text);
-    return parsed && typeof parsed === 'object' ? parsed : { version: 1, active: null, profiles: {} };
+    const catalog = parsed && typeof parsed === 'object' ? parsed : { version: 1, active: null, profiles: {} };
+    if (!catalog.version) {
+      catalog.version = 1;
+      mutated = true;
+    }
+    if (!catalog.profiles || typeof catalog.profiles !== 'object') {
+      catalog.profiles = {};
+      mutated = true;
+    }
+    for (const [alias, meta] of Object.entries(catalog.profiles)) {
+      if (!meta || typeof meta !== 'object') {
+        catalog.profiles[alias] = {
+          displayName: alias,
+          usageCache: emptyProfileUsageCache(null),
+        };
+        mutated = true;
+        continue;
+      }
+      if (!meta.displayName) {
+        meta.displayName = alias;
+        mutated = true;
+      }
+      if (!meta.usageCache || typeof meta.usageCache !== 'object') {
+        meta.usageCache = emptyProfileUsageCache(meta.email || null);
+        mutated = true;
+      }
+    }
+    if (mutated) writeProfilesJson(catalog);
+    return catalog;
   } catch {
     return { version: 1, active: null, profiles: {} };
   }
+}
+
+function writeProfilesJson(catalog) {
+  try {
+    fsSync.mkdirSync(PROFILES_DIR, { recursive: true });
+    fsSync.writeFileSync(PROFILES_JSON, JSON.stringify(catalog, null, 2) + '\n', 'utf8');
+  } catch {
+    // best effort only
+  }
+}
+
+function emptyProfileUsageCache(email = null) {
+  const safeEmail = typeof email === 'string' && email.trim() ? email.trim() : null;
+  return {
+    ok: false,
+    placeholder: true,
+    error: 'n/a',
+    fetchedAt: null,
+    plan: 'n/a',
+    accountEmail: safeEmail,
+    primary: null,
+    secondary: null,
+  };
 }
 
 function getActiveProfile() {
@@ -173,7 +235,233 @@ function getActiveProfile() {
   return catalog.active || null;
 }
 
+function getActiveProfileEmail() {
+  const catalog = readProfilesJson();
+  const activeAlias = catalog.active || null;
+  if (!activeAlias) return null;
+  const email = catalog.profiles?.[activeAlias]?.email;
+  return typeof email === 'string' && email.trim() ? email.trim() : null;
+}
+
+function getProfileEmailByAlias(alias) {
+  const target = String(alias || '').trim();
+  if (!target) return null;
+  const catalog = readProfilesJson();
+  const email = catalog.profiles?.[target]?.email;
+  return typeof email === 'string' && email.trim() ? email.trim() : null;
+}
+
+function buildClaudeRefreshMeta(lastAttemptMs, intervalMs = CLAUDE_USAGE_MIN_INTERVAL_MS) {
+  const safeLastAttemptMs = Number.isFinite(lastAttemptMs) ? lastAttemptMs : Date.now();
+  const safeIntervalMs = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : CLAUDE_USAGE_MIN_INTERVAL_MS;
+  const nextRefreshAtMs = safeLastAttemptMs + safeIntervalMs;
+  const remainingMs = Math.max(0, nextRefreshAtMs - Date.now());
+  return {
+    refreshIntervalMs: safeIntervalMs,
+    nextRefreshAt: new Date(nextRefreshAtMs).toISOString(),
+    nextRefreshInSec: Math.ceil(remainingMs / 1000),
+  };
+}
+
+async function fetchClaudeUsageRateLimited() {
+  const catalog = readProfilesJson();
+  const activeAlias = String(catalog.active || '').trim();
+  const activeMeta = activeAlias && catalog.profiles ? catalog.profiles[activeAlias] : null;
+  const profileEmail = typeof activeMeta?.email === 'string' && activeMeta.email.trim() ? activeMeta.email.trim() : null;
+  const cachedUsage =
+    activeMeta?.usageCache && typeof activeMeta.usageCache === 'object'
+      ? { ...activeMeta.usageCache }
+      : emptyProfileUsageCache(profileEmail);
+  const lastAttemptIso = cachedUsage.lastAttemptAt || cachedUsage.fetchedAt || null;
+  const lastAttemptMs = lastAttemptIso ? Date.parse(lastAttemptIso) : NaN;
+  const hasRecentAttempt =
+    Number.isFinite(lastAttemptMs) && Date.now() - lastAttemptMs < CLAUDE_USAGE_MIN_INTERVAL_MS;
+  const lastAttemptAtIso = Number.isFinite(lastAttemptMs) ? new Date(lastAttemptMs).toISOString() : null;
+
+  if (hasRecentAttempt) {
+    return {
+      ...cachedUsage,
+      provider: 'claude',
+      source: 'cli-cache',
+      loading: false,
+      throttled: true,
+      ...(lastAttemptAtIso ? { lastAttemptAt: lastAttemptAtIso } : {}),
+      ...buildClaudeRefreshMeta(lastAttemptMs),
+    };
+  }
+
+  const attemptedAtMs = Date.now();
+  const attemptedAtIso = new Date(attemptedAtMs).toISOString();
+  const live = await fetchCodexbarUsage('claude', 'cli');
+  return {
+    ...live,
+    throttled: false,
+    lastAttemptAt: attemptedAtIso,
+    ...buildClaudeRefreshMeta(attemptedAtMs),
+  };
+}
+
+async function fetchProviderUsageRateLimited(provider, source, intervalMs) {
+  const providerKey = String(provider || '').toLowerCase();
+  const state = providerUsageRateCache[providerKey];
+  const safeIntervalMs = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 120000;
+  const nowMs = Date.now();
+  const hasRecentAttempt =
+    !!state &&
+    Number.isFinite(state.lastAttemptAtMs) &&
+    state.lastAttemptAtMs > 0 &&
+    nowMs - state.lastAttemptAtMs < safeIntervalMs;
+
+  if (hasRecentAttempt) {
+    const fallbackResult =
+      state.lastResult && typeof state.lastResult === 'object'
+        ? state.lastResult
+        : {
+            ok: false,
+            provider: providerKey,
+            loading: false,
+            error: 'Rate limited: waiting for next refresh window',
+            source: `${source || 'auto'}-cache`,
+          };
+    return {
+      ...fallbackResult,
+      loading: false,
+      throttled: true,
+      source: fallbackResult?.source || `${source || 'auto'}-cache`,
+      ...buildClaudeRefreshMeta(state.lastAttemptAtMs, safeIntervalMs),
+    };
+  }
+
+  const attemptedAtMs = Date.now();
+  if (state) {
+    state.lastAttemptAtMs = attemptedAtMs;
+    saveUsageRateCacheToDisk();
+  }
+  const live = await fetchCodexbarUsage(providerKey, source);
+
+  if (!state) {
+    return { ...live, throttled: false, ...buildClaudeRefreshMeta(attemptedAtMs, safeIntervalMs) };
+  }
+
+  let merged;
+  if (live?.ok || !state.lastResult) {
+    merged = {
+      ...live,
+      throttled: false,
+      ...buildClaudeRefreshMeta(attemptedAtMs, safeIntervalMs),
+    };
+  } else {
+    merged = {
+      ...state.lastResult,
+      ok: false,
+      loading: false,
+      provider: providerKey,
+      error: live?.error || state.lastResult?.error || 'Usage unavailable',
+      source: live?.source || state.lastResult?.source || source || 'auto',
+      throttled: false,
+      ...buildClaudeRefreshMeta(attemptedAtMs, safeIntervalMs),
+    };
+  }
+
+  state.lastResult = merged;
+  saveUsageRateCacheToDisk();
+  return merged;
+}
+
+function saveActiveProfileUsageCache(claudeUsageValue) {
+  if (!claudeUsageValue || typeof claudeUsageValue !== 'object') return;
+  const catalog = readProfilesJson();
+  const alias = catalog.active;
+  if (!alias || !catalog.profiles?.[alias]) return;
+  const profile = catalog.profiles[alias];
+  const previousCache =
+    profile.usageCache && typeof profile.usageCache === 'object'
+      ? profile.usageCache
+      : emptyProfileUsageCache(profile?.email || null);
+  const profileEmail = typeof profile.email === 'string' && profile.email.trim() ? profile.email.trim() : null;
+  const usageEmail =
+    typeof claudeUsageValue.accountEmail === 'string' && claudeUsageValue.accountEmail.trim()
+      ? claudeUsageValue.accountEmail.trim()
+      : profileEmail;
+  const attemptAtIso =
+    typeof claudeUsageValue.lastAttemptAt === 'string' && claudeUsageValue.lastAttemptAt.trim()
+      ? claudeUsageValue.lastAttemptAt.trim()
+      : (claudeUsageValue.fetchedAt || new Date().toISOString());
+  if (claudeUsageValue.ok) {
+    profile.usageCache = {
+      ...claudeUsageValue,
+      accountEmail: usageEmail,
+      fetchedAt: claudeUsageValue.fetchedAt || new Date().toISOString(),
+      lastAttemptAt: attemptAtIso,
+      placeholder: false,
+    };
+  } else {
+    profile.usageCache = {
+      ...previousCache,
+      ok: false,
+      loading: false,
+      provider: claudeUsageValue.provider || previousCache.provider || 'claude',
+      source: claudeUsageValue.source || previousCache.source || null,
+      error: claudeUsageValue.error || previousCache.error || 'Usage unavailable',
+      accountEmail: usageEmail || previousCache.accountEmail || null,
+      lastAttemptAt: attemptAtIso,
+      placeholder: false,
+    };
+  }
+  profile.updatedAt = new Date().toISOString();
+  writeProfilesJson(catalog);
+}
+
 let usageCache = { value: null, fetchedAt: 0, pending: null };
+
+function defaultProviderRateState() {
+  return { lastAttemptAtMs: 0, lastResult: null };
+}
+
+function normalizeProviderRateState(entry) {
+  if (!entry || typeof entry !== 'object') return defaultProviderRateState();
+  const lastAttemptAtMs = Number(entry.lastAttemptAtMs);
+  const lastResult = entry.lastResult && typeof entry.lastResult === 'object' ? entry.lastResult : null;
+  return {
+    lastAttemptAtMs: Number.isFinite(lastAttemptAtMs) && lastAttemptAtMs > 0 ? lastAttemptAtMs : 0,
+    lastResult,
+  };
+}
+
+let providerUsageRateCache = {
+  codex: defaultProviderRateState(),
+  gemini: defaultProviderRateState(),
+};
+
+function readUsageRateCacheFile() {
+  try {
+    const raw = fsSync.readFileSync(USAGE_RATE_CACHE_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+function loadUsageRateCacheFromDisk() {
+  const parsed = readUsageRateCacheFile();
+  providerUsageRateCache = {
+    codex: normalizeProviderRateState(parsed.codex),
+    gemini: normalizeProviderRateState(parsed.gemini),
+  };
+}
+
+function saveUsageRateCacheToDisk() {
+  const payload = {
+    codex: normalizeProviderRateState(providerUsageRateCache.codex),
+    gemini: normalizeProviderRateState(providerUsageRateCache.gemini),
+  };
+  try {
+    fsSync.mkdirSync(path.dirname(USAGE_RATE_CACHE_FILE), { recursive: true });
+    fsSync.writeFileSync(USAGE_RATE_CACHE_FILE, JSON.stringify(payload, null, 2), 'utf8');
+  } catch {}
+}
 
 function runCommand(cmd, args, timeoutMs = 12000) {
   return new Promise((resolve) => {
@@ -434,6 +722,8 @@ async function fetchCodexbarUsage(provider, source = 'auto', runCommandFn = runC
         provider: (provider || '').toLowerCase(),
         source: root.source || source || 'auto',
         plan: usage?.loginMethod || dashboard?.accountPlan || null,
+        accountEmail: usage?.accountEmail || null,
+        accountOrganization: usage?.accountOrganization || null,
         primary: parseWindow(primary),
         secondary: parseWindow(secondary),
         updatedAt: usage?.updatedAt || null,
@@ -454,16 +744,22 @@ async function fetchCodexbarUsage(provider, source = 'auto', runCommandFn = runC
     );
   };
 
-  const args = ['usage', '--provider', provider, '--format', 'json'];
-  if (source) args.push('--source', source);
-  const raw = await runCommandFn('codexbar', args);
+  const providerKey = String(provider || '').toLowerCase();
+  const callCodexbar = async (selectedSource, timeoutMs) => {
+    const args = ['usage', '--provider', provider, '--format', 'json'];
+    if (selectedSource) args.push('--source', selectedSource);
+    return runCommandFn('codexbar', args, timeoutMs);
+  };
+
+  const commandTimeoutMs = providerKey === 'claude' && source === 'cli' ? 12000 : 12000;
+  let raw = await callCodexbar(source, commandTimeoutMs);
   let result = parseResult(raw);
 
   if (shouldAttemptGeminiRefresh(result.error)) {
     // Gemini CLI refreshes ~/.gemini/oauth_creds.json when invoked.
     const refresh = await runCommandFn('gemini', ['-p', 'ok', '--output-format', 'json'], 25000);
     if (refresh.ok) {
-      const retriedRaw = await runCommandFn('codexbar', args);
+      const retriedRaw = await callCodexbar(source, commandTimeoutMs);
       result = parseResult(retriedRaw);
       if (result.ok) return { ...result, recoveredViaGeminiRefresh: true };
     }
@@ -523,22 +819,86 @@ function errorUsageSummary(errorMessage) {
   };
 }
 
+function buildCachedProviderSnapshot(providerKey, labels, intervalMs, sourceFallback) {
+  const state = providerUsageRateCache[providerKey];
+  const lastAttemptAtMs = Number(state?.lastAttemptAtMs || 0);
+  const hasRecentAttempt =
+    Number.isFinite(lastAttemptAtMs) && lastAttemptAtMs > 0 && Date.now() - lastAttemptAtMs < intervalMs;
+  const baseResult =
+    state?.lastResult && typeof state.lastResult === 'object'
+      ? { ...state.lastResult }
+      : (lastAttemptAtMs > 0
+          ? {
+              ok: false,
+              provider: providerKey,
+              loading: false,
+              error: 'Rate limited: waiting for next refresh window',
+            }
+          : { ok: false, provider: providerKey, loading: true, error: null });
+  const merged = {
+    ...baseResult,
+    provider: providerKey,
+    source: baseResult.source || `${sourceFallback}-cache`,
+    throttled: hasRecentAttempt,
+    ...(lastAttemptAtMs > 0 ? buildClaudeRefreshMeta(lastAttemptAtMs, intervalMs) : {}),
+  };
+  return decorateUsageWindows(merged, labels);
+}
+
+function buildCachedClaudeSnapshot() {
+  const catalog = readProfilesJson();
+  const activeAlias = String(catalog.active || '').trim();
+  const profile = activeAlias && catalog.profiles ? catalog.profiles[activeAlias] : null;
+  const profileEmail = typeof profile?.email === 'string' && profile.email.trim() ? profile.email.trim() : null;
+  const cache =
+    profile?.usageCache && typeof profile.usageCache === 'object'
+      ? { ...profile.usageCache }
+      : emptyProfileUsageCache(profileEmail);
+  const lastAttemptIso = cache.lastAttemptAt || cache.fetchedAt || null;
+  const lastAttemptAtMs = lastAttemptIso ? Date.parse(lastAttemptIso) : NaN;
+  const hasRecentAttempt =
+    Number.isFinite(lastAttemptAtMs) && Date.now() - lastAttemptAtMs < CLAUDE_USAGE_MIN_INTERVAL_MS;
+  const merged = {
+    ...cache,
+    provider: 'claude',
+    source: cache.source || 'cli-cache',
+    throttled: hasRecentAttempt,
+    ...(Number.isFinite(lastAttemptAtMs) ? buildClaudeRefreshMeta(lastAttemptAtMs, CLAUDE_USAGE_MIN_INTERVAL_MS) : {}),
+  };
+  return decorateUsageWindows(merged, ['5-hour', 'weekly']);
+}
+
+function buildBootUsageSummaryFromCaches() {
+  return {
+    fetchedAt: null,
+    codex: buildCachedProviderSnapshot('codex', ['5-hour', 'weekly'], CODEX_USAGE_MIN_INTERVAL_MS, 'cli'),
+    claude: buildCachedClaudeSnapshot(),
+    gemini: buildCachedProviderSnapshot('gemini', ['24h primary', '24h secondary'], GEMINI_USAGE_MIN_INTERVAL_MS, 'auto'),
+  };
+}
+
 function refreshUsageSummaryInBackground() {
   if (usageCache.pending) return usageCache.pending;
   usageCache.pending = (async () => {
     try {
       const [codexRaw, claudeRaw, geminiRaw] = await Promise.all([
-        fetchCodexbarUsage('codex', 'cli'),
-        fetchCodexbarUsage('claude', 'web'),
-        fetchCodexbarUsage('gemini', 'auto'),
+        fetchProviderUsageRateLimited('codex', 'cli', CODEX_USAGE_MIN_INTERVAL_MS),
+        fetchClaudeUsageRateLimited(),
+        fetchProviderUsageRateLimited('gemini', 'auto', GEMINI_USAGE_MIN_INTERVAL_MS),
       ]);
+      const claudeEmailFallback = getActiveProfileEmail();
+      const claudeDecorated =
+        claudeRaw?.ok && !String(claudeRaw.accountEmail || '').trim() && claudeEmailFallback
+          ? { ...claudeRaw, accountEmail: claudeEmailFallback }
+          : claudeRaw;
 
       const value = {
         fetchedAt: new Date().toISOString(),
         codex: decorateUsageWindows(codexRaw, ['5-hour', 'weekly']),
-        claude: decorateUsageWindows(claudeRaw, ['5-hour', 'weekly']),
+        claude: decorateUsageWindows(claudeDecorated, ['5-hour', 'weekly']),
         gemini: decorateUsageWindows(geminiRaw, ['24h primary', '24h secondary']),
       };
+      saveActiveProfileUsageCache(value.claude);
       usageCache = { value, fetchedAt: Date.now(), pending: null };
       return value;
     } catch (error) {
@@ -552,11 +912,33 @@ function refreshUsageSummaryInBackground() {
 
 function getUsageSnapshot() {
   const now = Date.now();
+  const activeProfile = getActiveProfile();
+  const activeProfileEmail = getProfileEmailByAlias(activeProfile);
+  const withProfileEmail = (snapshot) => {
+    if (!snapshot || typeof snapshot !== 'object') return snapshot;
+    const withNextRefresh = (payload) => {
+      if (!payload || typeof payload !== 'object') return payload;
+      const nextRefreshMs = payload.nextRefreshAt ? Date.parse(payload.nextRefreshAt) : NaN;
+      const nextRefreshInSec = Number.isFinite(nextRefreshMs)
+        ? Math.ceil(Math.max(0, nextRefreshMs - Date.now()) / 1000)
+        : payload.nextRefreshInSec;
+      return { ...payload, nextRefreshInSec };
+    };
+    return {
+      ...snapshot,
+      codex: withNextRefresh(snapshot.codex),
+      claude: {
+        ...withNextRefresh(snapshot.claude),
+        ...(activeProfileEmail ? { accountEmail: activeProfileEmail } : {}),
+      },
+      gemini: withNextRefresh(snapshot.gemini),
+    };
+  };
   if (usageCache.value && now - usageCache.fetchedAt < USAGE_TTL_MS) {
-    return { ...usageCache.value, activeProfile: getActiveProfile() };
+    return { ...withProfileEmail(usageCache.value), activeProfile };
   }
   refreshUsageSummaryInBackground();
-  return { ...(usageCache.value || loadingUsageSummary()), activeProfile: getActiveProfile() };
+  return { ...(withProfileEmail(usageCache.value) || loadingUsageSummary()), activeProfile };
 }
 
 async function ensureDir(filePath) {
@@ -1473,6 +1855,7 @@ async function spawnSlotByName(name, options = {}) {
   const taskTitle = typeof options.taskTitle === 'string' && options.taskTitle.trim() ? options.taskTitle.trim() : null;
   const agentType = typeof options.agentType === 'string' && options.agentType.trim() ? options.agentType.trim() : null;
   const agentPromptFile = typeof options.agentPromptFile === 'string' && options.agentPromptFile.trim() ? options.agentPromptFile.trim() : null;
+  const initialPrompt = typeof options.initialPrompt === 'string' && options.initialPrompt.trim() ? options.initialPrompt.trim() : null;
   const requestedWorkdir = typeof options.workdir === 'string' ? options.workdir : '';
   const effectiveWorkdirInput = requestedWorkdir.trim() || (templateProvided ? HOME_DIRECTORY : (st.workdir || DEFAULT_WORKDIR));
   const workdir = agentType && requestedWorkdir.trim()
@@ -1499,6 +1882,22 @@ async function spawnSlotByName(name, options = {}) {
   if (templateId === TEMPLATE_CONTINUE_WORK) appendRecentWorkdir(state, workdir);
   await rotateSlotCurrent(slot.name, st.runId);
   const { paths, hookEnv } = await ensureSlotRuntime(slot.name, runId, st.workdir, st);
+  if (initialPrompt) {
+    let basePrompt = '';
+    if (agentPromptFile) {
+      try {
+        basePrompt = await fs.readFile(agentPromptFile, 'utf8');
+      } catch (error) {
+        throw new Error(`failed to read agent prompt file: ${error.message || 'unknown error'}`);
+      }
+    }
+    const launchPromptPath = path.join(paths.currentDir, 'agent-launch-prompt.md');
+    const launchPromptBody = basePrompt
+      ? `${String(basePrompt).trimEnd()}\n\n${initialPrompt}\n`
+      : `${initialPrompt}\n`;
+    await fs.writeFile(launchPromptPath, launchPromptBody, 'utf8');
+    st.agentPromptFile = launchPromptPath;
+  }
   await emitSlotEvent(hookEnv, 'shell_start', st.workdir || DEFAULT_WORKDIR, '', '');
   const pid = await spawnSessionBackend(slot, st, { ...hookEnv }, { zdotdir: paths.zdotdir });
   const backendReady = await waitForTtydReady(slot.backendPort, 10000);
@@ -1526,7 +1925,7 @@ async function spawnSlotByName(name, options = {}) {
   await saveState(state);
 }
 
-async function launchHotDialAgent(dialId, provider) {
+async function launchHotDialAgent(dialId, provider, initialPrompt = null) {
   const agent = HOT_DIAL_BY_ID.get(String(dialId || '').trim());
   if (!agent) throw new Error('unknown hot dial agent');
 
@@ -1553,6 +1952,7 @@ async function launchHotDialAgent(dialId, provider) {
     taskTitle: agent.title,
     agentType: agent.id,
     agentPromptFile,
+    initialPrompt: typeof initialPrompt === 'string' ? initialPrompt.trim() : null,
   });
 
   return { slotName: selectedSlot.name, agentId: agent.id };
@@ -1635,6 +2035,7 @@ function renderPage() {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>AI Traffic Control</title>
+  <link rel="icon" type="image/png" href="/assets/brand/favicon-radar.png?v=1" />
   <style>${DASHBOARD_CSS}</style>
 </head>
   <body>
@@ -1772,9 +2173,28 @@ function renderPage() {
         <div class="intent-label">Description</div>
         <div class="agent-description" id="agent-description"></div>
       </div>
+      <div class="intent-block">
+        <div class="intent-label">Optional first prompt</div>
+        <div class="agent-prompt-hint" id="agent-prompt-hint"></div>
+        <textarea class="agent-prompt-input" id="agent-initial-prompt" rows="4" placeholder="Type an optional prompt here."></textarea>
+      </div>
       <div class="modal-actions">
         <button type="button" class="btn-secondary" id="agent-cancel">Cancel</button>
         <button type="button" class="btn-primary" id="agent-confirm">Launch agent</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="profile-switch-modal">
+    <div class="modal">
+      <div class="modal-head">
+        <div class="modal-title">Switch Claude Account</div>
+        <button type="button" class="modal-close" id="profile-switch-close" aria-label="Close account switcher">&times;</button>
+      </div>
+      <div class="profile-switch-subtitle">Choose an account. Cached CLI usage is shown per profile.</div>
+      <div class="profile-switch-list" id="profile-switch-list"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" id="profile-switch-cancel">Close</button>
       </div>
     </div>
   </div>
@@ -1810,6 +2230,8 @@ function renderPage() {
     const HOT_DIAL_AGENTS = ${JSON.stringify(HOT_DIAL_AGENTS)};
     let latestUsage = {};
     let latestProfiles = [];
+    let claudeSwitchingAlias = '';
+    const profileSwitchState = { open: false };
     const intentState = {
       open: false,
       name: '',
@@ -1835,6 +2257,7 @@ function renderPage() {
       open: false,
       dialId: '',
       providerKey: 'codex',
+      initialPrompt: '',
     };
     let latestSessionsByName = new Map();
     let sessionInteractionsBound = false;
@@ -1976,41 +2399,67 @@ function renderPage() {
       const logo = PROVIDER_LOGOS[providerKey] || '';
       const isExpanded = usageExpanded.has(providerKey);
       const hasProfiles = providerKey === 'claude' && Array.isArray(allProfiles) && allProfiles.length > 1;
+      const isProfileSwitching = providerKey === 'claude' && !!claudeSwitchingAlias;
+      const shownActiveProfile = isProfileSwitching ? claudeSwitchingAlias : activeProfile;
+      const buildRefreshMeta = () => {
+        const refreshIntervalMs = Number(payload?.refreshIntervalMs || 0);
+        if (!payload?.nextRefreshAt) return '';
+        return '<div class="usage-refresh" data-usage-refresh="1" data-provider="' + esc(providerKey) + '" data-provider-title="' + esc(title) + '" data-next-refresh-at="' + esc(String(payload.nextRefreshAt)) + '" data-refresh-interval-ms="' + esc(String(refreshIntervalMs || 120000)) + '">' +
+          '<span class="usage-refresh-text"></span>' +
+          '<span class="usage-refresh-ring" aria-hidden="true"><span class="usage-refresh-ring-fill"></span></span>' +
+        '</div>';
+      };
+      const actions = '<div class="usage-actions">' +
+        (hasProfiles
+          ? '<button type="button" class="usage-switch-btn" data-open-profile-switch="1" aria-label="Switch Claude account">Switch Account</button>'
+          : '') +
+        '<button type="button" class="usage-toggle" data-toggle-provider="' + esc(providerKey) + '" aria-expanded="' + (isExpanded ? 'true' : 'false') + '" aria-label="Toggle ' + esc(title) + ' details">' +
+          '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5"/></svg>' +
+        '</button>' +
+      '</div>';
       if (payload && payload.loading) {
-        return '<article class="usage-row loading">' +
-          '<button type="button" class="usage-toggle" data-toggle-provider="' + esc(providerKey) + '" aria-expanded="false" aria-label="Toggle ' + esc(title) + ' details">' +
-            '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5"/></svg>' +
-          '</button>' +
+        return '<article class="usage-row loading ' + (hasProfiles ? 'has-profile-switch' : '') + '">' +
           '<div class="provider">' +
             '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="78" height="78" />' +
-            '<div class="provider-name-wrap"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Loading)</span></div><div class="provider-plan-block">Loading</div></div>' +
+            '<div class="provider-name-wrap">' +
+              '<div class="provider-header"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Loading)</span></div>' + actions + '</div>' +
+              '<div class="provider-plan-block">Loading</div>' +
+            '</div>' +
           '</div>' +
+          buildRefreshMeta() +
           '<div class="usage-loading"><span class="usage-spinner" aria-hidden="true"></span><span>Loading usage…</span></div>' +
         '</article>';
       }
       if (!payload || !payload.ok) {
-        return '<article class="usage-row error">' +
-          '<button type="button" class="usage-toggle" data-toggle-provider="' + esc(providerKey) + '" aria-expanded="false" aria-label="Toggle ' + esc(title) + ' details">' +
-            '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5"/></svg>' +
-          '</button>' +
+        return '<article class="usage-row error ' + (hasProfiles ? 'has-profile-switch' : '') + '">' +
           '<div class="provider">' +
             '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="78" height="78" />' +
-            '<div class="provider-name-wrap"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Unavailable)</span></div><div class="provider-plan-block">Unavailable</div></div>' +
+            '<div class="provider-name-wrap">' +
+              '<div class="provider-header"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Unavailable)</span></div>' + actions + '</div>' +
+              '<div class="provider-plan-block">Unavailable</div>' +
+            '</div>' +
           '</div>' +
+          buildRefreshMeta() +
           '<div class="usage-error">' + esc(payload?.error || 'Usage unavailable') + '</div>' +
         '</article>';
       }
 
       const plan = compactPlan(payload.plan || 'connected');
-      return '<article class="usage-row ' + (isExpanded ? 'expanded' : '') + '" data-provider="' + esc(providerKey) + '">' +
-        '<button type="button" class="usage-toggle" data-toggle-provider="' + esc(providerKey) + '" aria-expanded="' + (isExpanded ? 'true' : 'false') + '" aria-label="Toggle ' + esc(title) + ' details">' +
-          '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5"/></svg>' +
-        '</button>' +
+      const activeProfileMeta =
+        providerKey === 'claude' && Array.isArray(allProfiles)
+          ? allProfiles.find(function (p) { return String(p?.alias || '') === String(shownActiveProfile || ''); })
+          : null;
+      const profileEmail = String(activeProfileMeta?.email || '').trim();
+      const accountEmail = providerKey === 'claude' ? (profileEmail || String(payload.accountEmail || '').trim()) : String(payload.accountEmail || '').trim();
+      return '<article class="usage-row ' + (isExpanded ? 'expanded' : '') + (isProfileSwitching ? ' switching' : '') + (hasProfiles ? ' has-profile-switch' : '') + '" data-provider="' + esc(providerKey) + '">' +
         '<div class="provider">' +
           '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="78" height="78" />' +
           '<div class="provider-name-wrap">' +
-            '<div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(' + esc(plan) + ')</span>' +
-            (hasProfiles && activeProfile ? ' <span class="profile-alias">[' + esc(activeProfile) + ']</span>' : '') +
+            '<div class="provider-header">' +
+              '<div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(' + esc(plan) + ')</span>' +
+              (hasProfiles && shownActiveProfile ? ' <span class="profile-alias">[' + esc(shownActiveProfile) + ']</span>' : '') +
+              '</div>' +
+              actions +
             '</div>' +
             '<div class="provider-plan-block">' + esc(plan) + '</div>' +
             '<div class="provider-mini">' +
@@ -2018,9 +2467,11 @@ function renderPage() {
               miniWindow(payload.secondary) +
             '</div>' +
           '</div>' +
-          (hasProfiles ? '<div class="profile-nav"><button class="profile-prev" type="button" aria-label="Previous profile" title="Previous profile">‹</button><button class="profile-next" type="button" aria-label="Next profile" title="Next profile">›</button></div>' : '') +
         '</div>' +
+        (isProfileSwitching ? '<div class="usage-switching-note"><span class="usage-spinner" aria-hidden="true"></span><span>Switching to ' + esc(claudeSwitchingAlias) + '...</span></div>' : '') +
+        buildRefreshMeta() +
         '<div class="usage-details">' +
+          (accountEmail ? '<div class="usage-email">Account: ' + esc(accountEmail) + '</div>' : '') +
           '<div class="windows">' +
             windowCard(payload.primary) +
             windowCard(payload.secondary) +
@@ -2042,55 +2493,127 @@ function renderPage() {
           refresh().catch(function () {});
         });
       }
+      const switchButtons = document.querySelectorAll('[data-open-profile-switch]');
+      for (const btn of switchButtons) {
+        btn.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          openProfileSwitchModal();
+        });
+      }
     }
 
-    function bindProfileInteractions() {
-      const claudeRow = document.querySelector('.usage-row[data-provider="claude"]');
-      if (!claudeRow) return;
-      const prevBtn = claudeRow.querySelector('.profile-prev');
-      const nextBtn = claudeRow.querySelector('.profile-next');
-      if (!prevBtn || !nextBtn) return;
-      function getNextProfileAlias(direction) {
-        if (!latestProfiles || latestProfiles.length < 2) return null;
-        const current = latestProfiles.findIndex(p => p.alias === latestUsage.activeProfile);
-        if (current < 0) return null;
-        const next = current + direction;
-        if (next < 0) return latestProfiles[latestProfiles.length - 1]?.alias;
-        if (next >= latestProfiles.length) return latestProfiles[0]?.alias;
-        return latestProfiles[next]?.alias;
-      }
-      function switchProfile(direction) {
-        const nextAlias = getNextProfileAlias(direction);
-        if (!nextAlias) return;
-        switchProfileTo(nextAlias);
-      }
-      prevBtn.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); switchProfile(-1); });
-      nextBtn.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); switchProfile(1); });
-      bindProviderSwipeCard(claudeRow, (direction) => switchProfile(direction > 0 ? 1 : -1));
+    let usageRefreshTicker = null;
+    let usageAutoRefreshInFlight = false;
+    const providerAutoRefreshAt = new Map();
+    function formatMmSs(totalSeconds) {
+      const sec = Math.max(0, Number(totalSeconds) || 0);
+      const minPart = Math.floor(sec / 60);
+      const secPart = sec % 60;
+      return String(minPart).padStart(2, '0') + ':' + String(secPart).padStart(2, '0');
     }
 
-    function bindProviderSwipeCard(card, onSwipe) {
-      let touchStart = 0;
-      let touchEnd = 0;
-      const threshold = 35;
-      card.style.touchAction = 'pan-y';
-      card.addEventListener('touchstart', (e) => { touchStart = e.changedTouches[0].clientX; });
-      card.addEventListener('touchend', (e) => {
-        touchEnd = e.changedTouches[0].clientX;
-        const diff = touchStart - touchEnd;
-        if (Math.abs(diff) > threshold) onSwipe(diff);
-      });
+    function tickUsageRefreshCountdown() {
+      const refreshEls = document.querySelectorAll('[data-usage-refresh]');
+      for (const el of refreshEls) {
+        const providerKey = String(el.getAttribute('data-provider') || '').toLowerCase();
+        const providerTitle = String(el.getAttribute('data-provider-title') || 'Provider');
+        const nextIso = el.getAttribute('data-next-refresh-at') || '';
+        const intervalMs = Number(el.getAttribute('data-refresh-interval-ms') || 0) || 120000;
+        const nextMs = Date.parse(nextIso);
+        if (!Number.isFinite(nextMs)) continue;
+        const remainingMs = Math.max(0, nextMs - Date.now());
+        const remainingSec = Math.ceil(remainingMs / 1000);
+        const pct = Math.max(0, Math.min(100, ((intervalMs - remainingMs) / intervalMs) * 100));
+        const text = el.querySelector('.usage-refresh-text');
+        const ring = el.querySelector('.usage-refresh-ring');
+        if (text) text.textContent = remainingSec > 0 ? ('Next ' + providerTitle + ' refresh in ' + formatMmSs(remainingSec)) : 'Refreshing now...';
+        if (ring) ring.style.setProperty('--refresh-pct', String(pct));
+        if (remainingSec <= 0 && providerKey) {
+          const nowMs = Date.now();
+          const lastKickoffMs = Number(providerAutoRefreshAt.get(providerKey) || 0);
+          if (!usageAutoRefreshInFlight && nowMs - lastKickoffMs >= 1500) {
+            providerAutoRefreshAt.set(providerKey, nowMs);
+            usageAutoRefreshInFlight = true;
+            refresh().catch(function () {}).finally(function () {
+              usageAutoRefreshInFlight = false;
+            });
+          }
+        }
+      }
+    }
+
+    function bindUsageRefreshTicker() {
+      if (usageRefreshTicker) clearInterval(usageRefreshTicker);
+      tickUsageRefreshCountdown();
+      usageRefreshTicker = setInterval(tickUsageRefreshCountdown, 1000);
+    }
+
+    function profileUsageCard(profile, activeAlias) {
+      const usage = profile && profile.usageCache && typeof profile.usageCache === 'object' ? profile.usageCache : {};
+      const alias = String(profile?.alias || '').trim();
+      const isActive = alias && alias === activeAlias;
+      const isSwitchingTo = !!claudeSwitchingAlias && alias === claudeSwitchingAlias;
+      const cachedEmail = String(usage.accountEmail || profile?.email || '').trim();
+      return '<button type="button" class="profile-switch-card ' + (isActive ? 'active' : '') + '" data-profile-alias="' + esc(alias) + '" ' +
+        (isSwitchingTo ? 'disabled' : '') + '>' +
+        '<div class="profile-switch-head">' +
+          '<div class="profile-switch-name">' + esc(profile?.displayName || alias || 'Profile') + '</div>' +
+          '<div class="profile-switch-status">' + (isSwitchingTo ? 'Switching…' : (isActive ? 'Active' : 'Switch')) + '</div>' +
+        '</div>' +
+        '<div class="profile-switch-alias">[' + esc(alias || 'n/a') + ']</div>' +
+        '<div class="profile-switch-email">' + esc(cachedEmail || 'n/a') + '</div>' +
+        '<div class="profile-switch-windows">' +
+          miniWindow(usage.primary || null) +
+          miniWindow(usage.secondary || null) +
+        '</div>' +
+      '</button>';
+    }
+
+    function renderProfileSwitchModal() {
+      const host = document.getElementById('profile-switch-list');
+      if (!host) return;
+      if (!Array.isArray(latestProfiles) || !latestProfiles.length) {
+        host.innerHTML = '<div class="line muted">No Claude accounts registered.</div>';
+        return;
+      }
+      host.innerHTML = latestProfiles.map(function (profile) {
+        return profileUsageCard(profile, latestUsage?.activeProfile || null);
+      }).join('');
+      const cards = host.querySelectorAll('[data-profile-alias]');
+      for (const card of cards) {
+        card.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const alias = card.getAttribute('data-profile-alias');
+          if (!alias) return;
+          switchProfileTo(alias);
+        });
+      }
+    }
+
+    function openProfileSwitchModal() {
+      renderProfileSwitchModal();
+      const modal = document.getElementById('profile-switch-modal');
+      if (modal) modal.classList.add('open');
+      profileSwitchState.open = true;
+      toggleBodyScroll(true);
+    }
+
+    function closeProfileSwitchModal() {
+      const modal = document.getElementById('profile-switch-modal');
+      if (modal) modal.classList.remove('open');
+      profileSwitchState.open = false;
+      toggleBodyScroll(false);
     }
 
     async function switchProfileTo(alias) {
-      const claudeRow = document.querySelector('.usage-row[data-provider="claude"]');
-      if (!claudeRow) return;
-      claudeRow.classList.add('switching');
-      const aliasSpan = claudeRow.querySelector('.profile-alias');
-      const originalText = aliasSpan?.textContent || '';
-      if (aliasSpan) aliasSpan.textContent = '[' + alias + ']';
-      const detailsDiv = claudeRow.querySelector('.usage-details');
-      if (detailsDiv) detailsDiv.style.opacity = '0.5';
+      if (!alias || claudeSwitchingAlias) return;
+      claudeSwitchingAlias = alias;
+      latestUsage = { ...(latestUsage || {}), activeProfile: alias };
+      renderUsageGrid(latestUsage);
+      renderProfileSwitchModal();
+      const switchStartedAt = Date.now();
       try {
         const resp = await fetch('/api/profiles/switch', {
           method: 'POST',
@@ -2098,24 +2621,39 @@ function renderPage() {
           body: JSON.stringify({ alias }),
         });
         if (!resp.ok) {
-          if (aliasSpan) aliasSpan.textContent = originalText;
-          if (detailsDiv) detailsDiv.style.opacity = '1';
-          claudeRow.classList.remove('switching');
+          claudeSwitchingAlias = '';
+          renderUsageGrid(latestUsage);
+          renderProfileSwitchModal();
           return;
         }
         let attempts = 0;
-        const maxAttempts = 30;
+        const maxAttempts = 80;
         function pollUsage() {
           if (attempts >= maxAttempts) {
-            claudeRow.classList.remove('switching');
+            claudeSwitchingAlias = '';
+            renderProfileSwitchModal();
             refresh().catch(() => {});
             return;
           }
           fetch('/api/usage').then(r => r.json()).then(usage => {
-            if (usage.activeProfile === alias && usage.claude && usage.claude.ok && !usage.claude.loading) {
-              claudeRow.classList.remove('switching');
-              if (detailsDiv) detailsDiv.style.opacity = '1';
-              refresh().catch(() => {});
+            if (claudeSwitchingAlias && usage && typeof usage === 'object') {
+              for (const key of ['codex', 'gemini']) {
+                if (usage[key]?.loading && latestUsage?.[key]) usage[key] = latestUsage[key];
+              }
+            }
+            const fetchedAtMs = usage && usage.fetchedAt ? Date.parse(usage.fetchedAt) : NaN;
+            const isFresh = Number.isFinite(fetchedAtMs) && fetchedAtMs > switchStartedAt;
+            if (usage.activeProfile === alias && usage.claude && !usage.claude.loading && (isFresh || usage.claude.throttled)) {
+              claudeSwitchingAlias = '';
+              renderUsageGrid(usage || {});
+              fetch('/api/profiles', { cache: 'no-store' })
+                .then(function (r) { return r.json(); })
+                .then(function (payload) {
+                  if (payload && Array.isArray(payload.profiles)) latestProfiles = payload.profiles;
+                  renderProfileSwitchModal();
+                })
+                .catch(function () {});
+              closeProfileSwitchModal();
             } else {
               attempts++;
               setTimeout(pollUsage, 200);
@@ -2127,9 +2665,9 @@ function renderPage() {
         }
         pollUsage();
       } catch (error) {
-        if (aliasSpan) aliasSpan.textContent = originalText;
-        if (detailsDiv) detailsDiv.style.opacity = '1';
-        claudeRow.classList.remove('switching');
+        claudeSwitchingAlias = '';
+        renderUsageGrid(latestUsage);
+        renderProfileSwitchModal();
       }
     }
 
@@ -2359,6 +2897,7 @@ function renderPage() {
       agentState.open = true;
       agentState.dialId = agent.id;
       agentState.providerKey = 'codex';
+      agentState.initialPrompt = '';
       renderAgentModal();
       const modal = document.getElementById('agent-modal');
       if (modal) modal.classList.add('open');
@@ -2368,6 +2907,7 @@ function renderPage() {
     function closeAgentModal() {
       agentState.open = false;
       agentState.dialId = '';
+      agentState.initialPrompt = '';
       const modal = document.getElementById('agent-modal');
       if (modal) modal.classList.remove('open');
       if (!intentState.open && !pickerState.open && !killState.open) toggleBodyScroll(false);
@@ -2540,6 +3080,15 @@ function renderPage() {
       const description = document.getElementById('agent-description');
       if (description) description.textContent = agent.description || '';
 
+      const promptHint = document.getElementById('agent-prompt-hint');
+      if (promptHint) promptHint.textContent = agent.promptHint || 'Type an optional prompt here.';
+
+      const promptInput = document.getElementById('agent-initial-prompt');
+      if (promptInput) {
+        promptInput.placeholder = agent.promptPlaceholder || 'Type an optional prompt here.';
+        if (promptInput.value !== agentState.initialPrompt) promptInput.value = agentState.initialPrompt || '';
+      }
+
       const selectedProvider = PROVIDER_ORDER[activeAgentProviderIndex()];
       const providerHost = document.getElementById('agent-provider-select');
       if (providerHost) providerHost.innerHTML = providerSelectionCard(selectedProvider, 'agent-provider-select-card');
@@ -2580,25 +3129,39 @@ function renderPage() {
       bindDirectoryPickerInteractions();
     }
 
-    function bindProviderSwipeCard(cardId, rotateFn) {
-      const card = document.getElementById(cardId);
+    function bindProviderSwipeCard(cardOrId, rotateFn) {
+      const card = typeof cardOrId === 'string' ? document.getElementById(cardOrId) : cardOrId;
       if (!card || card.dataset.swipeBound === '1') return;
       card.dataset.swipeBound = '1';
+      card.style.touchAction = 'pan-y';
+      let swipeBlocked = false;
       let startX = null;
+      let startY = null;
       card.addEventListener('touchstart', function (ev) {
         if (!ev.touches || !ev.touches[0]) return;
+        const t = ev.target;
+        swipeBlocked = !!(t && t.closest && t.closest('[data-toggle-provider],button,a,input,textarea,select,label'));
         startX = ev.touches[0].clientX;
+        startY = ev.touches[0].clientY;
       }, { passive: true });
       card.addEventListener('touchend', function (ev) {
-        if (startX === null) return;
+        if (startX === null || startY === null) return;
         if (!ev.changedTouches || !ev.changedTouches[0]) {
           startX = null;
+          startY = null;
           return;
         }
-        const delta = ev.changedTouches[0].clientX - startX;
+        const deltaX = ev.changedTouches[0].clientX - startX;
+        const deltaY = ev.changedTouches[0].clientY - startY;
         startX = null;
-        if (Math.abs(delta) < 35) return;
-        rotateFn(delta < 0 ? 1 : -1);
+        startY = null;
+        if (swipeBlocked) {
+          swipeBlocked = false;
+          return;
+        }
+        if (Math.abs(deltaX) < 35) return;
+        if (Math.abs(deltaX) <= Math.abs(deltaY)) return;
+        rotateFn(deltaX < 0 ? 1 : -1);
       });
     }
 
@@ -2653,6 +3216,13 @@ function renderPage() {
         next.addEventListener('click', function (ev) {
           ev.preventDefault();
           rotateAgentProvider(1);
+        });
+      }
+      const promptInput = document.getElementById('agent-initial-prompt');
+      if (promptInput && promptInput.dataset.bound !== '1') {
+        promptInput.dataset.bound = '1';
+        promptInput.addEventListener('input', function () {
+          agentState.initialPrompt = String(promptInput.value || '');
         });
       }
     }
@@ -2804,6 +3374,8 @@ function renderPage() {
           ev.preventDefault();
           if (!agentState.dialId) return;
           const payload = { dialId: agentState.dialId, provider: agentState.providerKey };
+          const initialPrompt = String(agentState.initialPrompt || '').trim();
+          if (initialPrompt) payload.initialPrompt = initialPrompt;
           closeAgentModal();
           await launchHotDialAgent(payload, { autoScroll: true });
         });
@@ -2836,6 +3408,17 @@ function renderPage() {
           intentState.workdir = pickerState.path || HOME_DIRECTORY;
           closeDirPicker();
           renderIntentModal();
+        });
+      }
+
+      const profileSwitchClose = document.getElementById('profile-switch-close');
+      if (profileSwitchClose) profileSwitchClose.addEventListener('click', function (ev) { ev.preventDefault(); closeProfileSwitchModal(); });
+      const profileSwitchCancel = document.getElementById('profile-switch-cancel');
+      if (profileSwitchCancel) profileSwitchCancel.addEventListener('click', function (ev) { ev.preventDefault(); closeProfileSwitchModal(); });
+      const profileSwitchOverlay = document.getElementById('profile-switch-modal');
+      if (profileSwitchOverlay) {
+        profileSwitchOverlay.addEventListener('click', function (ev) {
+          if (ev.target === profileSwitchOverlay) closeProfileSwitchModal();
         });
       }
 
@@ -3066,20 +3649,27 @@ function renderPage() {
     }
 
     function renderUsageGrid(usage) {
-      latestUsage = usage || {};
+      const nextUsage = usage && typeof usage === 'object' ? { ...usage } : {};
+      if (claudeSwitchingAlias) {
+        for (const provider of ['codex', 'gemini']) {
+          if (nextUsage[provider]?.loading && latestUsage?.[provider]) nextUsage[provider] = latestUsage[provider];
+        }
+      }
+      latestUsage = nextUsage;
       const usageGrid = document.getElementById('usage-grid');
-      const activeProfile = usage?.activeProfile || null;
+      const activeProfile = nextUsage?.activeProfile || null;
       const rows = [
-        providerUsageRow('codex', 'Codex', latestUsage.codex, activeProfile, []),
-        providerUsageRow('claude', 'Claude', latestUsage.claude, activeProfile, latestProfiles),
-        providerUsageRow('gemini', 'Gemini', latestUsage.gemini, activeProfile, []),
+        providerUsageRow('codex', 'Codex', nextUsage.codex, activeProfile, []),
+        providerUsageRow('claude', 'Claude', nextUsage.claude, activeProfile, latestProfiles),
+        providerUsageRow('gemini', 'Gemini', nextUsage.gemini, activeProfile, []),
       ];
       const nextUsageHtml = rows.join('');
       if (usageGrid && usageGrid.innerHTML !== nextUsageHtml) {
         usageGrid.innerHTML = nextUsageHtml;
         bindUsageInteractions();
-        bindProfileInteractions();
       }
+      bindUsageRefreshTicker();
+      if (profileSwitchState.open) renderProfileSwitchModal();
     }
 
     function renderSessions(sessionsPayload) {
@@ -3148,6 +3738,9 @@ function renderPage() {
         .then(function (payload) {
           if (payload && Array.isArray(payload.profiles)) {
             latestProfiles = payload.profiles;
+            if (payload.active) latestUsage = { ...(latestUsage || {}), activeProfile: payload.active };
+            if (profileSwitchState.open) renderProfileSwitchModal();
+            renderUsageGrid(latestUsage);
           }
         })
         .catch(function () {});
@@ -3284,7 +3877,8 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const provider = normalizeProvider(body.provider);
-      const launched = await launchHotDialAgent(dialId, provider);
+      const initialPrompt = typeof body.initialPrompt === 'string' && body.initialPrompt.trim() ? body.initialPrompt.trim() : null;
+      const launched = await launchHotDialAgent(dialId, provider, initialPrompt);
       json(res, 200, { ok: true, ...launched });
     } catch (error) {
       const message = error.message || 'agent launch failed';
@@ -3329,12 +3923,21 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/profiles' && req.method === 'GET') {
     try {
       const catalog = readProfilesJson();
-      const profiles = Object.entries(catalog.profiles || {}).map(([alias, meta]) => ({
-        alias,
-        displayName: meta.displayName || alias,
-        email: meta.email || null,
-        createdAt: meta.createdAt || null,
-      }));
+      const profiles = Object.entries(catalog.profiles || {}).map(([alias, meta]) => {
+        const rawCache =
+          meta?.usageCache && typeof meta.usageCache === 'object'
+            ? { ...meta.usageCache }
+            : emptyProfileUsageCache(meta?.email || null);
+        // Profile email is authoritative per alias; avoid stale cache email bleed.
+        if (meta?.email) rawCache.accountEmail = meta.email;
+        return {
+          alias,
+          displayName: meta.displayName || alias,
+          email: meta.email || null,
+          createdAt: meta.createdAt || null,
+          usageCache: decorateUsageWindows(rawCache, ['5-hour', 'weekly']),
+        };
+      });
       json(res, 200, { active: catalog.active, profiles });
     } catch (error) {
       json(res, 500, { error: error.message || 'profiles read failed' });
@@ -3362,8 +3965,8 @@ const server = http.createServer(async (req, res) => {
         json(res, 500, { error: result.stderr || 'Profile switch failed' });
         return;
       }
-      // Invalidate usage cache to force refresh
-      usageCache = { value: null, fetchedAt: 0, pending: null };
+      // Keep previous usage visible while refreshing in background for a smoother UX.
+      usageCache = { value: usageCache.value, fetchedAt: usageCache.fetchedAt, pending: null };
       refreshUsageSummaryInBackground().catch(() => {});
       json(res, 200, { ok: true, active: alias });
     } catch (error) {
@@ -3386,6 +3989,8 @@ async function loadDashboardCss() {
 }
 
 async function startDashboardServer() {
+  loadUsageRateCacheFromDisk();
+  usageCache = { value: buildBootUsageSummaryFromCaches(), fetchedAt: 0, pending: null };
   await Promise.all([loadState(), loadDashboardCss()]);
   await ingestTelemetry().catch(() => {});
   refreshUsageSummaryInBackground().catch(() => {});

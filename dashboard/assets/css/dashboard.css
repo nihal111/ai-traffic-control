@@ -184,12 +184,16 @@
       padding: 10px 11px;
       position: relative;
     }
+    .usage-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex: 0 0 auto;
+    }
     .usage-toggle {
-      position: absolute;
-      top: 8px;
-      right: 8px;
-      width: 24px;
-      height: 24px;
+      position: relative;
+      width: 34px;
+      height: 34px;
       border-radius: 6px;
       border: 1px solid #7c6f64;
       background: #3c3836;
@@ -198,6 +202,24 @@
       display: grid;
       place-items: center;
       transition: transform 120ms ease;
+      padding: 0;
+    }
+    .usage-switch-btn {
+      border: 1px solid #7c6f64;
+      border-radius: 6px;
+      background: #3c3836;
+      color: #ebdbb2;
+      height: 34px;
+      padding: 0 10px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .usage-switch-btn:hover {
+      background: #504945;
+      border-color: #928374;
     }
     .usage-row.expanded .usage-toggle { transform: rotate(180deg); }
     .usage-toggle svg {
@@ -216,7 +238,6 @@
       align-items: stretch;
       gap: 9px;
       min-width: 0;
-      padding-right: 30px;
       position: relative;
     }
     .provider-logo {
@@ -233,6 +254,13 @@
     .provider-name-wrap {
       min-width: 0;
     }
+    .provider-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
     .provider-name {
       font-size: 15px;
       font-weight: 700;
@@ -240,6 +268,7 @@
       display: inline-flex;
       align-items: baseline;
       gap: 6px;
+      min-width: 0;
     }
     .provider-plan-inline {
       color: #bdae93;
@@ -263,46 +292,70 @@
       font-weight: 500;
       margin-left: 4px;
     }
-    .profile-nav {
-      position: absolute;
-      top: 10px;
-      right: 12px;
-      display: flex;
-      gap: 4px;
-      opacity: 0;
-      transition: opacity 200ms ease-out;
-      pointer-events: none;
+    .profile-switch-subtitle {
+      color: #bdae93;
+      font-size: 12px;
+      line-height: 1.35;
+      margin-bottom: 10px;
     }
-    .usage-row:hover .profile-nav,
-    .usage-row:focus-within .profile-nav {
-      opacity: 1;
-      pointer-events: auto;
+    .profile-switch-list {
+      display: grid;
+      gap: 8px;
     }
-    .profile-prev,
-    .profile-next {
-      background: #2c3c63;
+    .profile-switch-card {
+      width: 100%;
+      text-align: left;
+      border: 1px solid #665c54;
+      border-radius: 10px;
+      background: linear-gradient(150deg, #3a3634 0%, #2f2b2a 100%);
+      padding: 10px;
       color: #ebdbb2;
-      border: 1px solid #7c6f64;
-      border-radius: 6px;
-      width: 32px;
-      height: 32px;
-      padding: 0;
-      font-size: 18px;
-      font-weight: 700;
       cursor: pointer;
-      transition: all 160ms ease-out;
+    }
+    .profile-switch-card.active {
+      border-color: #d79921;
+      box-shadow: 0 0 0 1px #d7992133 inset;
+    }
+    .profile-switch-card:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+    .profile-switch-head {
       display: flex;
-      align-items: center;
-      justify-content: center;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
     }
-    .profile-prev:hover,
-    .profile-next:hover {
-      background: #504945;
-      border-color: #928374;
+    .profile-switch-name {
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.15;
     }
-    .profile-prev:active,
-    .profile-next:active {
-      transform: scale(0.95);
+    .profile-switch-status {
+      font-size: 10px;
+      font-weight: 700;
+      color: #bdae93;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      white-space: nowrap;
+    }
+    .profile-switch-alias {
+      margin-top: 3px;
+      color: #a89984;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .profile-switch-email {
+      margin-top: 4px;
+      color: #bdae93;
+      font-size: 12px;
+      line-height: 1.3;
+      word-break: break-all;
+    }
+    .profile-switch-windows {
+      margin-top: 7px;
+      display: grid;
+      gap: 4px;
     }
     .mini {
       display: grid;
@@ -349,6 +402,13 @@
     .usage-details {
       margin-top: 8px;
       display: none;
+    }
+    .usage-email {
+      margin: 0 0 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+      word-break: break-all;
     }
     .usage-row.expanded .usage-details { display: block; }
     .usage-row.expanded .provider {
@@ -442,6 +502,45 @@
       font-size: 12px;
       line-height: 1.2;
     }
+    .usage-switching-note {
+      margin-top: 8px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #c4be89;
+      font-size: 12px;
+      line-height: 1.2;
+      font-weight: 600;
+    }
+    .usage-refresh {
+      margin-top: 8px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #bdae93;
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.2;
+    }
+    .usage-refresh-text {
+      white-space: nowrap;
+    }
+    .usage-refresh-ring {
+      width: 15px;
+      height: 15px;
+      border-radius: 999px;
+      position: relative;
+      background: conic-gradient(#d79921 calc(var(--refresh-pct, 0) * 1%), #5a524c 0);
+      flex: 0 0 auto;
+    }
+    .usage-refresh-ring-fill {
+      --refresh-pct: 0;
+      position: absolute;
+      inset: 2px;
+      border-radius: 999px;
+      background: #282828;
+      box-shadow: inset 0 0 0 2px #3c3836;
+    }
     .usage-spinner {
       width: 12px;
       height: 12px;
@@ -454,9 +553,6 @@
     @keyframes usage-spin {
       from { transform: rotate(0deg); }
       to { transform: rotate(360deg); }
-    }
-    .usage-row.switching {
-      pointer-events: none;
     }
     .usage-row.switching .provider {
       opacity: 0.5;
@@ -548,6 +644,33 @@
       color: #c8d9fb;
       font-size: 13px;
       line-height: 1.35;
+    }
+    .agent-prompt-hint {
+      color: #c8d9fb;
+      font-size: 12px;
+      line-height: 1.35;
+      margin-bottom: 7px;
+    }
+    .agent-prompt-input {
+      width: 100%;
+      border: 1px solid #344975;
+      border-radius: 10px;
+      background: #101b33;
+      color: #dbe8ff;
+      font-size: 13px;
+      line-height: 1.35;
+      padding: 10px;
+      resize: vertical;
+      min-height: 100px;
+      font-family: "Avenir Next", "Avenir", "Trebuchet MS", "Segoe UI", sans-serif;
+    }
+    .agent-prompt-input::placeholder {
+      color: #8ea5d2;
+    }
+    .agent-prompt-input:focus {
+      outline: none;
+      border-color: #6491eb;
+      box-shadow: 0 0 0 1px #6491eb33 inset;
     }
 
     .sessions { display: grid; gap: 10px; }
@@ -1280,12 +1403,15 @@
       background: linear-gradient(160deg, #293739 0%, #232526 100%);
     }
     .usage-toggle,
-    .profile-prev,
-    .profile-next,
+    .usage-switch-btn,
     .selector-nav {
       border-color: #49483e;
       background: #232526;
       color: #f8f8f2;
+    }
+    .profile-switch-card {
+      border-color: #49483e;
+      background: linear-gradient(160deg, #293739 0%, #232526 100%);
     }
     .provider-logo,
     .provider-select-logo,
@@ -1308,6 +1434,15 @@
       border-color: #49483e;
       background: linear-gradient(150deg, #293739 0%, #232526 100%);
       color: #f8f8f2;
+    }
+    .agent-prompt-input {
+      border-color: #49483e;
+      background: #232526;
+      color: #f8f8f2;
+    }
+    .agent-prompt-input::placeholder,
+    .agent-prompt-hint {
+      color: #7e8e91;
     }
     .agent-dial-card:hover {
       border-color: #fd971f;
@@ -1382,6 +1517,16 @@
       .title-tags { margin-top: 8px; gap: 5px; }
       .title-tag { font-size: 9px; padding: 2px 7px; }
       .provider { grid-template-columns: 50px 1fr; }
+      .usage-actions { gap: 4px; }
+      .usage-toggle {
+        width: 32px;
+        height: 32px;
+      }
+      .usage-switch-btn {
+        height: 32px;
+        padding: 0 8px;
+        font-size: 10px;
+      }
       .agent-dials { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
       .agent-dial-card { min-height: 44px; padding: 4px; border-radius: 8px; }
       .agent-dial-title { display: none; }
