@@ -268,6 +268,10 @@ async function fetchClaudeUsageRateLimited({ force = false } = {}) {
   const activeAlias = String(catalog.active || '').trim();
   const activeMeta = activeAlias && catalog.profiles ? catalog.profiles[activeAlias] : null;
   const profileEmail = typeof activeMeta?.email === 'string' && activeMeta.email.trim() ? activeMeta.email.trim() : null;
+  const profileSubscriptionType =
+    typeof activeMeta?.authState?.authStatus?.subscriptionType === 'string' && activeMeta.authState.authStatus.subscriptionType.trim()
+      ? activeMeta.authState.authStatus.subscriptionType.trim()
+      : null;
   const cachedUsage =
     activeMeta?.usageCache && typeof activeMeta.usageCache === 'object'
       ? { ...activeMeta.usageCache }
@@ -293,8 +297,12 @@ async function fetchClaudeUsageRateLimited({ force = false } = {}) {
   const attemptedAtMs = Date.now();
   const attemptedAtIso = new Date(attemptedAtMs).toISOString();
   const live = await fetchCodexbarUsage('claude', 'cli');
+  const resolvedLive =
+    live?.ok && !String(live.plan || '').trim() && profileSubscriptionType
+      ? { ...live, plan: profileSubscriptionType }
+      : live;
   return {
-    ...live,
+    ...resolvedLive,
     throttled: false,
     lastAttemptAt: attemptedAtIso,
     ...buildClaudeRefreshMeta(attemptedAtMs),
@@ -2460,17 +2468,18 @@ function renderPage() {
       const hasProfiles = providerKey === 'claude' && Array.isArray(allProfiles) && allProfiles.length > 1;
       const isProfileSwitching = providerKey === 'claude' && !!claudeSwitchingAlias;
       const shownActiveProfile = isProfileSwitching ? claudeSwitchingAlias : activeProfile;
-      const buildRefreshMeta = () => {
+      const buildRefreshMeta = (expandedAlias, inlineMode = false) => {
         const refreshIntervalMs = Number(payload?.refreshIntervalMs || 0);
         if (!payload?.nextRefreshAt) return '';
-        return '<div class="usage-refresh" data-usage-refresh="1" data-provider="' + esc(providerKey) + '" data-provider-title="' + esc(title) + '" data-next-refresh-at="' + esc(String(payload.nextRefreshAt)) + '" data-refresh-interval-ms="' + esc(String(refreshIntervalMs || 120000)) + '">' +
+        return '<div class="usage-refresh' + (inlineMode ? ' usage-refresh-inline' : '') + '" data-usage-refresh="1" data-provider="' + esc(providerKey) + '" data-provider-title="' + esc(title) + '" data-next-refresh-at="' + esc(String(payload.nextRefreshAt)) + '" data-refresh-interval-ms="' + esc(String(refreshIntervalMs || 120000)) + '">' +
           '<span class="usage-refresh-text"></span>' +
           '<span class="usage-refresh-ring" aria-hidden="true"><span class="usage-refresh-ring-fill"></span></span>' +
+          (expandedAlias ? '<span class="profile-alias profile-alias-refresh">' + esc(expandedAlias) + '</span>' : '') +
         '</div>';
       };
       const actions = '<div class="usage-actions">' +
         (isExpanded && hasProfiles
-          ? '<button type="button" class="usage-switch-btn" data-open-profile-switch="1" aria-label="Switch Claude account">Switch Account</button>'
+          ? '<button type="button" class="usage-switch-btn" data-open-profile-switch="1" aria-label="Switch Claude account">Switch</button>'
           : '') +
         (isExpanded
           ? '<button type="button" class="usage-refresh-btn" data-refresh-provider="' + esc(providerKey) + '" aria-label="Refresh ' + esc(title) + ' usage">↻</button>'
@@ -2484,7 +2493,8 @@ function renderPage() {
           '<div class="provider">' +
             '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="78" height="78" />' +
             '<div class="provider-name-wrap">' +
-              '<div class="provider-header"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Loading)</span>' + buildRefreshMeta() + '</div>' + actions + '</div>' +
+              '<div class="provider-header"><div class="provider-head-main"><div class="provider-title-row"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Loading)</span></div>' + buildRefreshMeta('', true) + '</div></div>' + actions + '</div>' +
+              buildRefreshMeta('', false) +
               '<div class="provider-plan-block">Loading</div>' +
             '</div>' +
           '</div>' +
@@ -2496,7 +2506,8 @@ function renderPage() {
           '<div class="provider">' +
             '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="78" height="78" />' +
             '<div class="provider-name-wrap">' +
-              '<div class="provider-header"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Unavailable)</span>' + buildRefreshMeta() + '</div>' + actions + '</div>' +
+              '<div class="provider-header"><div class="provider-head-main"><div class="provider-title-row"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Unavailable)</span></div>' + buildRefreshMeta('', true) + '</div></div>' + actions + '</div>' +
+              buildRefreshMeta('', false) +
               '<div class="provider-plan-block">Unavailable</div>' +
             '</div>' +
           '</div>' +
@@ -2504,21 +2515,28 @@ function renderPage() {
         '</article>';
       }
 
-      const plan = compactPlan(payload.plan || 'connected');
       const activeProfileMeta =
         providerKey === 'claude' && Array.isArray(allProfiles)
           ? allProfiles.find(function (p) { return String(p?.alias || '') === String(shownActiveProfile || ''); })
           : null;
       const profileEmail = String(activeProfileMeta?.email || '').trim();
+      const profileSubscription = String(activeProfileMeta?.subscriptionType || '').trim();
       const accountEmail = providerKey === 'claude' ? (profileEmail || String(payload.accountEmail || '').trim()) : String(payload.accountEmail || '').trim();
+      const expandedAliasLabel = isExpanded && hasProfiles && shownActiveProfile ? '[' + String(shownActiveProfile) + ']' : '';
+      const plan = compactPlan(payload.plan || (providerKey === 'claude' ? (profileSubscription || 'Pro') : 'connected'));
       return '<article class="usage-row ' + (isExpanded ? 'expanded' : '') + (isProfileSwitching ? ' switching' : '') + (hasProfiles ? ' has-profile-switch' : '') + '" data-provider="' + esc(providerKey) + '">' +
         '<div class="provider">' +
           '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="78" height="78" />' +
           '<div class="provider-name-wrap">' +
             '<div class="provider-header">' +
-              '<div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(' + esc(plan) + ')</span>' +
-              (hasProfiles && shownActiveProfile ? ' <span class="profile-alias">[' + esc(shownActiveProfile) + ']</span>' : '') +
-              buildRefreshMeta() +
+              '<div class="provider-head-main">' +
+                '<div class="provider-title-row">' +
+                  '<div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(' + esc(plan) + ')</span>' +
+                  (!isExpanded && hasProfiles && shownActiveProfile ? ' <span class="profile-alias">[' + esc(shownActiveProfile) + ']</span>' : '') +
+                  '</div>' +
+                  buildRefreshMeta('', true) +
+                '</div>' +
+                buildRefreshMeta(expandedAliasLabel, false) +
               '</div>' +
               actions +
             '</div>' +
@@ -4039,6 +4057,7 @@ const server = http.createServer(async (req, res) => {
           alias,
           displayName: meta.displayName || alias,
           email: meta.email || null,
+          subscriptionType: meta?.authState?.authStatus?.subscriptionType || null,
           createdAt: meta.createdAt || null,
           usageCache: decorateUsageWindows(rawCache, ['5-hour', 'weekly']),
         };
