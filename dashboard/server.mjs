@@ -35,9 +35,9 @@ const USER_ZSHRC_PATH = process.env.ATC_USER_ZSHRC || path.join(process.env.HOME
 const USER_HISTORY_FILE = process.env.ATC_USER_HISTORY_FILE || path.join(process.env.HOME || '', '.zsh_history');
 const REFRESH_MS = 8000;
 const USAGE_TTL_MS = 10000;
-const CLAUDE_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_CLAUDE_USAGE_MIN_INTERVAL_MS || 600000);
-const CODEX_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_CODEX_USAGE_MIN_INTERVAL_MS || 120000);
-const GEMINI_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_GEMINI_USAGE_MIN_INTERVAL_MS || 120000);
+const CLAUDE_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_CLAUDE_USAGE_MIN_INTERVAL_MS || 120000);
+const CODEX_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_CODEX_USAGE_MIN_INTERVAL_MS || 30000);
+const GEMINI_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_GEMINI_USAGE_MIN_INTERVAL_MS || 30000);
 const TELEMETRY_INGEST_MS = Number(process.env.TELEMETRY_INGEST_MS || 2000);
 const SLOT_RUN_RETENTION = Number(process.env.SLOT_RUN_RETENTION || 3);
 const RECENT_WORKDIR_LIMIT = 5;
@@ -2403,7 +2403,7 @@ function renderPage() {
       claude: '/assets/logos/anthropic.svg?v=2',
       gemini: '/assets/logos/google.svg?v=2',
     };
-    const usageExpanded = new Set();
+    const usageRefreshing = new Set();
     const recentWorkdirs = [];
 
     function clampPct(value) {
@@ -2449,68 +2449,86 @@ function renderPage() {
       '</div>';
     }
 
-    function windowCard(windowInfo) {
-      if (!windowInfo) return '<article class="window missing">No data</article>';
+    function winRow(windowInfo) {
+      if (!windowInfo) {
+        return '<div class="win missing">' +
+          '<div class="win-label">n/a</div>' +
+          '<div class="win-pct">--</div>' +
+          '<div class="win-bar"></div>' +
+          '<div class="win-reset">No data</div>' +
+        '</div>';
+      }
       const pct = clampPct(windowInfo.usedPercent);
-      return '<article class="window">' +
-        '<div class="window-head">' +
-          '<div class="window-label">' + esc(windowInfo.label || 'window') + '</div>' +
-          '<div class="window-value" style="color:' + pctColor(pct) + ';">' + esc(Math.round(pct) + '%') + '</div>' +
+      const shortLabel = compactWindowLabel(windowInfo.label || 'window');
+      return '<div class="win">' +
+        '<div class="win-label">' + esc(shortLabel) + '</div>' +
+        '<div class="win-pct" style="color:' + pctColor(pct) + ';">' + esc(Math.round(pct) + '%') + '</div>' +
+        '<div class="win-bar"><div class="win-bar-fill" style="width:' + pct + '%"></div></div>' +
+        '<div class="win-reset">' + esc(windowInfo.resetIn || 'n/a') + '</div>' +
+      '</div>';
+    }
+
+    function refreshRingButton(providerKey, title, payload) {
+      const hasMeta = !!(payload && payload.nextRefreshAt);
+      const refreshIntervalMs = Number(payload?.refreshIntervalMs || 0) || 30000;
+      const isRefreshing = usageRefreshing.has(providerKey);
+      const classes = 'refresh-ring-btn' + (isRefreshing ? ' refreshing' : '');
+      const metaAttrs = hasMeta
+        ? ' data-usage-refresh="1" data-provider-title="' + esc(title) + '" data-next-refresh-at="' + esc(String(payload.nextRefreshAt)) + '" data-refresh-interval-ms="' + esc(String(refreshIntervalMs)) + '"'
+        : '';
+      return '<button type="button" class="' + classes + '" ' +
+        'data-refresh-provider="' + esc(providerKey) + '" data-provider="' + esc(providerKey) + '"' +
+        metaAttrs +
+        ' style="--refresh-pct: 0;" aria-label="Refresh ' + esc(title) + ' usage"' +
+        (isRefreshing ? ' disabled' : '') + '>' +
+        '<svg class="refresh-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+          '<path d="M23 4v6h-6"/>' +
+          '<path d="M1 20v-6h6"/>' +
+          '<path d="M3.51 9a9 9 0 0 1 14.85-3.36M20.49 15a9 9 0 0 1-14.85 3.36"/>' +
+        '</svg>' +
+      '</button>';
+    }
+
+    function cardHead(providerKey, title, logo, planPill, aliasPill, extraActions, payload) {
+      return '<div class="card-head">' +
+        '<img class="card-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="40" height="40" />' +
+        '<div class="card-ident">' +
+          '<div class="card-title-row">' +
+            '<div class="card-name">' + esc(title) + '</div>' +
+            planPill +
+            aliasPill +
+          '</div>' +
         '</div>' +
-        '<div class="window-reset">Reset in ' + esc(windowInfo.resetIn || 'n/a') + '</div>' +
-        '<div class="bar"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
-      '</article>';
+        '<div class="card-actions">' +
+          extraActions +
+          refreshRingButton(providerKey, title, payload) +
+        '</div>' +
+      '</div>';
     }
 
     function providerUsageRow(providerKey, title, payload, activeProfile, allProfiles) {
       const logo = PROVIDER_LOGOS[providerKey] || '';
-      const isExpanded = usageExpanded.has(providerKey);
       const hasProfiles = providerKey === 'claude' && Array.isArray(allProfiles) && allProfiles.length > 1;
       const isProfileSwitching = providerKey === 'claude' && !!claudeSwitchingAlias;
       const shownActiveProfile = isProfileSwitching ? claudeSwitchingAlias : activeProfile;
-      const buildRefreshMeta = (expandedAlias, inlineMode = false) => {
-        const refreshIntervalMs = Number(payload?.refreshIntervalMs || 0);
-        if (!payload?.nextRefreshAt) return '';
-        return '<div class="usage-refresh' + (inlineMode ? ' usage-refresh-inline' : '') + '" data-usage-refresh="1" data-provider="' + esc(providerKey) + '" data-provider-title="' + esc(title) + '" data-next-refresh-at="' + esc(String(payload.nextRefreshAt)) + '" data-refresh-interval-ms="' + esc(String(refreshIntervalMs || 120000)) + '">' +
-          '<span class="usage-refresh-text"></span>' +
-          '<span class="usage-refresh-ring" aria-hidden="true"><span class="usage-refresh-ring-fill"></span></span>' +
-          (expandedAlias ? '<span class="profile-alias profile-alias-refresh">' + esc(expandedAlias) + '</span>' : '') +
-        '</div>';
-      };
-      const actions = '<div class="usage-actions">' +
-        (isExpanded && hasProfiles
-          ? '<button type="button" class="usage-switch-btn" data-open-profile-switch="1" aria-label="Switch Claude account">Switch</button>'
-          : '') +
-        (isExpanded
-          ? '<button type="button" class="usage-refresh-btn" data-refresh-provider="' + esc(providerKey) + '" aria-label="Refresh ' + esc(title) + ' usage">↻</button>'
-          : '') +
-        '<button type="button" class="usage-toggle" data-toggle-provider="' + esc(providerKey) + '" aria-expanded="' + (isExpanded ? 'true' : 'false') + '" aria-label="Toggle ' + esc(title) + ' details">' +
-          '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5"/></svg>' +
-        '</button>' +
-      '</div>';
+      const switchBtn = hasProfiles
+        ? '<button type="button" class="switch-btn" data-open-profile-switch="1" aria-label="Switch Claude account">Switch</button>'
+        : '';
+      const aliasPill = providerKey === 'claude' && shownActiveProfile
+        ? '<div class="card-alias">' + esc(String(shownActiveProfile)) + '</div>'
+        : '';
+
       if (payload && payload.loading) {
-        return '<article class="usage-row loading ' + (hasProfiles ? 'has-profile-switch' : '') + '">' +
-          '<div class="provider">' +
-            '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="78" height="78" />' +
-            '<div class="provider-name-wrap">' +
-              '<div class="provider-header"><div class="provider-head-main"><div class="provider-title-row"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Loading)</span></div>' + buildRefreshMeta('', true) + '</div></div>' + actions + '</div>' +
-              buildRefreshMeta('', false) +
-              '<div class="provider-plan-block">Loading</div>' +
-            '</div>' +
-          '</div>' +
+        const planPill = '<div class="card-plan">Loading</div>';
+        return '<article class="usage-row loading" data-provider="' + esc(providerKey) + '">' +
+          cardHead(providerKey, title, logo, planPill, aliasPill, switchBtn, payload) +
           '<div class="usage-loading"><span class="usage-spinner" aria-hidden="true"></span><span>Loading usage…</span></div>' +
         '</article>';
       }
       if (!payload || !payload.ok) {
-        return '<article class="usage-row error ' + (hasProfiles ? 'has-profile-switch' : '') + '">' +
-          '<div class="provider">' +
-            '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="78" height="78" />' +
-            '<div class="provider-name-wrap">' +
-              '<div class="provider-header"><div class="provider-head-main"><div class="provider-title-row"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Unavailable)</span></div>' + buildRefreshMeta('', true) + '</div></div>' + actions + '</div>' +
-              buildRefreshMeta('', false) +
-              '<div class="provider-plan-block">Unavailable</div>' +
-            '</div>' +
-          '</div>' +
+        const planPill = '<div class="card-plan">Unavailable</div>';
+        return '<article class="usage-row error" data-provider="' + esc(providerKey) + '">' +
+          cardHead(providerKey, title, logo, planPill, aliasPill, switchBtn, payload) +
           '<div class="usage-error">' + esc(payload?.error || 'Usage unavailable') + '</div>' +
         '</article>';
       }
@@ -2519,58 +2537,23 @@ function renderPage() {
         providerKey === 'claude' && Array.isArray(allProfiles)
           ? allProfiles.find(function (p) { return String(p?.alias || '') === String(shownActiveProfile || ''); })
           : null;
-      const profileEmail = String(activeProfileMeta?.email || '').trim();
       const profileSubscription = String(activeProfileMeta?.subscriptionType || '').trim();
-      const accountEmail = providerKey === 'claude' ? (profileEmail || String(payload.accountEmail || '').trim()) : String(payload.accountEmail || '').trim();
-      const expandedAliasLabel = isExpanded && hasProfiles && shownActiveProfile ? '[' + String(shownActiveProfile) + ']' : '';
       const plan = compactPlan(payload.plan || (providerKey === 'claude' ? (profileSubscription || 'Pro') : 'connected'));
-      return '<article class="usage-row ' + (isExpanded ? 'expanded' : '') + (isProfileSwitching ? ' switching' : '') + (hasProfiles ? ' has-profile-switch' : '') + '" data-provider="' + esc(providerKey) + '">' +
-        '<div class="provider">' +
-          '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="78" height="78" />' +
-          '<div class="provider-name-wrap">' +
-            '<div class="provider-header">' +
-              '<div class="provider-head-main">' +
-                '<div class="provider-title-row">' +
-                  '<div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(' + esc(plan) + ')</span>' +
-                  (!isExpanded && hasProfiles && shownActiveProfile ? ' <span class="profile-alias">[' + esc(shownActiveProfile) + ']</span>' : '') +
-                  '</div>' +
-                  buildRefreshMeta('', true) +
-                '</div>' +
-                buildRefreshMeta(expandedAliasLabel, false) +
-              '</div>' +
-              actions +
-            '</div>' +
-            '<div class="provider-plan-block">' + esc(plan) + '</div>' +
-            '<div class="provider-mini">' +
-              miniWindow(payload.primary) +
-              miniWindow(payload.secondary) +
-            '</div>' +
-          '</div>' +
-        '</div>' +
-        (isProfileSwitching ? '<div class="usage-switching-note"><span class="usage-spinner" aria-hidden="true"></span><span>Switching to ' + esc(claudeSwitchingAlias) + '...</span></div>' : '') +
-        '<div class="usage-details">' +
-          (accountEmail ? '<div class="usage-email">Account: ' + esc(accountEmail) + '</div>' : '') +
-          '<div class="windows">' +
-            windowCard(payload.primary) +
-            windowCard(payload.secondary) +
-          '</div>' +
+      const planPill = '<div class="card-plan">' + esc(plan) + '</div>';
+
+      return '<article class="usage-row' + (isProfileSwitching ? ' switching' : '') + '" data-provider="' + esc(providerKey) + '">' +
+        cardHead(providerKey, title, logo, planPill, aliasPill, switchBtn, payload) +
+        (isProfileSwitching
+          ? '<div class="usage-switching-note"><span class="usage-spinner" aria-hidden="true"></span><span>Switching to ' + esc(claudeSwitchingAlias) + '…</span></div>'
+          : '') +
+        '<div class="windows">' +
+          winRow(payload.primary) +
+          winRow(payload.secondary) +
         '</div>' +
       '</article>';
     }
 
     function bindUsageInteractions() {
-      const toggles = document.querySelectorAll('[data-toggle-provider]');
-      for (const btn of toggles) {
-        btn.addEventListener('click', function (ev) {
-          ev.preventDefault();
-          ev.stopPropagation();
-          const provider = btn.getAttribute('data-toggle-provider');
-          if (!provider) return;
-          if (usageExpanded.has(provider)) usageExpanded.delete(provider);
-          else usageExpanded.add(provider);
-          refresh().catch(function () {});
-        });
-      }
       const switchButtons = document.querySelectorAll('[data-open-profile-switch]');
       for (const btn of switchButtons) {
         btn.addEventListener('click', function (ev) {
@@ -2584,6 +2567,7 @@ function renderPage() {
         btn.addEventListener('click', function (ev) {
           ev.preventDefault();
           ev.stopPropagation();
+          if (btn.disabled) return;
           const provider = btn.getAttribute('data-refresh-provider');
           if (!provider) return;
           manualRefreshProvider(provider);
@@ -2605,18 +2589,14 @@ function renderPage() {
       const refreshEls = document.querySelectorAll('[data-usage-refresh]');
       for (const el of refreshEls) {
         const providerKey = String(el.getAttribute('data-provider') || '').toLowerCase();
-        const providerTitle = String(el.getAttribute('data-provider-title') || 'Provider');
         const nextIso = el.getAttribute('data-next-refresh-at') || '';
-        const intervalMs = Number(el.getAttribute('data-refresh-interval-ms') || 0) || 120000;
+        const intervalMs = Number(el.getAttribute('data-refresh-interval-ms') || 0) || 30000;
         const nextMs = Date.parse(nextIso);
         if (!Number.isFinite(nextMs)) continue;
         const remainingMs = Math.max(0, nextMs - Date.now());
         const remainingSec = Math.ceil(remainingMs / 1000);
         const pct = Math.max(0, Math.min(100, ((intervalMs - remainingMs) / intervalMs) * 100));
-        const text = el.querySelector('.usage-refresh-text');
-        const ring = el.querySelector('.usage-refresh-ring');
-        if (text) text.textContent = remainingSec > 0 ? formatMmSs(remainingSec) : 'Refreshing now...';
-        if (ring) ring.style.setProperty('--refresh-pct', String(pct));
+        el.style.setProperty('--refresh-pct', String(pct));
         if (remainingSec <= 0 && providerKey) {
           const nowMs = Date.now();
           const lastKickoffMs = Number(providerAutoRefreshAt.get(providerKey) || 0);
@@ -2649,7 +2629,6 @@ function renderPage() {
           '<div class="profile-switch-name">' + esc(profile?.displayName || alias || 'Profile') + '</div>' +
           '<div class="profile-switch-status">' + (isSwitchingTo ? 'Switching…' : (isActive ? 'Active' : 'Switch')) + '</div>' +
         '</div>' +
-        '<div class="profile-switch-alias">[' + esc(alias || 'n/a') + ']</div>' +
         '<div class="profile-switch-email">' + esc(cachedEmail || 'n/a') + '</div>' +
         '<div class="profile-switch-windows">' +
           miniWindow(usage.primary || null) +
@@ -2762,16 +2741,24 @@ function renderPage() {
     async function manualRefreshProvider(provider) {
       const providerKey = String(provider || '').toLowerCase();
       if (!providerKey) return;
+      if (usageRefreshing.has(providerKey)) return;
+      usageRefreshing.add(providerKey);
+      renderUsageGrid(latestUsage);
       try {
-        await fetch('/api/usage/refresh', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ provider: providerKey, force: true }),
-        });
-      } catch (_error) {
-        // ignore and fall through to refresh current snapshot
+        try {
+          await fetch('/api/usage/refresh', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider: providerKey, force: true }),
+          });
+        } catch (_error) {
+          // ignore and fall through to refresh current snapshot
+        }
+        await refresh();
+      } finally {
+        usageRefreshing.delete(providerKey);
+        renderUsageGrid(latestUsage);
       }
-      await refresh();
     }
 
     function compact(v, max) {
