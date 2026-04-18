@@ -1,3 +1,4 @@
+    html { background: #1b1d1e; }
     :root {
       --bg0: #1b1d1e;
       --bg1: #232526;
@@ -308,9 +309,16 @@
     .refresh-ring-btn.refreshing::after {
       transition: none;
     }
+    .refresh-ring-btn.refreshing .refresh-icon {
+      animation: refresh-icon-counter 1s linear infinite;
+    }
     @keyframes refresh-dial-rotate {
       0% { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
+    }
+    @keyframes refresh-icon-counter {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(-360deg); }
     }
 
     .windows {
@@ -320,7 +328,7 @@
     }
     .win {
       display: grid;
-      grid-template-columns: 58px 40px minmax(0, 1fr) auto;
+      grid-template-columns: 58px 40px minmax(0, 1fr) 72px;
       align-items: center;
       gap: 10px;
       min-width: 0;
@@ -1491,7 +1499,7 @@
       .card-actions { gap: 5px; }
       .switch-btn { height: 26px; padding: 0 8px; font-size: 10px; }
       .refresh-ring-btn { width: 26px; height: 26px; }
-      .win { grid-template-columns: 54px 36px minmax(0, 1fr) auto; gap: 8px; }
+      .win { grid-template-columns: 54px 36px minmax(0, 1fr) 66px; gap: 8px; }
       .win-label { font-size: 9px; }
       .win-pct { font-size: 11px; }
       .win-reset { font-size: 10px; }

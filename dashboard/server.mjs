@@ -296,7 +296,7 @@ async function fetchClaudeUsageRateLimited({ force = false } = {}) {
 
   const attemptedAtMs = Date.now();
   const attemptedAtIso = new Date(attemptedAtMs).toISOString();
-  const live = await fetchCodexbarUsage('claude', 'cli');
+  const live = await fetchCodexbarUsage('claude', null);
   const resolvedLive =
     live?.ok && !String(live.plan || '').trim() && profileSubscriptionType
       ? { ...live, plan: profileSubscriptionType }
@@ -553,9 +553,9 @@ function runCommand(cmd, args, timeoutMs = 12000) {
 }
 
 function formatCountdown(targetIso) {
-  if (!targetIso) return 'n/a';
+  if (!targetIso) return '—';
   const target = new Date(targetIso).getTime();
-  if (!Number.isFinite(target)) return 'n/a';
+  if (!Number.isFinite(target)) return '—';
   const diff = target - Date.now();
   if (diff <= 0) return 'reset due';
   const sec = Math.floor(diff / 1000);
@@ -780,7 +780,6 @@ async function fetchCodexbarUsage(provider, source = 'auto', runCommandFn = runC
       const dashboard = root.openaiDashboard || null;
       const primary = usage?.primary || dashboard?.primaryLimit || null;
       const secondary = usage?.secondary || dashboard?.secondaryLimit || null;
-
       return {
         ok: true,
         provider: (provider || '').toLowerCase(),
@@ -816,7 +815,7 @@ async function fetchCodexbarUsage(provider, source = 'auto', runCommandFn = runC
   };
 
   const commandTimeoutMs =
-    providerKey === 'claude' && String(source || '').toLowerCase() === 'cli'
+    providerKey === 'claude'
       ? Number(process.env.ATC_CLAUDE_CODEXBAR_TIMEOUT_MS || 25000)
       : 12000;
   let raw = await callCodexbar(source, commandTimeoutMs);
@@ -2604,9 +2603,26 @@ function renderPage() {
           if (!usageAutoRefreshInFlight && nowMs - lastKickoffMs >= 1500) {
             providerAutoRefreshAt.set(providerKey, nowMs);
             usageAutoRefreshInFlight = true;
-            refresh().catch(function () {}).finally(function () {
-              usageAutoRefreshInFlight = false;
-            });
+            usageRefreshing.add(providerKey);
+            renderUsageGrid(latestUsage);
+            (async function () {
+              try {
+                try {
+                  await fetch('/api/usage/refresh', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ provider: providerKey, force: false }),
+                  });
+                } catch (_e) {
+                  // ignore, fall through to snapshot refresh
+                }
+                await refresh();
+              } finally {
+                usageAutoRefreshInFlight = false;
+                usageRefreshing.delete(providerKey);
+                renderUsageGrid(latestUsage);
+              }
+            })();
           }
         }
       }
