@@ -273,39 +273,54 @@
       width: 28px;
       height: 28px;
       border-radius: 999px;
-      border: none;
+      border: 2px solid #5a524c;
       padding: 0;
       cursor: pointer;
       color: #ebdbb2;
-      background: conic-gradient(#d79921 calc(var(--refresh-pct, 0) * 1%), #5a524c 0);
+      background: #3c3836;
       display: grid;
       place-items: center;
+      overflow: hidden;
+    }
+    .refresh-ring-btn::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      border-radius: 999px;
+      background: conic-gradient(#d79921 calc(var(--refresh-pct, 0) * 1%), transparent 0);
+      opacity: 0.8;
     }
     .refresh-ring-btn::after {
       content: "";
-      position: absolute;
-      inset: 2px;
-      border-radius: 999px;
-      background: #3c3836;
-      border: 1px solid #5a524c;
-      transition: background 100ms ease-out;
+      display: none;
     }
-    .refresh-ring-btn:hover::after { background: #504945; }
+    .refresh-ring-btn:hover {
+      border-color: #928374;
+      background: #504945;
+    }
     .refresh-icon {
       position: relative;
       z-index: 1;
-      width: 16px;
-      height: 16px;
-      stroke: currentColor;
+      width: 18px;
+      height: 18px;
+    }
+    .refresh-spinner {
+      position: absolute;
+      inset: 2px;
+      width: 24px;
+      height: 24px;
+      display: none;
+      animation: refresh-spin 1.2s linear infinite;
     }
     .refresh-ring-btn.refreshing {
       pointer-events: none;
-      animation: refresh-dial-spin 1.2s linear infinite;
     }
-    .refresh-ring-btn.refreshing::after {
-      animation: refresh-dial-spin 1.2s linear infinite;
-    }
-    @keyframes refresh-dial-spin {
+    .refresh-ring-btn.refreshing .refresh-icon { display: none; }
+    .refresh-ring-btn.refreshing .refresh-spinner { display: block; }
+    @keyframes refresh-spin {
       0% { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
     }
@@ -1361,11 +1376,14 @@
       background: #232526;
       color: #f8f8f2;
     }
-    .refresh-ring-btn::after {
-      background: #232526;
+    .refresh-ring-btn {
       border-color: #49483e;
+      background: #232526;
     }
-    .refresh-ring-btn:hover::after { background: #2e3e40; }
+    .refresh-ring-btn:hover {
+      border-color: #6b6865;
+      background: #2e3e40;
+    }
     .profile-switch-card {
       border-color: #49483e;
       background: linear-gradient(160deg, #293739 0%, #232526 100%);
@@ -1463,6 +1481,9 @@
       border-color: #f92672;
       background: linear-gradient(180deg, #c31f57 0%, #8a1a41 100%);
       color: #fff2f7;
+    }
+    .modal-overlay {
+      background: #081126d8;
     }
     .modal {
       border-color: #49483e;

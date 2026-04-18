@@ -2481,10 +2481,11 @@ function renderPage() {
         metaAttrs +
         ' style="--refresh-pct: 0;" aria-label="Refresh ' + esc(title) + ' usage"' +
         (isRefreshing ? ' disabled' : '') + '>' +
-        '<svg class="refresh-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-          '<path d="M23 4v6h-6"/>' +
-          '<path d="M1 20v-6h6"/>' +
-          '<path d="M3.51 9a9 9 0 0 1 14.85-3.36M20.49 15a9 9 0 0 1-14.85 3.36"/>' +
+        '<svg class="refresh-icon" viewBox="0 0 52 52" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+          '<path d="M46.5,4h-3C42.7,4,42,4.7,42,5.5v7c0,0.9-0.5,1.3-1.2,0.7l0,0c-0.3-0.4-0.6-0.7-1-1c-5-5-12-7.1-19.2-5.7c-2.5,0.5-4.9,1.5-7,2.9c-6.1,4-9.6,10.5-9.7,17.5c-0.1,5.4,2,10.8,5.8,14.7c4,4.2,9.4,6.5,15.2,6.5c5.1,0,9.9-1.8,13.7-5c0.7-0.6,0.7-1.6,0.1-2.2l-2.1-2.1c-0.5-0.5-1.4-0.6-2-0.1c-3.6,3-8.5,4.2-13.4,3c-1.3-0.3-2.6-0.9-3.8-1.6C11.7,36.6,9,30,10.6,23.4c0.3-1.3,0.9-2.6,1.6-3.8C15,14.7,19.9,12,25.1,12c4,0,7.8,1.6,10.6,4.4c0.5,0.4,0.9,0.9,1.2,1.4c0.3,0.8-0.4,1.2-1.3,1.2h-7c-0.8,0-1.5,0.7-1.5,1.5v3.1c0,0.8,0.6,1.4,1.4,1.4h18.3c0.7,0,1.3-0.6,1.3-1.3V5.5C48,4.7,47.3,4,46.5,4z"/>' +
+        '</svg>' +
+        '<svg class="refresh-spinner" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+          '<circle cx="14" cy="14" r="11" stroke="currentColor" stroke-width="2.5" stroke-dasharray="17" stroke-linecap="round" opacity="0.8"/>' +
         '</svg>' +
       '</button>';
     }
