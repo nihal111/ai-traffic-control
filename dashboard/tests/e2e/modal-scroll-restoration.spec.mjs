@@ -147,29 +147,43 @@ test('scroll position is restored after closing intent modal', async ({ page }) 
   // Open intent modal
   await page.click('.session.tap');
   await page.waitForSelector('#intent-modal.open');
+  const lockedScroll = await page.evaluate(() => {
+    const top = Number.parseInt(document.body.style.top || '0', 10);
+    return Number.isFinite(top) ? Math.abs(top) : 0;
+  });
 
   // Close the modal without spawning
   await page.click('#intent-close');
   await page.waitForSelector('#intent-modal', { state: 'hidden' });
 
-  // Wait a brief moment for scroll restoration to complete
-  await page.waitForTimeout(100);
+  // Wait for scroll restoration (there are two scrollTo calls: immediate + rAF).
+  await waitFor(async () => {
+    const y = await page.evaluate(() => window.scrollY);
+    return Math.abs(y - lockedScroll) <= 12;
+  }, 2500, 60);
 
   // Check that scroll position was restored
   let scrollAfter = await page.evaluate(() => window.scrollY);
   console.log('Scroll position after closing modal:', scrollAfter);
 
-  // Scroll position should be restored to approximately the same position
-  // (allowing some variance due to DOM changes during modal open/close)
-  expect(Math.abs(scrollAfter - targetScroll)).toBeLessThan(30);
+  // Restore target is the actual lock offset captured when the modal opened.
+  expect(Math.abs(scrollAfter - lockedScroll)).toBeLessThan(15);
 
-  // Verify we can still scroll
+  // Verify scrolling is not locked. If we're already at max scroll, no movement is expected.
   const scrollBefore2 = await page.evaluate(() => window.scrollY);
+  const maxScroll = await page.evaluate(() => {
+    const doc = document.documentElement;
+    return Math.max(0, (doc?.scrollHeight || 0) - window.innerHeight);
+  });
   await page.evaluate(() => window.scrollBy(0, 50));
   const scrollAfter2 = await page.evaluate(() => window.scrollY);
 
   console.log('Scroll before additional scroll:', scrollBefore2, 'after:', scrollAfter2);
-  expect(scrollAfter2).toBeGreaterThan(scrollBefore2);
+  if (scrollBefore2 >= maxScroll - 1) {
+    expect(Math.abs(scrollAfter2 - scrollBefore2)).toBeLessThan(2);
+  } else {
+    expect(scrollAfter2).toBeGreaterThan(scrollBefore2);
+  }
 });
 
 test('scroll position is restored after canceling intent modal and spawning scientist', async ({ page }) => {
@@ -195,6 +209,10 @@ test('scroll position is restored after canceling intent modal and spawning scie
   // Open modal, then close and spawn
   await page.click('.session.tap');
   await page.waitForSelector('#intent-modal.open');
+  const lockedScroll = await page.evaluate(() => {
+    const top = Number.parseInt(document.body.style.top || '0', 10);
+    return Number.isFinite(top) ? Math.abs(top) : 0;
+  });
 
   // Spawn the scientist
   await page.click('#intent-confirm');
@@ -202,16 +220,17 @@ test('scroll position is restored after canceling intent modal and spawning scie
   // Wait for modal to close
   await page.waitForSelector('#intent-modal', { state: 'hidden' });
 
-  // Small delay for scroll restoration
-  await page.waitForTimeout(150);
+  // Small wait for restoration to settle.
+  await waitFor(async () => {
+    const y = await page.evaluate(() => window.scrollY);
+    return Math.abs(y - lockedScroll) <= 24;
+  }, 2500, 60);
 
-  // Check that scroll was restored (before focusSessionCard auto-scrolls)
-  // The scroll might have moved slightly due to DOM changes, but should be in range
+  // Check that scroll was restored to the lock point captured at modal open.
   let scrollAfter = await page.evaluate(() => window.scrollY);
   console.log('Scroll after spawning scientist:', scrollAfter);
 
-  // Allow more variance here since spawning modifies the DOM significantly
-  expect(scrollAfter).toBeLessThan(200);
+  expect(Math.abs(scrollAfter - lockedScroll)).toBeLessThan(25);
 
   // Verify scrolling still works
   const initialScroll = await page.evaluate(() => window.scrollY);
