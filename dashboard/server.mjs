@@ -26,6 +26,12 @@ import {
   loadUsageRateCacheFromDisk as loadUsageRateCacheFromDiskModule,
   saveUsageRateCacheToDisk,
 } from './modules/usage-cache.mjs';
+import {
+  fetchCodexbarUsage as fetchCodexbarUsageModule,
+  fetchClaudeUsageRateLimited as fetchClaudeUsageRateLimitedModule,
+  fetchProviderUsageRateLimited as fetchProviderUsageRateLimitedModule,
+  fetchProviderUsageOnce as fetchProviderUsageOnceModule,
+} from './modules/provider-usage.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -183,173 +189,39 @@ const HOT_DIAL_AGENTS = [
 ];
 const HOT_DIAL_BY_ID = new Map(HOT_DIAL_AGENTS.filter((agent) => agent.enabled).map((agent) => [agent.id, agent]));
 
-// Usage cache functions imported from modules/usage-cache.mjs
+// Provider usage functions imported from modules/provider-usage.mjs
+// Wrappers delegate to module versions with proper context
+
+async function fetchCodexbarUsage(provider, source = 'auto', runCommandFn = runCommand, options = {}) {
+  return fetchCodexbarUsageModule(provider, source, runCommandFn, options);
+}
 
 async function fetchClaudeUsageRateLimited({ force = false } = {}) {
-  const catalog = readProfilesJson();
-  const activeAlias = String(catalog.active || '').trim();
-  const activeMeta = activeAlias && catalog.profiles ? catalog.profiles[activeAlias] : null;
-  const profileEmail = typeof activeMeta?.email === 'string' && activeMeta.email.trim() ? activeMeta.email.trim() : null;
-  const profileSubscriptionType =
-    typeof activeMeta?.authState?.authStatus?.subscriptionType === 'string' && activeMeta.authState.authStatus.subscriptionType.trim()
-      ? activeMeta.authState.authStatus.subscriptionType.trim()
-      : null;
-  const cachedUsage =
-    activeMeta?.usageCache && typeof activeMeta.usageCache === 'object'
-      ? { ...activeMeta.usageCache }
-      : emptyProfileUsageCache(profileEmail);
-  const lastAttemptIso = cachedUsage.lastAttemptAt || cachedUsage.fetchedAt || null;
-  const lastAttemptMs = lastAttemptIso ? Date.parse(lastAttemptIso) : NaN;
-  const hasRecentAttempt =
-    !force && Number.isFinite(lastAttemptMs) && Date.now() - lastAttemptMs < CLAUDE_USAGE_MIN_INTERVAL_MS;
-  const lastAttemptAtIso = Number.isFinite(lastAttemptMs) ? new Date(lastAttemptMs).toISOString() : null;
-
-  if (hasRecentAttempt) {
-    return {
-      ...cachedUsage,
-      provider: 'claude',
-      source: cachedUsage.source || 'oauth-cache',
-      loading: false,
-      throttled: true,
-      ...(lastAttemptAtIso ? { lastAttemptAt: lastAttemptAtIso } : {}),
-      ...buildClaudeRefreshMeta(lastAttemptMs),
-    };
-  }
-
-  const attemptedAtMs = Date.now();
-  const attemptedAtIso = new Date(attemptedAtMs).toISOString();
-  // Prefer OAuth (profile-scoped via Claude CLI credential) to avoid browser
-  // session churn invalidating saved web session keys across accounts.
-  let live = await fetchCodexbarUsage('claude', 'oauth');
-  if (!live?.ok) {
-    // Secondary fallback: web (may still work if profile's saved sessionKey is valid).
-    const webFallback = await fetchCodexbarUsage('claude', 'web');
-    if (webFallback?.ok) {
-      live = webFallback;
-    } else {
-      // Last fallback: CLI, then enrich reset metadata from web when possible.
-      const cliFallback = await fetchCodexbarUsage('claude', 'cli');
-      if (cliFallback?.ok && (!cliFallback?.primary?.resetsAt || !cliFallback?.secondary?.resetsAt)) {
-        const webForResets = await fetchCodexbarUsage('claude', 'web');
-        if (webForResets?.ok) {
-          live = {
-            ...cliFallback,
-            primary: mergeClaudeUsageWindow(cliFallback.primary, webForResets.primary),
-            secondary: mergeClaudeUsageWindow(cliFallback.secondary, webForResets.secondary),
-            tertiary: mergeClaudeUsageWindow(cliFallback.tertiary, webForResets.tertiary),
-          };
-        } else {
-          live = cliFallback;
-        }
-      } else {
-        live = cliFallback;
-      }
-    }
-  }
-  const resolvedLive =
-    live?.ok && !String(live.plan || '').trim() && profileSubscriptionType
-      ? { ...live, plan: profileSubscriptionType }
-      : live;
-  return {
-    ...resolvedLive,
-    throttled: false,
-    lastAttemptAt: attemptedAtIso,
-    ...buildClaudeRefreshMeta(attemptedAtMs),
-  };
+  return fetchClaudeUsageRateLimitedModule({ runCommandFn: runCommand, providerUsageRateCache }, { force });
 }
 
 async function fetchProviderUsageRateLimited(provider, source, intervalMs) {
-  const providerKey = String(provider || '').toLowerCase();
-  const state = providerUsageRateCache[providerKey];
-  const safeIntervalMs = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 120000;
-  const nowMs = Date.now();
-  const hasRecentAttempt =
-    !!state &&
-    Number.isFinite(state.lastAttemptAtMs) &&
-    state.lastAttemptAtMs > 0 &&
-    nowMs - state.lastAttemptAtMs < safeIntervalMs;
-
-  if (hasRecentAttempt) {
-    const fallbackResult =
-      state.lastResult && typeof state.lastResult === 'object'
-        ? state.lastResult
-        : {
-            ok: false,
-            provider: providerKey,
-            loading: false,
-            error: 'Rate limited: waiting for next refresh window',
-            source: `${source || 'auto'}-cache`,
-          };
-    return {
-      ...fallbackResult,
-      loading: false,
-      throttled: true,
-      source: fallbackResult?.source || `${source || 'auto'}-cache`,
-      ...buildClaudeRefreshMeta(state.lastAttemptAtMs, safeIntervalMs),
-    };
-  }
-
-  const attemptedAtMs = Date.now();
-  if (state) {
-    state.lastAttemptAtMs = attemptedAtMs;
+  const result = await fetchProviderUsageRateLimitedModule(
+    { runCommandFn: runCommand, providerUsageRateCache },
+    provider,
+    source,
+    intervalMs,
+  );
+  // Update the global cache state with the result
+  if (providerUsageRateCache[provider]) {
+    providerUsageRateCache[provider].lastAttemptAtMs = Date.now();
+    providerUsageRateCache[provider].lastResult = result;
     saveUsageRateCacheToDisk(providerUsageRateCache);
   }
-  const live = await fetchCodexbarUsage(providerKey, source);
-
-  if (!state) {
-    return { ...live, throttled: false, ...buildClaudeRefreshMeta(attemptedAtMs, safeIntervalMs) };
-  }
-
-  let merged;
-  if (live?.ok || !state.lastResult) {
-    merged = {
-      ...live,
-      throttled: false,
-      ...buildClaudeRefreshMeta(attemptedAtMs, safeIntervalMs),
-    };
-  } else {
-    merged = {
-      ...state.lastResult,
-      ok: false,
-      loading: false,
-      provider: providerKey,
-      error: live?.error || state.lastResult?.error || 'Usage unavailable',
-      source: live?.source || state.lastResult?.source || source || 'auto',
-      throttled: false,
-      ...buildClaudeRefreshMeta(attemptedAtMs, safeIntervalMs),
-    };
-  }
-
-  state.lastResult = merged;
-  saveUsageRateCacheToDisk(providerUsageRateCache);
-  return merged;
+  return result;
 }
 
 async function fetchProviderUsageOnce(providerKey, { force = false } = {}) {
-  const normalized = String(providerKey || '').toLowerCase();
-  if (!PROVIDERS.has(normalized)) {
-    return { ok: false, provider: normalized, loading: false, error: 'Unknown provider' };
-  }
-
-  const intervalMs =
-    normalized === 'claude'
-      ? CLAUDE_USAGE_MIN_INTERVAL_MS
-      : normalized === 'gemini'
-        ? GEMINI_USAGE_MIN_INTERVAL_MS
-        : CODEX_USAGE_MIN_INTERVAL_MS;
-
-  if (force && providerUsageRateCache[normalized]) {
-    providerUsageRateCache[normalized].lastAttemptAtMs = 0;
+  if (force && providerUsageRateCache[providerKey]) {
+    providerUsageRateCache[providerKey].lastAttemptAtMs = 0;
     saveUsageRateCacheToDisk(providerUsageRateCache);
   }
-
-  if (normalized === 'claude') {
-    return decorateUsageWindows(await fetchClaudeUsageRateLimited({ force }), ['5-hour', 'weekly']);
-  }
-  if (normalized === 'gemini') {
-    return decorateUsageWindows(await fetchProviderUsageRateLimited('gemini', 'auto', intervalMs), ['24h primary', '24h secondary']);
-  }
-  return decorateUsageWindows(await fetchProviderUsageRateLimited('codex', 'cli', intervalMs), ['5-hour', 'weekly']);
+  return fetchProviderUsageOnceModule({ runCommandFn: runCommand, providerUsageRateCache }, providerKey, { force });
 }
 
 async function refreshSingleProviderInBackground(providerKey, { force = false } = {}) {
@@ -667,84 +539,7 @@ function parseWindow(windowValue, fallbackMinutes = null) {
   };
 }
 
-async function fetchCodexbarUsage(provider, source = 'auto', runCommandFn = runCommand, options = {}) {
-  if (DISABLE_CODEX_BAR) {
-    return { ok: false, error: 'Codex Bar disabled', provider };
-  }
-
-  const parseResult = (raw) => {
-    let parsed = null;
-    if (raw?.stdout && String(raw.stdout).trim()) {
-      try {
-        parsed = JSON.parse(raw.stdout);
-      } catch {
-        parsed = null;
-      }
-    }
-
-    const root = Array.isArray(parsed) ? parsed[0] : parsed;
-    if (root && typeof root === 'object') {
-      if (root.error) return { ok: false, error: root.error.message || 'provider error', provider };
-
-      const usage = root.usage || null;
-      const dashboard = root.openaiDashboard || null;
-      const primary = usage?.primary || dashboard?.primaryLimit || null;
-      const secondary = usage?.secondary || dashboard?.secondaryLimit || null;
-      return {
-        ok: true,
-        provider: (provider || '').toLowerCase(),
-        source: root.source || source || 'auto',
-        plan: usage?.loginMethod || dashboard?.accountPlan || null,
-        accountEmail: usage?.accountEmail || null,
-        accountOrganization: usage?.accountOrganization || null,
-        primary: parseWindow(primary),
-        secondary: parseWindow(secondary),
-        updatedAt: usage?.updatedAt || null,
-        fetchedAt: new Date().toISOString(),
-      };
-    }
-
-    if (!raw?.ok) return { ok: false, error: raw?.stderr || 'codexbar usage failed', provider };
-    return { ok: false, error: 'codexbar returned empty payload', provider };
-  };
-
-  const shouldAttemptGeminiRefresh = (errorMessage) => {
-    if (String(provider || '').toLowerCase() !== 'gemini') return false;
-    const msg = String(errorMessage || '').toLowerCase();
-    return (
-      msg.includes('could not extract oauth credentials from gemini cli') ||
-      msg.includes('could not find gemini cli oauth configuration')
-    );
-  };
-
-  const providerKey = String(provider || '').toLowerCase();
-  const accountLabel = typeof options?.account === 'string' && options.account.trim() ? options.account.trim() : null;
-  const callCodexbar = async (selectedSource, timeoutMs) => {
-    const args = ['usage', '--provider', provider, '--format', 'json'];
-    if (selectedSource) args.push('--source', selectedSource);
-    if (accountLabel && providerKey === 'claude') args.push('--account', accountLabel);
-    return runCommandFn('codexbar', args, timeoutMs);
-  };
-
-  const commandTimeoutMs =
-    providerKey === 'claude'
-      ? Number(process.env.ATC_CLAUDE_CODEXBAR_TIMEOUT_MS || 25000)
-      : 12000;
-  let raw = await callCodexbar(source, commandTimeoutMs);
-  let result = parseResult(raw);
-
-  if (shouldAttemptGeminiRefresh(result.error)) {
-    // Gemini CLI refreshes ~/.gemini/oauth_creds.json when invoked.
-    const refresh = await runCommandFn('gemini', ['-p', 'ok', '--output-format', 'json'], 25000);
-    if (refresh.ok) {
-      const retriedRaw = await callCodexbar(source, commandTimeoutMs);
-      result = parseResult(retriedRaw);
-      if (result.ok) return { ...result, recoveredViaGeminiRefresh: true };
-    }
-  }
-
-  return result;
-}
+// fetchCodexbarUsage wrapper imported from modules/provider-usage.mjs
 
 function decorateUsageWindows(payload, labels) {
   if (!payload?.ok) return payload;
