@@ -7,6 +7,25 @@ import { spawn } from 'node:child_process';
 import net from 'node:net';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import {
+  readProfilesJson,
+  writeProfilesJson,
+  emptyProfileUsageCache,
+  getActiveProfile,
+  getActiveProfileEmail,
+  getProfileEmailByAlias,
+  PROFILES_DIR,
+  PROFILES_JSON,
+} from './modules/profile-catalog.mjs';
+import {
+  buildClaudeRefreshMeta,
+  mergeClaudeUsageWindow,
+  defaultProviderRateState,
+  normalizeProviderRateState,
+  readUsageRateCacheFile,
+  loadUsageRateCacheFromDisk as loadUsageRateCacheFromDiskModule,
+  saveUsageRateCacheToDisk,
+} from './modules/usage-cache.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,8 +38,6 @@ const RUN_DIR = process.env.SESSIONS_RUN_DIR || path.join(__dirname, 'run');
 const RUNTIME_DIR = process.env.SESSIONS_RUNTIME_DIR || path.join(__dirname, 'runtime');
 const REPO_ROOT = path.join(__dirname, '..');
 const PERSONAS_DIR = path.join(REPO_ROOT, 'personas');
-const PROFILES_DIR = path.join(process.env.HOME || '', '.claude-profiles');
-const PROFILES_JSON = path.join(PROFILES_DIR, 'profiles.json');
 const TTYD_BIN = process.env.TTYD_BIN || '/opt/homebrew/bin/ttyd';
 const SHELL_BIN = process.env.SHELL_BIN || '/bin/zsh';
 const TMUX_BIN = process.env.TMUX_BIN || 'tmux';
@@ -166,126 +183,7 @@ const HOT_DIAL_AGENTS = [
 ];
 const HOT_DIAL_BY_ID = new Map(HOT_DIAL_AGENTS.filter((agent) => agent.enabled).map((agent) => [agent.id, agent]));
 
-// ── Profile management (Claude multi-account switching) ────────────────────
-
-function readProfilesJson() {
-  let mutated = false;
-  try {
-    const text = fsSync.readFileSync(PROFILES_JSON, 'utf8');
-    const parsed = JSON.parse(text);
-    const catalog = parsed && typeof parsed === 'object' ? parsed : { version: 1, active: null, profiles: {} };
-    if (!catalog.version) {
-      catalog.version = 1;
-      mutated = true;
-    }
-    if (!catalog.profiles || typeof catalog.profiles !== 'object') {
-      catalog.profiles = {};
-      mutated = true;
-    }
-    for (const [alias, meta] of Object.entries(catalog.profiles)) {
-      if (!meta || typeof meta !== 'object') {
-        catalog.profiles[alias] = {
-          displayName: alias,
-          usageCache: emptyProfileUsageCache(null),
-        };
-        mutated = true;
-        continue;
-      }
-      if (!meta.displayName) {
-        meta.displayName = alias;
-        mutated = true;
-      }
-      if (!meta.usageCache || typeof meta.usageCache !== 'object') {
-        meta.usageCache = emptyProfileUsageCache(meta.email || null);
-        mutated = true;
-      }
-    }
-    if (mutated) writeProfilesJson(catalog);
-    return catalog;
-  } catch {
-    return { version: 1, active: null, profiles: {} };
-  }
-}
-
-function writeProfilesJson(catalog) {
-  try {
-    fsSync.mkdirSync(PROFILES_DIR, { recursive: true });
-    fsSync.writeFileSync(PROFILES_JSON, JSON.stringify(catalog, null, 2) + '\n', 'utf8');
-  } catch {
-    // best effort only
-  }
-}
-
-function emptyProfileUsageCache(email = null) {
-  const safeEmail = typeof email === 'string' && email.trim() ? email.trim() : null;
-  return {
-    ok: false,
-    placeholder: true,
-    error: 'n/a',
-    fetchedAt: null,
-    plan: 'n/a',
-    accountEmail: safeEmail,
-    primary: null,
-    secondary: null,
-  };
-}
-
-function getActiveProfile() {
-  const catalog = readProfilesJson();
-  return catalog.active || null;
-}
-
-function getActiveProfileEmail() {
-  const catalog = readProfilesJson();
-  const activeAlias = catalog.active || null;
-  if (!activeAlias) return null;
-  const email = catalog.profiles?.[activeAlias]?.email;
-  return typeof email === 'string' && email.trim() ? email.trim() : null;
-}
-
-function getProfileEmailByAlias(alias) {
-  const target = String(alias || '').trim();
-  if (!target) return null;
-  const catalog = readProfilesJson();
-  const email = catalog.profiles?.[target]?.email;
-  return typeof email === 'string' && email.trim() ? email.trim() : null;
-}
-
-function buildClaudeRefreshMeta(lastAttemptMs, intervalMs = CLAUDE_USAGE_MIN_INTERVAL_MS) {
-  const safeLastAttemptMs = Number.isFinite(lastAttemptMs) ? lastAttemptMs : Date.now();
-  const safeIntervalMs = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : CLAUDE_USAGE_MIN_INTERVAL_MS;
-  const nextRefreshAtMs = safeLastAttemptMs + safeIntervalMs;
-  const remainingMs = Math.max(0, nextRefreshAtMs - Date.now());
-  return {
-    refreshIntervalMs: safeIntervalMs,
-    nextRefreshAt: new Date(nextRefreshAtMs).toISOString(),
-    nextRefreshInSec: Math.ceil(remainingMs / 1000),
-  };
-}
-
-function mergeClaudeUsageWindow(primaryWindow, fallbackWindow) {
-  if (!primaryWindow && !fallbackWindow) return null;
-  const base = primaryWindow && typeof primaryWindow === 'object' ? primaryWindow : {};
-  const fallback = fallbackWindow && typeof fallbackWindow === 'object' ? fallbackWindow : {};
-  return {
-    ...fallback,
-    ...base,
-    // Keep CLI-derived consumption as authoritative when available.
-    usedPercent: Number.isFinite(Number(base.usedPercent))
-      ? Number(base.usedPercent)
-      : Number.isFinite(Number(fallback.usedPercent))
-        ? Number(fallback.usedPercent)
-        : 0,
-    // Backfill reset metadata when CLI omits it.
-    resetsAt: base.resetsAt || fallback.resetsAt || null,
-    resetDescription: base.resetDescription || fallback.resetDescription || null,
-    windowMinutes: Number.isFinite(Number(base.windowMinutes))
-      ? Number(base.windowMinutes)
-      : Number.isFinite(Number(fallback.windowMinutes))
-        ? Number(fallback.windowMinutes)
-        : null,
-  };
-}
+// Usage cache functions imported from modules/usage-cache.mjs
 
 async function fetchClaudeUsageRateLimited({ force = false } = {}) {
   const catalog = readProfilesJson();
@@ -394,7 +292,7 @@ async function fetchProviderUsageRateLimited(provider, source, intervalMs) {
   const attemptedAtMs = Date.now();
   if (state) {
     state.lastAttemptAtMs = attemptedAtMs;
-    saveUsageRateCacheToDisk();
+    saveUsageRateCacheToDisk(providerUsageRateCache);
   }
   const live = await fetchCodexbarUsage(providerKey, source);
 
@@ -423,7 +321,7 @@ async function fetchProviderUsageRateLimited(provider, source, intervalMs) {
   }
 
   state.lastResult = merged;
-  saveUsageRateCacheToDisk();
+  saveUsageRateCacheToDisk(providerUsageRateCache);
   return merged;
 }
 
@@ -442,7 +340,7 @@ async function fetchProviderUsageOnce(providerKey, { force = false } = {}) {
 
   if (force && providerUsageRateCache[normalized]) {
     providerUsageRateCache[normalized].lastAttemptAtMs = 0;
-    saveUsageRateCacheToDisk();
+    saveUsageRateCacheToDisk(providerUsageRateCache);
   }
 
   if (normalized === 'claude') {
@@ -529,53 +427,14 @@ function saveActiveProfileUsageCache(claudeUsageValue) {
 
 let usageCache = { value: null, fetchedAt: 0, pending: null };
 
-function defaultProviderRateState() {
-  return { lastAttemptAtMs: 0, lastResult: null };
-}
-
-function normalizeProviderRateState(entry) {
-  if (!entry || typeof entry !== 'object') return defaultProviderRateState();
-  const lastAttemptAtMs = Number(entry.lastAttemptAtMs);
-  const lastResult = entry.lastResult && typeof entry.lastResult === 'object' ? entry.lastResult : null;
-  return {
-    lastAttemptAtMs: Number.isFinite(lastAttemptAtMs) && lastAttemptAtMs > 0 ? lastAttemptAtMs : 0,
-    lastResult,
-  };
-}
-
 let providerUsageRateCache = {
   codex: defaultProviderRateState(),
   gemini: defaultProviderRateState(),
 };
 
-function readUsageRateCacheFile() {
-  try {
-    const raw = fsSync.readFileSync(USAGE_RATE_CACHE_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return {};
-    return parsed;
-  } catch {
-    return {};
-  }
-}
-
+// saveUsageRateCacheToDisk and cache loading functions imported from modules/usage-cache.mjs
 function loadUsageRateCacheFromDisk() {
-  const parsed = readUsageRateCacheFile();
-  providerUsageRateCache = {
-    codex: normalizeProviderRateState(parsed.codex),
-    gemini: normalizeProviderRateState(parsed.gemini),
-  };
-}
-
-function saveUsageRateCacheToDisk() {
-  const payload = {
-    codex: normalizeProviderRateState(providerUsageRateCache.codex),
-    gemini: normalizeProviderRateState(providerUsageRateCache.gemini),
-  };
-  try {
-    fsSync.mkdirSync(path.dirname(USAGE_RATE_CACHE_FILE), { recursive: true });
-    fsSync.writeFileSync(USAGE_RATE_CACHE_FILE, JSON.stringify(payload, null, 2), 'utf8');
-  } catch {}
+  providerUsageRateCache = loadUsageRateCacheFromDiskModule();
 }
 
 function runCommand(cmd, args, timeoutMs = 12000) {
