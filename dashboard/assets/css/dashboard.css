@@ -1362,12 +1362,18 @@
     .usage-row,
     .provider-select-card,
     .template-btn,
-    .persona-card {
+    .persona-select-card,
+    .intent-scientist,
+    .workdir-row,
+    .recent-workdirs,
+    .recent-workdir-btn {
       border-color: #49483e;
       background: linear-gradient(160deg, #293739 0%, #232526 100%);
+      color: #f8f8f2;
     }
     .switch-btn,
-    .selector-nav {
+    .selector-nav,
+    .modal-close {
       border-color: #49483e;
       background: #232526;
       color: #f8f8f2;
@@ -1396,9 +1402,14 @@
     .win-bar-fill {
       background: linear-gradient(90deg, #a6e22e 0%, #a6e22e 70%, #e6db74 84%, #fd971f 94%, #f92672 100%);
     }
-    .card-plan {
+    .card-plan,
+    .intent-label,
+    .provider-select-plan,
+    .template-subtitle,
+    .persona-select-desc,
+    .recent-workdirs-label,
+    .persona-note {
       color: #7e8e91;
-      border-color: #49483e;
     }
     .card-alias {
       color: #e6db74;
@@ -1413,6 +1424,10 @@
     .agent-description {
       border-color: #49483e;
       background: linear-gradient(150deg, #293739 0%, #232526 100%);
+      color: #f8f8f2;
+    }
+    .agent-dial-icon,
+    .agent-card-icon {
       color: #f8f8f2;
     }
     .agent-prompt-input {
@@ -1431,6 +1446,22 @@
     .session {
       border-color: #49483e;
       background: linear-gradient(135deg, #293739 0%, #232526 100%);
+    }
+    .session-media {
+      background: radial-gradient(circle at 35% 20%, #3e3d32, #1b1d1e 72%);
+      border-right-color: #49483e;
+    }
+    .session-media-fallback,
+    .intent-scientist-fallback {
+      background: radial-gradient(circle at 30% 25%, #49483e 0%, #232526 45%, #1b1d1e 100%);
+      color: #f8f8f2;
+    }
+    .session.tap:hover {
+      border-color: #fd971f;
+      box-shadow: 0 0 0 1px #fd971f22 inset;
+    }
+    .session::before {
+      background: linear-gradient(90deg, #0000 0%, #fd971f24 50%, #0000 100%);
     }
     .line { color: #f8f8f2; }
     .line.muted,
@@ -1476,14 +1507,34 @@
       color: #fff2f7;
     }
     .modal-overlay {
-      background: #081126d8;
+      background: rgba(27, 29, 30, 0.92);
     }
     .modal {
       border-color: #49483e;
-      background: linear-gradient(180deg, #182535 0%, #0f1921 100%);
+      background: linear-gradient(180deg, #232526 0%, #1b1d1e 100%);
       box-shadow: 0 22px 44px #00000066;
     }
     .modal-title { color: #f8f8f2; }
+    .provider-carousel,
+    .persona-carousel {
+      border-color: #49483e;
+    }
+    .persona-select-card.active,
+    .template-btn.active,
+    .recent-workdir-btn.active {
+      border-color: #fd971f;
+      background: #2e3e40;
+      box-shadow: 0 0 0 1px #fd971f33 inset;
+    }
+    .intent-scientist-overlay {
+      background: linear-gradient(180deg, #0000 0%, #1b1d1ee6 100%);
+      color: #f8f8f2;
+    }
+    .picker-item:hover {
+      border-color: #fd971f;
+      background: #2e3e40;
+    }
+
 
     @media (max-width: 640px) {
       body { padding: 12px; }
