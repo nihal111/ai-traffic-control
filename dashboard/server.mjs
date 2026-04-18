@@ -35,7 +35,7 @@ const USER_ZSHRC_PATH = process.env.ATC_USER_ZSHRC || path.join(process.env.HOME
 const USER_HISTORY_FILE = process.env.ATC_USER_HISTORY_FILE || path.join(process.env.HOME || '', '.zsh_history');
 const REFRESH_MS = 8000;
 const USAGE_TTL_MS = 10000;
-const CLAUDE_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_CLAUDE_USAGE_MIN_INTERVAL_MS || 120000);
+const CLAUDE_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_CLAUDE_USAGE_MIN_INTERVAL_MS || 600000);
 const CODEX_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_CODEX_USAGE_MIN_INTERVAL_MS || 120000);
 const GEMINI_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_GEMINI_USAGE_MIN_INTERVAL_MS || 120000);
 const TELEMETRY_INGEST_MS = Number(process.env.TELEMETRY_INGEST_MS || 2000);
@@ -751,7 +751,7 @@ async function fetchCodexbarUsage(provider, source = 'auto', runCommandFn = runC
     return runCommandFn('codexbar', args, timeoutMs);
   };
 
-  const commandTimeoutMs = providerKey === 'claude' && source === 'cli' ? 12000 : 12000;
+  const commandTimeoutMs = 12000;
   let raw = await callCodexbar(source, commandTimeoutMs);
   let result = parseResult(raw);
 
@@ -2422,11 +2422,10 @@ function renderPage() {
           '<div class="provider">' +
             '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="78" height="78" />' +
             '<div class="provider-name-wrap">' +
-              '<div class="provider-header"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Loading)</span></div>' + actions + '</div>' +
+              '<div class="provider-header"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Loading)</span>' + buildRefreshMeta() + '</div>' + actions + '</div>' +
               '<div class="provider-plan-block">Loading</div>' +
             '</div>' +
           '</div>' +
-          buildRefreshMeta() +
           '<div class="usage-loading"><span class="usage-spinner" aria-hidden="true"></span><span>Loading usage…</span></div>' +
         '</article>';
       }
@@ -2435,11 +2434,10 @@ function renderPage() {
           '<div class="provider">' +
             '<img class="provider-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="78" height="78" />' +
             '<div class="provider-name-wrap">' +
-              '<div class="provider-header"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Unavailable)</span></div>' + actions + '</div>' +
+              '<div class="provider-header"><div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(Unavailable)</span>' + buildRefreshMeta() + '</div>' + actions + '</div>' +
               '<div class="provider-plan-block">Unavailable</div>' +
             '</div>' +
           '</div>' +
-          buildRefreshMeta() +
           '<div class="usage-error">' + esc(payload?.error || 'Usage unavailable') + '</div>' +
         '</article>';
       }
@@ -2458,6 +2456,7 @@ function renderPage() {
             '<div class="provider-header">' +
               '<div class="provider-name">' + esc(title) + ' <span class="provider-plan-inline">(' + esc(plan) + ')</span>' +
               (hasProfiles && shownActiveProfile ? ' <span class="profile-alias">[' + esc(shownActiveProfile) + ']</span>' : '') +
+              buildRefreshMeta() +
               '</div>' +
               actions +
             '</div>' +
@@ -2469,7 +2468,6 @@ function renderPage() {
           '</div>' +
         '</div>' +
         (isProfileSwitching ? '<div class="usage-switching-note"><span class="usage-spinner" aria-hidden="true"></span><span>Switching to ' + esc(claudeSwitchingAlias) + '...</span></div>' : '') +
-        buildRefreshMeta() +
         '<div class="usage-details">' +
           (accountEmail ? '<div class="usage-email">Account: ' + esc(accountEmail) + '</div>' : '') +
           '<div class="windows">' +
@@ -3720,18 +3718,21 @@ function renderPage() {
       }
     }
 
-    async function refresh() {
+    async function refresh(options = {}) {
+      const includeUsage = Object.prototype.hasOwnProperty.call(options, 'usage') ? !!options.usage : true;
       const sessionsTask = fetch('/api/sessions', { cache: 'no-store' })
         .then(function (resp) { return resp.json(); })
         .then(function (payload) { renderSessions(payload || {}); })
         .catch(function () {});
 
-      const usageTask = fetch('/api/usage', { cache: 'no-store' })
-        .then(function (resp) { return resp.json(); })
-        .then(function (usage) { renderUsageGrid(usage || {}); })
-        .catch(function () {
-          renderUsageGrid(latestUsage);
-        });
+      const usageTask = includeUsage
+        ? fetch('/api/usage', { cache: 'no-store' })
+            .then(function (resp) { return resp.json(); })
+            .then(function (usage) { renderUsageGrid(usage || {}); })
+            .catch(function () {
+              renderUsageGrid(latestUsage);
+            })
+        : Promise.resolve();
 
       const profilesTask = fetch('/api/profiles', { cache: 'no-store' })
         .then(function (resp) { return resp.json(); })
@@ -3752,7 +3753,7 @@ function renderPage() {
     bindSessionInteractions();
     renderHotDials();
     refresh();
-    setInterval(refresh, ${REFRESH_MS});
+    setInterval(function () { refresh({ usage: false }); }, ${REFRESH_MS});
   </script>
 </body>
 </html>`;

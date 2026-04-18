@@ -47,11 +47,39 @@ function writeJsonAtomic(filePath, payload) {
 }
 
 function loadCatalog() {
-  return readJson(PROFILES_JSON, { version: 1, active: null, profiles: {} });
+  const catalog = readJson(PROFILES_JSON, { version: 1, active: null, profiles: {} });
+  if (!catalog || typeof catalog !== 'object') return { version: 1, active: null, profiles: {} };
+  if (!catalog.version) catalog.version = 1;
+  if (!catalog.profiles || typeof catalog.profiles !== 'object') catalog.profiles = {};
+  for (const [alias, meta] of Object.entries(catalog.profiles)) {
+    if (!meta || typeof meta !== 'object') {
+      catalog.profiles[alias] = { displayName: alias, usageCache: placeholderUsageCache(null) };
+      continue;
+    }
+    if (!meta.displayName) meta.displayName = alias;
+    if (!meta.usageCache || typeof meta.usageCache !== 'object') {
+      meta.usageCache = placeholderUsageCache(meta.email || null);
+    }
+  }
+  return catalog;
 }
 
 function saveCatalog(catalog) {
   writeJsonAtomic(PROFILES_JSON, catalog);
+}
+
+function placeholderUsageCache(email) {
+  const safeEmail = typeof email === 'string' && email.trim() ? email.trim() : null;
+  return {
+    ok: false,
+    placeholder: true,
+    error: 'n/a',
+    fetchedAt: null,
+    plan: 'n/a',
+    accountEmail: safeEmail,
+    primary: null,
+    secondary: null,
+  };
 }
 
 // ── keychain helpers ──────────────────────────────────────────────────────────
@@ -146,6 +174,7 @@ function cmdAdd(alias, email) {
   catalog.profiles[alias] = {
     displayName: alias,
     ...(email ? { email } : {}),
+    usageCache: placeholderUsageCache(email || null),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -263,6 +292,27 @@ function cmdRemove(alias) {
   console.log(`✓ Profile "${alias}" removed.`);
 }
 
+function cmdWipe(confirmYes) {
+  if (!confirmYes) {
+    die('Refusing to wipe credentials without --yes.\nUsage: atc-profile wipe --yes');
+  }
+
+  // Delete the active Claude OAuth credential in macOS Keychain.
+  keychainDelete();
+
+  // Remove saved profile credentials and catalog.
+  if (fs.existsSync(PROFILES_DIR)) {
+    for (const entry of fs.readdirSync(PROFILES_DIR)) {
+      const full = path.join(PROFILES_DIR, entry);
+      // Keep directory removal simple and explicit.
+      fs.rmSync(full, { recursive: true, force: true });
+    }
+  }
+
+  console.log('✓ Wiped Claude Keychain credential and all saved atc-profile credentials.');
+  console.log('  Next step: run claude, then /login, then atc-profile add <alias> [--email ...].');
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 function die(msg) {
@@ -273,17 +323,19 @@ function die(msg) {
 const [,, command, ...rest] = process.argv;
 // Parse --email flag from remaining args
 function parseArgs(args) {
-  const result = { positional: [], email: null };
+  const result = { positional: [], email: null, yes: false };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--email' && args[i + 1]) {
       result.email = args[++i];
+    } else if (args[i] === '--yes') {
+      result.yes = true;
     } else {
       result.positional.push(args[i]);
     }
   }
   return result;
 }
-const { positional, email: flagEmail } = parseArgs(rest);
+const { positional, email: flagEmail, yes: confirmYes } = parseArgs(rest);
 const arg = positional[0];
 switch (command) {
   case 'add':     cmdAdd(arg, flagEmail); break;
@@ -291,6 +343,7 @@ switch (command) {
   case 'current': cmdCurrent(); break;
   case 'use':     cmdUse(arg); break;
   case 'remove':  cmdRemove(arg); break;
+  case 'wipe':    cmdWipe(confirmYes); break;
   default:
     console.error(`atc-profile — Claude account profile manager
 
@@ -300,6 +353,7 @@ Commands:
   current         print the active profile alias
   use <alias>     switch to a different profile
   remove <alias>  delete a profile (cannot remove the active profile)
+  wipe --yes      delete Claude Keychain cred + all saved atc-profile creds/catalog
 `);
     process.exit(command ? 1 : 0);
 }

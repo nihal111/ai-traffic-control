@@ -211,11 +211,24 @@ test('hot dial auto-scrolls and flickers the deterministic selected scientist', 
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.click('[data-agent-dial-id="calendar_manager"]');
   await page.waitForSelector('#agent-modal.open');
+  const calendarPlaceholder = await page.getAttribute('#agent-initial-prompt', 'placeholder');
+  expect(String(calendarPlaceholder || '')).toContain('invite teammate.one@example.com');
+
+  const promptText =
+    'Create a 30-minute meeting titled "ATC sync" tomorrow at 3:00 PM PT, invite teammate.one@example.com, and add it to my calendar.';
+  await page.fill('#agent-initial-prompt', promptText);
+
   const spawnResponsePromise = page.waitForResponse((resp) =>
     resp.url().includes('/api/agents/spawn') && resp.request().method() === 'POST'
   );
+  const spawnRequestPromise = page.waitForRequest((req) =>
+    req.url().includes('/api/agents/spawn') && req.method() === 'POST'
+  );
   await page.click('#agent-confirm');
+  const spawnRequest = await spawnRequestPromise;
   const spawnResponse = await spawnResponsePromise;
+  const spawnRequestBody = spawnRequest.postDataJSON();
+  expect(spawnRequestBody.initialPrompt).toBe(promptText);
   const spawnBody = await spawnResponse.json();
   expect(spawnBody.slotName).toBe('Delta');
 
@@ -243,4 +256,13 @@ test('hot dial auto-scrolls and flickers the deterministic selected scientist', 
   const alpha = spawningByName.find((x) => x.name === 'Alpha') || {};
   expect(delta.active).toBe('1');
   expect(alpha.active).toBe('1');
+});
+
+test('second brain modal shows retrieval-oriented optional prompt example', async ({ page }) => {
+  await page.goto(`http://127.0.0.1:${DASHBOARD_PORT}`);
+  await page.click('[data-agent-dial-id="second_brain"]');
+  await page.waitForSelector('#agent-modal.open');
+  const secondBrainPlaceholder = await page.getAttribute('#agent-initial-prompt', 'placeholder');
+  expect(String(secondBrainPlaceholder || '')).toContain('create a new Obsidian note');
+  await page.click('#agent-cancel');
 });
