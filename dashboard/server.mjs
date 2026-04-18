@@ -296,7 +296,8 @@ async function fetchClaudeUsageRateLimited({ force = false } = {}) {
 
   const attemptedAtMs = Date.now();
   const attemptedAtIso = new Date(attemptedAtMs).toISOString();
-  const live = await fetchCodexbarUsage('claude', null);
+  // Claude profile switching must read CLI-scoped usage so account changes are reflected.
+  const live = await fetchCodexbarUsage('claude', 'cli');
   const resolvedLive =
     live?.ok && !String(live.plan || '').trim() && profileSubscriptionType
       ? { ...live, plan: profileSubscriptionType }
