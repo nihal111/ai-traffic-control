@@ -32,6 +32,7 @@ import {
   fetchProviderUsageRateLimited as fetchProviderUsageRateLimitedModule,
   fetchProviderUsageOnce as fetchProviderUsageOnceModule,
 } from './modules/provider-usage.mjs';
+import { pollUsageUntilProfileActive } from './modules/profile-polling.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2417,44 +2418,36 @@ function renderPage() {
           renderProfileSwitchModal();
           return;
         }
-        let attempts = 0;
-        const maxAttempts = 80;
-        function pollUsage() {
-          if (attempts >= maxAttempts) {
-            claudeSwitchingAlias = '';
-            renderProfileSwitchModal();
-            refresh().catch(() => {});
-            return;
-          }
-          fetch('/api/usage').then(r => r.json()).then(usage => {
+        await pollUsageUntilProfileActive({
+          targetAlias: alias,
+          switchStartedAt,
+          maxAttempts: 80,
+          pollIntervalMs: 200,
+          wallClockTimeoutMs: 16000,
+          fetchUsageUrl: '/api/usage',
+          fetchProfilesUrl: '/api/profiles',
+          onUsageUpdate: function (usage) {
             if (claudeSwitchingAlias && usage && typeof usage === 'object') {
               for (const key of ['codex', 'gemini']) {
                 if (usage[key]?.loading && latestUsage?.[key]) usage[key] = latestUsage[key];
               }
             }
-            const fetchedAtMs = usage && usage.fetchedAt ? Date.parse(usage.fetchedAt) : NaN;
-            const isFresh = Number.isFinite(fetchedAtMs) && fetchedAtMs > switchStartedAt;
-            if (usage.activeProfile === alias && usage.claude && !usage.claude.loading && (isFresh || usage.claude.throttled)) {
-              claudeSwitchingAlias = '';
-              renderUsageGrid(usage || {});
-              fetch('/api/profiles', { cache: 'no-store' })
-                .then(function (r) { return r.json(); })
-                .then(function (payload) {
-                  if (payload && Array.isArray(payload.profiles)) latestProfiles = payload.profiles;
-                  renderProfileSwitchModal();
-                })
-                .catch(function () {});
-              closeProfileSwitchModal();
-            } else {
-              attempts++;
-              setTimeout(pollUsage, 200);
+          },
+          onComplete: function (data) {
+            claudeSwitchingAlias = '';
+            renderUsageGrid(data.usage || {});
+            if (data.profiles && Array.isArray(data.profiles)) {
+              latestProfiles = data.profiles;
             }
-          }).catch(() => {
-            attempts++;
-            setTimeout(pollUsage, 200);
-          });
-        }
-        pollUsage();
+            renderProfileSwitchModal();
+            closeProfileSwitchModal();
+          },
+          onTimeout: function () {
+            claudeSwitchingAlias = '';
+            renderProfileSwitchModal();
+            refresh().catch(() => {});
+          },
+        });
       } catch (error) {
         claudeSwitchingAlias = '';
         renderUsageGrid(latestUsage);
