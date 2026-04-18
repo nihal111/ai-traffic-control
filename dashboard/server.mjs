@@ -320,17 +320,24 @@ async function fetchClaudeUsageRateLimited({ force = false } = {}) {
 
   const attemptedAtMs = Date.now();
   const attemptedAtIso = new Date(attemptedAtMs).toISOString();
-  // Claude profile switching must read CLI-scoped usage so account changes are reflected.
-  let live = await fetchCodexbarUsage('claude', 'cli');
-  if (live?.ok && (!live?.primary?.resetsAt || !live?.secondary?.resetsAt)) {
-    const webFallback = await fetchCodexbarUsage('claude', 'web');
-    if (webFallback?.ok) {
-      live = {
-        ...live,
-        primary: mergeClaudeUsageWindow(live.primary, webFallback.primary),
-        secondary: mergeClaudeUsageWindow(live.secondary, webFallback.secondary),
-        tertiary: mergeClaudeUsageWindow(live.tertiary, webFallback.tertiary),
-      };
+  // Account-scoped web usage should be authoritative for profile switching.
+  let live = await fetchCodexbarUsage('claude', 'web');
+  if (!live?.ok) {
+    const cliFallback = await fetchCodexbarUsage('claude', 'cli');
+    if (cliFallback?.ok && (!cliFallback?.primary?.resetsAt || !cliFallback?.secondary?.resetsAt)) {
+      const webFallback = await fetchCodexbarUsage('claude', 'web');
+      if (webFallback?.ok) {
+        live = {
+          ...cliFallback,
+          primary: mergeClaudeUsageWindow(cliFallback.primary, webFallback.primary),
+          secondary: mergeClaudeUsageWindow(cliFallback.secondary, webFallback.secondary),
+          tertiary: mergeClaudeUsageWindow(cliFallback.tertiary, webFallback.tertiary),
+        };
+      } else {
+        live = cliFallback;
+      }
+    } else {
+      live = cliFallback;
     }
   }
   const resolvedLive =
@@ -793,7 +800,7 @@ function parseWindow(windowValue, fallbackMinutes = null) {
   };
 }
 
-async function fetchCodexbarUsage(provider, source = 'auto', runCommandFn = runCommand) {
+async function fetchCodexbarUsage(provider, source = 'auto', runCommandFn = runCommand, options = {}) {
   if (DISABLE_CODEX_BAR) {
     return { ok: false, error: 'Codex Bar disabled', provider };
   }
@@ -844,9 +851,11 @@ async function fetchCodexbarUsage(provider, source = 'auto', runCommandFn = runC
   };
 
   const providerKey = String(provider || '').toLowerCase();
+  const accountLabel = typeof options?.account === 'string' && options.account.trim() ? options.account.trim() : null;
   const callCodexbar = async (selectedSource, timeoutMs) => {
     const args = ['usage', '--provider', provider, '--format', 'json'];
     if (selectedSource) args.push('--source', selectedSource);
+    if (accountLabel && providerKey === 'claude') args.push('--account', accountLabel);
     return runCommandFn('codexbar', args, timeoutMs);
   };
 

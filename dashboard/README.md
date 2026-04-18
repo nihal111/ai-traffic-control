@@ -153,14 +153,14 @@ claude /login
 Then register it under an alias:
 
 ```bash
-node dashboard/scripts/atc-profile.mjs add primary --email you@example.com
+node dashboard/scripts/atc-profile.mjs add primary
 ```
 
 Repeat for each account:
 
 ```bash
 claude /login    # log into a different Claude account
-node dashboard/scripts/atc-profile.mjs add secondary --email other@example.com
+node dashboard/scripts/atc-profile.mjs add secondary
 ```
 
 ### List registered profiles

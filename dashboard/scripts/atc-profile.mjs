@@ -17,12 +17,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const KEYCHAIN_SERVICE = 'Claude Code-credentials';
 const PROFILES_DIR = path.join(os.homedir(), '.claude-profiles');
 const PROFILES_JSON = path.join(PROFILES_DIR, 'profiles.json');
 const BACKUP_DIR = path.join(PROFILES_DIR, '.backup');
+const CODEXBAR_CONFIG = path.join(os.homedir(), '.codexbar', 'config.json');
 const CLAUDE_GLOBAL_STATE = path.join(os.homedir(), '.claude.json');
 const CLAUDE_OAUTH_ACCOUNT_URL = 'https://api.anthropic.com/api/oauth/account';
 const __filename = fileURLToPath(import.meta.url);
@@ -79,6 +81,10 @@ function readClaudeGlobalState() {
 
 function writeClaudeGlobalState(state) {
   writeJsonAtomic(CLAUDE_GLOBAL_STATE, state);
+}
+
+function profileCookieLabel(alias) {
+  return `atc:${alias}`;
 }
 
 function placeholderUsageCache(email) {
@@ -212,6 +218,154 @@ function applyClaudeGlobalAuthState(authState) {
   writeClaudeGlobalState(state);
 }
 
+function readCodexbarConfig() {
+  const fallback = { version: 1, providers: [] };
+  const cfg = readJson(CODEXBAR_CONFIG, fallback);
+  if (!cfg || typeof cfg !== 'object') return fallback;
+  if (!Array.isArray(cfg.providers)) cfg.providers = [];
+  if (!cfg.version) cfg.version = 1;
+  return cfg;
+}
+
+function writeCodexbarConfig(config) {
+  writeJsonAtomic(CODEXBAR_CONFIG, config);
+}
+
+function ensureCodexbarClaudeProvider(config) {
+  let provider = config.providers.find((entry) => entry && entry.id === 'claude');
+  if (!provider) {
+    provider = { id: 'claude', enabled: true };
+    config.providers.push(provider);
+  }
+  if (!provider.tokenAccounts || typeof provider.tokenAccounts !== 'object') {
+    provider.tokenAccounts = { version: 1, activeIndex: 0, accounts: [] };
+  }
+  if (!Array.isArray(provider.tokenAccounts.accounts)) provider.tokenAccounts.accounts = [];
+  if (!provider.tokenAccounts.version) provider.tokenAccounts.version = 1;
+  return provider;
+}
+
+function syncCodexbarTokenAccount(alias, sessionKey, { setActive = false } = {}) {
+  const label = profileCookieLabel(alias);
+  const trimmedToken = String(sessionKey || '').trim();
+  if (!trimmedToken) {
+    throw new Error(`cannot sync codexbar token account for "${alias}" without a Claude sessionKey`);
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  const config = readCodexbarConfig();
+  const provider = ensureCodexbarClaudeProvider(config);
+  const accounts = provider.tokenAccounts.accounts;
+  const existingIndex = accounts.findIndex((entry) => String(entry?.label || '').trim() === label);
+  if (existingIndex >= 0) {
+    const prev = accounts[existingIndex] || {};
+    accounts[existingIndex] = {
+      id: prev.id || randomUUID(),
+      label,
+      token: trimmedToken,
+      addedAt: Number.isFinite(Number(prev.addedAt)) ? Number(prev.addedAt) : nowSec,
+      lastUsed: nowSec,
+    };
+  } else {
+    accounts.push({
+      id: randomUUID(),
+      label,
+      token: trimmedToken,
+      addedAt: nowSec,
+      lastUsed: nowSec,
+    });
+  }
+  if (setActive) {
+    const activeIdx = accounts.findIndex((entry) => String(entry?.label || '').trim() === label);
+    provider.tokenAccounts.activeIndex = activeIdx >= 0 ? activeIdx : 0;
+    provider.cookieSource = 'manual';
+    provider.cookieHeader = `sessionKey=${trimmedToken}`;
+  } else if (!Number.isFinite(Number(provider.tokenAccounts.activeIndex))) {
+    provider.tokenAccounts.activeIndex = 0;
+  }
+  writeCodexbarConfig(config);
+  return label;
+}
+
+function removeCodexbarTokenAccount(alias) {
+  const label = profileCookieLabel(alias);
+  const config = readCodexbarConfig();
+  const provider = ensureCodexbarClaudeProvider(config);
+  const accounts = provider.tokenAccounts.accounts || [];
+  const next = accounts.filter((entry) => String(entry?.label || '').trim() !== label);
+  if (next.length === accounts.length) return;
+  provider.tokenAccounts.accounts = next;
+  const activeIndex = Number(provider.tokenAccounts.activeIndex);
+  if (!Number.isFinite(activeIndex) || activeIndex < 0 || activeIndex >= next.length) {
+    provider.tokenAccounts.activeIndex = 0;
+  }
+  writeCodexbarConfig(config);
+}
+
+function firefoxCookieDbs() {
+  const root = path.join(os.homedir(), 'Library', 'Application Support', 'Firefox', 'Profiles');
+  if (!fs.existsSync(root)) return [];
+  const children = fs.readdirSync(root, { withFileTypes: true });
+  return children
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(root, entry.name, 'cookies.sqlite'))
+    .filter((dbPath) => fs.existsSync(dbPath));
+}
+
+function readSessionKeyFromFirefox() {
+  const dbs = firefoxCookieDbs();
+  const query = [
+    'SELECT value, host, path, lastAccessed',
+    'FROM moz_cookies',
+    "WHERE name = 'sessionKey' AND host LIKE '%claude.ai%'",
+    'ORDER BY lastAccessed DESC',
+    'LIMIT 1;',
+  ].join(' ');
+  for (const dbPath of dbs) {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'atc-firefox-'));
+    const tmpDb = path.join(tmpDir, 'cookies.sqlite');
+    try {
+      fs.copyFileSync(dbPath, tmpDb);
+      const walSrc = `${dbPath}-wal`;
+      const shmSrc = `${dbPath}-shm`;
+      if (fs.existsSync(walSrc)) fs.copyFileSync(walSrc, `${tmpDb}-wal`);
+      if (fs.existsSync(shmSrc)) fs.copyFileSync(shmSrc, `${tmpDb}-shm`);
+      const out = execFileSync('sqlite3', ['-separator', '\t', tmpDb, query], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+      if (!out) continue;
+      const [value = '', host = '', cookiePath = '', lastAccessed = ''] = out.split('\t');
+      const sessionKey = String(value).trim();
+      if (!sessionKey || !sessionKey.startsWith('sk-ant-')) continue;
+      return {
+        sessionKey,
+        cookieHeader: `sessionKey=${sessionKey}`,
+        source: 'firefox',
+        host: host || null,
+        path: cookiePath || null,
+        profileCookieDb: dbPath,
+        lastAccessed: Number(lastAccessed) || null,
+        capturedAt: new Date().toISOString(),
+      };
+    } catch {
+      // continue to next profile DB
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+  throw new Error('No Claude sessionKey found in Firefox cookies. Log into claude.ai in Firefox and retry.');
+}
+
+function captureClaudeWebAuth() {
+  return readSessionKeyFromFirefox();
+}
+
+function maskSecret(value) {
+  const raw = String(value || '').trim();
+  if (raw.length <= 10) return raw ? `${raw.slice(0, 2)}...` : '';
+  return `${raw.slice(0, 6)}...${raw.slice(-4)}`;
+}
+
 // ── keychain helpers ──────────────────────────────────────────────────────────
 
 function keychainExport() {
@@ -277,9 +431,9 @@ function backupCurrent(blob) {
 
 // ── commands ──────────────────────────────────────────────────────────────────
 
-function cmdAdd(alias, email) {
+function cmdAdd(alias) {
   if (!alias || !/^[a-z0-9_-]+$/i.test(alias)) {
-    die('Usage: atc-profile add <alias> [--email you@example.com]');
+    die('Usage: atc-profile add <alias>');
   }
 
   const catalog = loadCatalog();
@@ -290,10 +444,11 @@ function cmdAdd(alias, email) {
   const blob = keychainExport();
   const authState = fetchClaudeAccountStateFromBlob(blob);
   const observedEmail = authState?.authStatus?.email || null;
-  if (email && observedEmail && observedEmail !== email.trim().toLowerCase()) {
-    die(`The logged-in Claude account does not match --email.\nExpected: ${email.trim().toLowerCase()}\nObserved: ${observedEmail}`);
+  if (!observedEmail) {
+    die('Could not determine logged-in email from Claude OAuth account metadata.');
   }
-  const normalizedEmail = observedEmail || (email ? email.trim().toLowerCase() : null);
+  const normalizedEmail = observedEmail;
+  const webAuth = captureClaudeWebAuth();
 
   // Warn if this credential is identical to an existing profile.
   for (const existing of Object.keys(catalog.profiles)) {
@@ -306,11 +461,14 @@ function cmdAdd(alias, email) {
   }
 
   saveCredential(alias, blob);
+  const codexbarAccountLabel = syncCodexbarTokenAccount(alias, webAuth.sessionKey, { setActive: !catalog.active });
 
   catalog.profiles[alias] = {
     displayName: alias,
     ...(normalizedEmail ? { email: normalizedEmail } : {}),
     authState,
+    webAuth,
+    codexbarAccountLabel,
     usageCache: placeholderUsageCache(normalizedEmail),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -319,6 +477,9 @@ function cmdAdd(alias, email) {
   saveCatalog(catalog);
 
   console.log(`✓ Profile "${alias}" registered.${catalog.active === alias ? ' (set as active)' : ''}`);
+  console.log(`  Email: ${normalizedEmail}`);
+  console.log(`  Web token source: ${webAuth.source} (${webAuth.host || 'claude.ai'})`);
+  console.log(`  Codexbar account label: ${codexbarAccountLabel}`);
 }
 
 function cmdList() {
@@ -401,6 +562,8 @@ function switchProfile(alias, options = {}) {
   keychainDelete();
   keychainImport(targetBlob);
   applyClaudeGlobalAuthState(authState);
+  const token = String(catalog.profiles?.[alias]?.webAuth?.sessionKey || '').trim();
+  if (token) syncCodexbarTokenAccount(alias, token, { setActive: true });
 
   // 3. Update catalog.
   catalog.active = alias;
@@ -427,6 +590,7 @@ function cmdRemove(alias) {
 
   const cred = credPath(alias);
   if (fs.existsSync(cred)) fs.unlinkSync(cred);
+  removeCodexbarTokenAccount(alias);
   delete catalog.profiles[alias];
   saveCatalog(catalog);
 
@@ -445,7 +609,7 @@ function cmdUse(alias, options = {}) {
 
   const expectedEmail = typeof profile.email === 'string' ? profile.email.trim().toLowerCase() : '';
   if (!expectedEmail) {
-    die(`Profile "${alias}" has no email registered.\nRe-register it with: atc-profile add ${alias} --email you@example.com`);
+    die(`Profile "${alias}" has no email registered.\nRe-register it with: atc-profile add ${alias}`);
   }
 
   switchProfile(alias, { force: true, syncActive });
@@ -526,7 +690,36 @@ function cmdWipe(confirmYes) {
   }
 
   console.log('✓ Wiped Claude Keychain credential and all saved atc-profile credentials.');
-  console.log('  Next step: run claude, then /login, then atc-profile add <alias> [--email ...].');
+  console.log('  Next step: run claude, then /login, then atc-profile add <alias>.');
+}
+
+function cmdProbeWeb() {
+  const webAuth = captureClaudeWebAuth();
+  console.log('✓ Claude web token found.');
+  console.log(`  Source: ${webAuth.source}`);
+  if (webAuth.host) console.log(`  Host: ${webAuth.host}`);
+  console.log(`  sessionKey: ${maskSecret(webAuth.sessionKey)}`);
+  if (webAuth.profileCookieDb) console.log(`  Cookie DB: ${webAuth.profileCookieDb}`);
+}
+
+function cmdSyncWeb(alias) {
+  if (!alias) die('Usage: atc-profile sync-web <alias>');
+  const catalog = loadCatalog();
+  if (!catalog.profiles?.[alias]) {
+    die(`Unknown profile "${alias}". Run 'atc-profile list' to see available profiles.`);
+  }
+  const webAuth = captureClaudeWebAuth();
+  catalog.profiles[alias].webAuth = webAuth;
+  catalog.profiles[alias].codexbarAccountLabel = syncCodexbarTokenAccount(alias, webAuth.sessionKey, {
+    setActive: catalog.active === alias,
+  });
+  catalog.profiles[alias].updatedAt = new Date().toISOString();
+  saveCatalog(catalog);
+
+  console.log(`✓ Synced Claude web token for "${alias}".`);
+  console.log(`  Source: ${webAuth.source}`);
+  console.log(`  sessionKey: ${maskSecret(webAuth.sessionKey)}`);
+  console.log(`  Codexbar account label: ${catalog.profiles[alias].codexbarAccountLabel}`);
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────
@@ -537,13 +730,11 @@ function die(msg) {
 }
 
 const [,, command, ...rest] = process.argv;
-// Parse --email flag from remaining args
+// Parse command flags from remaining args
 function parseArgs(args) {
-  const result = { positional: [], email: null, yes: false, syncActive: false };
+  const result = { positional: [], yes: false, syncActive: false };
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--email' && args[i + 1]) {
-      result.email = args[++i];
-    } else if (args[i] === '--yes') {
+    if (args[i] === '--yes') {
       result.yes = true;
     } else if (args[i] === '--sync-active') {
       result.syncActive = true;
@@ -553,25 +744,29 @@ function parseArgs(args) {
   }
   return result;
 }
-const { positional, email: flagEmail, yes: confirmYes, syncActive } = parseArgs(rest);
+const { positional, yes: confirmYes, syncActive } = parseArgs(rest);
 const arg = positional[0];
 switch (command) {
-  case 'add':     cmdAdd(arg, flagEmail); break;
+  case 'add':     cmdAdd(arg); break;
   case 'list':    cmdList(); break;
   case 'current': cmdCurrent(); break;
   case 'use':     cmdUse(arg, { syncActive }); break;
   case 'remove':  cmdRemove(arg); break;
   case 'wipe':    cmdWipe(confirmYes); break;
+  case 'probe-web': cmdProbeWeb(); break;
+  case 'sync-web': cmdSyncWeb(arg); break;
   default:
     console.error(`atc-profile — Claude account profile manager
 
 Commands:
-  add <alias> [--email you@example.com]   register the currently-logged-in account under <alias>
+  add <alias>     register the currently-logged-in account under <alias>
   list            show all profiles (* = active)
   current         print the active profile alias
   use <alias> [--sync-active] switch + validate /status email matches alias email
   remove <alias>  delete a profile (cannot remove the active profile)
   wipe --yes      delete Claude Keychain cred + all saved atc-profile creds/catalog
+  probe-web       print detected Claude web sessionKey from Firefox cookies
+  sync-web <alias> capture current Firefox Claude sessionKey into an existing profile
 `);
     process.exit(command ? 1 : 0);
 }
