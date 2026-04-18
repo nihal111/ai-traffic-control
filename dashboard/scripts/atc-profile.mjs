@@ -461,7 +461,7 @@ function cmdAdd(alias) {
   }
 
   saveCredential(alias, blob);
-  const codexbarAccountLabel = syncCodexbarTokenAccount(alias, webAuth.sessionKey, { setActive: !catalog.active });
+  const codexbarAccountLabel = syncCodexbarTokenAccount(alias, webAuth.sessionKey, { setActive: true });
 
   catalog.profiles[alias] = {
     displayName: alias,
@@ -473,7 +473,10 @@ function cmdAdd(alias) {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
-  if (!catalog.active) catalog.active = alias;
+  // `add` represents "register what I am currently logged into right now".
+  // Make the newly added profile active immediately to match CLI + web state.
+  catalog.active = alias;
+  applyClaudeGlobalAuthState(authState);
   saveCatalog(catalog);
 
   console.log(`✓ Profile "${alias}" registered.${catalog.active === alias ? ' (set as active)' : ''}`);
