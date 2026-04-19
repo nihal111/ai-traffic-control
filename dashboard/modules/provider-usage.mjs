@@ -1,5 +1,81 @@
+import { execFile } from 'node:child_process';
 import { buildClaudeRefreshMeta, mergeClaudeUsageWindow } from './usage-cache.mjs';
 import { readProfilesJson, emptyProfileUsageCache } from './profile-catalog.mjs';
+
+const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
+const CLAUDE_OAUTH_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+const CLAUDE_OAUTH_USAGE_TIMEOUT_MS = Number(process.env.ATC_CLAUDE_OAUTH_USAGE_TIMEOUT_MS || 8000);
+
+function readClaudeKeychainAccessToken() {
+  if (process.platform !== 'darwin') return null;
+  return new Promise((resolve) => {
+    execFile(
+      'security',
+      ['find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE, '-w'],
+      { timeout: 5000 },
+      (err, stdout) => {
+        if (err) return resolve(null);
+        try {
+          const parsed = JSON.parse(String(stdout || '').trim());
+          const token = parsed?.claudeAiOauth?.accessToken;
+          resolve(typeof token === 'string' && token.trim() ? token.trim() : null);
+        } catch {
+          resolve(null);
+        }
+      },
+    );
+  });
+}
+
+function parseAnthropicUsageWindow(windowValue, fallbackMinutes) {
+  if (!windowValue || typeof windowValue !== 'object') return null;
+  const usedPercent = Number(windowValue.utilization);
+  if (!Number.isFinite(usedPercent)) return null;
+  return {
+    usedPercent,
+    windowMinutes: fallbackMinutes,
+    resetsAt: typeof windowValue.resets_at === 'string' && windowValue.resets_at.trim() ? windowValue.resets_at : null,
+    resetDescription: null,
+  };
+}
+
+async function fetchClaudeUsageFromAnthropicApi() {
+  const token = await readClaudeKeychainAccessToken();
+  if (!token) return { ok: false, error: 'No Claude OAuth token in keychain', provider: 'claude' };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CLAUDE_OAUTH_USAGE_TIMEOUT_MS);
+  try {
+    const response = await fetch(CLAUDE_OAUTH_USAGE_URL, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'oauth-2025-04-20',
+        'User-Agent': 'atc-dashboard',
+      },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      return { ok: false, error: `Anthropic usage API HTTP ${response.status}`, provider: 'claude' };
+    }
+    const data = await response.json();
+    return {
+      ok: true,
+      provider: 'claude',
+      source: 'anthropic-api',
+      plan: null,
+      accountEmail: null,
+      primary: parseAnthropicUsageWindow(data?.five_hour, 300),
+      secondary: parseAnthropicUsageWindow(data?.seven_day, 10080),
+      updatedAt: null,
+      fetchedAt: new Date().toISOString(),
+    };
+  } catch (err) {
+    return { ok: false, error: `Anthropic usage API error: ${err?.message || err}`, provider: 'claude' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // Constants (passed via environment or defaults)
 const DISABLE_CODEX_BAR = process.argv.includes('--no-codexbar') || process.env.ATC_DISABLE_CODEX_BAR === '1';
@@ -10,6 +86,16 @@ const GEMINI_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_GEMINI_USAGE_MIN_INT
 const USAGE_TTL_MS = 10000;
 
 function parseWindow(windowValue, fallbackMinutes = null) {
+  if (typeof windowValue === 'number' || typeof windowValue === 'string') {
+    const usedPercent = Number(windowValue);
+    if (!Number.isFinite(usedPercent)) return null;
+    return {
+      usedPercent,
+      windowMinutes: fallbackMinutes,
+      resetsAt: null,
+      resetDescription: null,
+    };
+  }
   if (!windowValue || typeof windowValue !== 'object') return null;
   const usedPercent = Number(windowValue.usedPercent ?? 0);
   const windowMinutes = Number(windowValue.windowMinutes ?? fallbackMinutes ?? 0);
@@ -18,6 +104,86 @@ function parseWindow(windowValue, fallbackMinutes = null) {
     windowMinutes: Number.isFinite(windowMinutes) && windowMinutes > 0 ? windowMinutes : fallbackMinutes,
     resetsAt: windowValue.resetsAt || null,
     resetDescription: windowValue.resetDescription || null,
+  };
+}
+
+function pickFirstObject(...values) {
+  for (const value of values) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  }
+  return null;
+}
+
+function resolveUsageWindow(root, usage, dashboard, key) {
+  const aliasesByKey = {
+    primary: [
+      'primary',
+      'primaryLimit',
+      'fiveHour',
+      'fiveHourLimit',
+      'fiveHourWindow',
+      'window5h',
+      'rolling5h',
+    ],
+    secondary: [
+      'secondary',
+      'secondaryLimit',
+      'weekly',
+      'weeklyLimit',
+      'weeklyWindow',
+      'sevenDay',
+      'sevenDayLimit',
+      'rolling7d',
+    ],
+  };
+  const aliases = aliasesByKey[key] || [key];
+  const usageWindows = pickFirstObject(usage?.windows, usage?.limits);
+  const dashboardWindows = pickFirstObject(dashboard?.windows, dashboard?.limits);
+  for (const alias of aliases) {
+    const candidate = pickFirstObject(
+      usage?.[alias],
+      usageWindows?.[alias],
+      dashboard?.[alias],
+      dashboardWindows?.[alias],
+      root?.[alias],
+      root?.usage?.[alias],
+      root?.openaiDashboard?.[alias],
+    );
+    if (candidate) return candidate;
+
+    const scalar = usage?.[alias] ?? usageWindows?.[alias] ?? dashboard?.[alias] ?? dashboardWindows?.[alias];
+    if (typeof scalar === 'number' || typeof scalar === 'string') return scalar;
+  }
+  return null;
+}
+
+function hasUsageWindowData(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  const windows = [payload.primary, payload.secondary];
+  return windows.some((windowValue) => {
+    if (!windowValue || typeof windowValue !== 'object') return false;
+    return (
+      Number.isFinite(Number(windowValue.usedPercent)) ||
+      Number.isFinite(Number(windowValue.windowMinutes)) ||
+      !!windowValue.resetsAt ||
+      !!windowValue.resetDescription
+    );
+  });
+}
+
+function backfillResetFromCache(liveWindow, cachedWindow, nowMs = Date.now()) {
+  if (!liveWindow || typeof liveWindow !== 'object') return liveWindow;
+  if (liveWindow.resetsAt) return liveWindow;
+  if (!cachedWindow || typeof cachedWindow !== 'object') return liveWindow;
+  const cachedReset = cachedWindow.resetsAt ? Date.parse(cachedWindow.resetsAt) : NaN;
+  // Only backfill when the cached reset is still in the future: rolling 5h
+  // windows restart on first message, so a past resetsAt means the window
+  // has already rolled and we no longer know when the new one ends.
+  if (!Number.isFinite(cachedReset) || cachedReset <= nowMs) return liveWindow;
+  return {
+    ...liveWindow,
+    resetsAt: cachedWindow.resetsAt,
+    resetDescription: liveWindow.resetDescription || cachedWindow.resetDescription || null,
   };
 }
 
@@ -41,10 +207,10 @@ async function fetchCodexbarUsage(provider, source = 'auto', runCommandFn = null
     if (root && typeof root === 'object') {
       if (root.error) return { ok: false, error: root.error.message || 'provider error', provider };
 
-      const usage = root.usage || null;
-      const dashboard = root.openaiDashboard || null;
-      const primary = usage?.primary || dashboard?.primaryLimit || null;
-      const secondary = usage?.secondary || dashboard?.secondaryLimit || null;
+      const usage = pickFirstObject(root.usage, root.result?.usage) || null;
+      const dashboard = pickFirstObject(root.openaiDashboard, root.result?.openaiDashboard) || null;
+      const primary = resolveUsageWindow(root, usage, dashboard, 'primary');
+      const secondary = resolveUsageWindow(root, usage, dashboard, 'secondary');
       return {
         ok: true,
         provider: (provider || '').toLowerCase(),
@@ -158,10 +324,44 @@ async function fetchClaudeUsageRateLimited(context = {}, { force = false } = {})
       }
     }
   }
-  const resolvedLive =
+  // Backfill resetsAt from Anthropic's OAuth usage endpoint (read via the Claude
+  // CLI keychain token) when codexbar's available sources don't expose it —
+  // typically the CLI-only path, since the claude CLI reports usedPercent but
+  // never a rolling reset time for the 5-hour window.
+  if (live?.ok && (!live?.primary?.resetsAt || !live?.secondary?.resetsAt)) {
+    const apiUsage = await fetchClaudeUsageFromAnthropicApi();
+    if (apiUsage?.ok) {
+      live = {
+        ...live,
+        primary: mergeClaudeUsageWindow(live.primary, apiUsage.primary),
+        secondary: mergeClaudeUsageWindow(live.secondary, apiUsage.secondary),
+      };
+    }
+  }
+  let resolvedLive =
     live?.ok && !String(live.plan || '').trim() && profileSubscriptionType
       ? { ...live, plan: profileSubscriptionType }
       : live;
+  if (resolvedLive?.ok) {
+    resolvedLive = {
+      ...resolvedLive,
+      primary: backfillResetFromCache(resolvedLive.primary, cachedUsage?.primary, attemptedAtMs),
+      secondary: backfillResetFromCache(resolvedLive.secondary, cachedUsage?.secondary, attemptedAtMs),
+    };
+  }
+  if (!resolvedLive?.ok && hasUsageWindowData(cachedUsage)) {
+    return {
+      ...cachedUsage,
+      ok: true,
+      provider: 'claude',
+      loading: false,
+      source: cachedUsage.source || resolvedLive?.source || 'oauth-cache',
+      stale: true,
+      staleError: resolvedLive?.error || 'Usage temporarily unavailable',
+      lastAttemptAt: attemptedAtIso,
+      ...buildClaudeRefreshMeta(attemptedAtMs),
+    };
+  }
   return {
     ...resolvedLive,
     throttled: false,
@@ -217,12 +417,21 @@ async function fetchProviderUsageRateLimited(context = {}, provider, source, int
       ...buildClaudeRefreshMeta(attemptedAtMs, safeIntervalMs),
     };
   } else {
+    const hasCachedWindows = hasUsageWindowData(state.lastResult);
+    const keepLastKnown = state.lastResult?.ok && hasCachedWindows;
     merged = {
       ...state.lastResult,
-      ok: false,
+      ok: keepLastKnown ? true : false,
       loading: false,
       provider: providerKey,
-      error: live?.error || state.lastResult?.error || 'Usage unavailable',
+      ...(keepLastKnown
+        ? {
+            stale: true,
+            staleError: live?.error || state.lastResult?.error || 'Usage unavailable',
+          }
+        : {
+            error: live?.error || state.lastResult?.error || 'Usage unavailable',
+          }),
       source: live?.source || state.lastResult?.source || source || 'auto',
       throttled: false,
       ...buildClaudeRefreshMeta(attemptedAtMs, safeIntervalMs),
@@ -282,6 +491,9 @@ async function fetchProviderUsageOnce(context = {}, providerKey, { force = false
 
 export {
   parseWindow,
+  backfillResetFromCache,
+  parseAnthropicUsageWindow,
+  fetchClaudeUsageFromAnthropicApi,
   fetchCodexbarUsage,
   fetchClaudeUsageRateLimited,
   fetchProviderUsageRateLimited,

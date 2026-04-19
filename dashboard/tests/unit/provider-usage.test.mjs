@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { parseWindow, fetchCodexbarUsage, fetchProviderUsageOnce } = await import('../../modules/provider-usage.mjs');
+const {
+  parseWindow,
+  backfillResetFromCache,
+  parseAnthropicUsageWindow,
+  fetchCodexbarUsage,
+  fetchProviderUsageOnce,
+} = await import('../../modules/provider-usage.mjs');
 
 test('parseWindow handles null windowValue', () => {
   const result = parseWindow(null);
@@ -68,6 +74,84 @@ test('parseWindow strips null resetsAt', () => {
   const result = parseWindow(window);
 
   assert.equal(result.resetsAt, null);
+});
+
+test('backfillResetFromCache backfills resetsAt from cache when live is missing it', () => {
+  const now = Date.parse('2026-04-18T20:00:00Z');
+  const live = { usedPercent: 30, windowMinutes: 300, resetsAt: null };
+  const cached = { usedPercent: 25, windowMinutes: 300, resetsAt: '2026-04-18T23:00:00Z' };
+  const result = backfillResetFromCache(live, cached, now);
+
+  assert.equal(result.resetsAt, '2026-04-18T23:00:00Z');
+  assert.equal(result.usedPercent, 30);
+});
+
+test('backfillResetFromCache keeps live resetsAt when present', () => {
+  const now = Date.parse('2026-04-18T20:00:00Z');
+  const live = { usedPercent: 30, windowMinutes: 300, resetsAt: '2026-04-18T22:00:00Z' };
+  const cached = { usedPercent: 25, windowMinutes: 300, resetsAt: '2026-04-18T23:00:00Z' };
+  const result = backfillResetFromCache(live, cached, now);
+
+  assert.equal(result.resetsAt, '2026-04-18T22:00:00Z');
+});
+
+test('backfillResetFromCache ignores stale cached resetsAt in the past', () => {
+  const now = Date.parse('2026-04-18T20:00:00Z');
+  const live = { usedPercent: 30, windowMinutes: 300, resetsAt: null };
+  const cached = { usedPercent: 25, windowMinutes: 300, resetsAt: '2026-04-18T10:00:00Z' };
+  const result = backfillResetFromCache(live, cached, now);
+
+  assert.equal(result.resetsAt, null);
+});
+
+test('backfillResetFromCache returns live unchanged when cache is missing', () => {
+  const now = Date.parse('2026-04-18T20:00:00Z');
+  const live = { usedPercent: 30, windowMinutes: 300, resetsAt: null };
+
+  assert.equal(backfillResetFromCache(live, null, now), live);
+  assert.equal(backfillResetFromCache(live, undefined, now), live);
+});
+
+test('backfillResetFromCache passes through null/undefined live window', () => {
+  const cached = { usedPercent: 25, windowMinutes: 300, resetsAt: '2026-04-18T23:00:00Z' };
+  assert.equal(backfillResetFromCache(null, cached), null);
+  assert.equal(backfillResetFromCache(undefined, cached), undefined);
+});
+
+test('parseAnthropicUsageWindow parses five_hour window with resets_at', () => {
+  const result = parseAnthropicUsageWindow(
+    { utilization: 53, resets_at: '2026-04-19T09:00:00.000Z' },
+    300,
+  );
+  assert.equal(result.usedPercent, 53);
+  assert.equal(result.windowMinutes, 300);
+  assert.equal(result.resetsAt, '2026-04-19T09:00:00.000Z');
+});
+
+test('parseAnthropicUsageWindow returns null for missing utilization', () => {
+  assert.equal(parseAnthropicUsageWindow({ resets_at: '2026-04-19T09:00:00.000Z' }, 300), null);
+  assert.equal(parseAnthropicUsageWindow(null, 300), null);
+  assert.equal(parseAnthropicUsageWindow({ utilization: 'bad' }, 300), null);
+});
+
+test('parseAnthropicUsageWindow handles missing resets_at gracefully', () => {
+  const result = parseAnthropicUsageWindow({ utilization: 0, resets_at: null }, 10080);
+  assert.equal(result.usedPercent, 0);
+  assert.equal(result.resetsAt, null);
+});
+
+test('backfillResetFromCache preserves cached resetDescription when live has none', () => {
+  const now = Date.parse('2026-04-18T20:00:00Z');
+  const live = { usedPercent: 30, windowMinutes: 300, resetsAt: null, resetDescription: null };
+  const cached = {
+    usedPercent: 25,
+    windowMinutes: 300,
+    resetsAt: '2026-04-18T23:00:00Z',
+    resetDescription: 'Apr 18 at 4:00PM',
+  };
+  const result = backfillResetFromCache(live, cached, now);
+
+  assert.equal(result.resetDescription, 'Apr 18 at 4:00PM');
 });
 
 test('fetchCodexbarUsage throws when runCommandFn missing', async () => {
@@ -186,6 +270,44 @@ test('fetchCodexbarUsage falls back to dashboard data', async () => {
   assert.equal(result.primary.usedPercent, 60);
 });
 
+test('fetchCodexbarUsage parses codex windows from usage.limits aliases', async () => {
+  const mockResponse = {
+    ok: true,
+    stdout: JSON.stringify({
+      usage: {
+        limits: {
+          fiveHourLimit: { usedPercent: 22, windowMinutes: 300 },
+          weeklyLimit: { usedPercent: 61, windowMinutes: 10080 },
+        },
+      },
+    }),
+  };
+  const mockRunCommand = async () => mockResponse;
+  const result = await fetchCodexbarUsage('codex', 'cli', mockRunCommand);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.primary.usedPercent, 22);
+  assert.equal(result.secondary.usedPercent, 61);
+});
+
+test('fetchCodexbarUsage parses scalar codex window percentages', async () => {
+  const mockResponse = {
+    ok: true,
+    stdout: JSON.stringify({
+      usage: {
+        primary: '14',
+        secondary: 48,
+      },
+    }),
+  };
+  const mockRunCommand = async () => mockResponse;
+  const result = await fetchCodexbarUsage('codex', 'cli', mockRunCommand);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.primary.usedPercent, 14);
+  assert.equal(result.secondary.usedPercent, 48);
+});
+
 test('fetchCodexbarUsage includes fetchedAt timestamp', async () => {
   const mockResponse = {
     ok: true,
@@ -290,6 +412,68 @@ test('fetchProviderUsageOnce adds labels for codex', async () => {
 
   assert.equal(result.primary.label, '5-hour');
   assert.equal(result.secondary.label, 'weekly');
+});
+
+test('fetchProviderUsageOnce keeps last known codex windows on transient fetch failure', async () => {
+  const mockRunCommand = async () => ({
+    ok: false,
+    stdout: '',
+    stderr: 'temporary network error',
+  });
+  const now = Date.now();
+  const state = {
+    codex: {
+      lastAttemptAtMs: now - 60000,
+      lastResult: {
+        ok: true,
+        provider: 'codex',
+        source: 'codex-cli',
+        primary: { usedPercent: 33, windowMinutes: 300 },
+        secondary: { usedPercent: 44, windowMinutes: 10080 },
+      },
+    },
+  };
+  const result = await fetchProviderUsageOnce(
+    { runCommandFn: mockRunCommand, providerUsageRateCache: state },
+    'codex',
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.stale, true);
+  assert.equal(result.staleError, 'temporary network error');
+  assert.equal(result.primary.usedPercent, 33);
+  assert.equal(result.secondary.usedPercent, 44);
+});
+
+test('fetchProviderUsageOnce keeps last known gemini windows on transient fetch failure', async () => {
+  const mockRunCommand = async () => ({
+    ok: false,
+    stdout: '',
+    stderr: 'gemini api timeout',
+  });
+  const now = Date.now();
+  const state = {
+    gemini: {
+      lastAttemptAtMs: now - 60000,
+      lastResult: {
+        ok: true,
+        provider: 'gemini',
+        source: 'api',
+        primary: { usedPercent: 2, windowMinutes: 1440 },
+        secondary: { usedPercent: 3, windowMinutes: 1440 },
+      },
+    },
+  };
+  const result = await fetchProviderUsageOnce(
+    { runCommandFn: mockRunCommand, providerUsageRateCache: state },
+    'gemini',
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.stale, true);
+  assert.equal(result.staleError, 'gemini api timeout');
+  assert.equal(result.primary.usedPercent, 2);
+  assert.equal(result.secondary.usedPercent, 3);
 });
 
 test('fetchProviderUsageOnce handles secondary window from response', async () => {
