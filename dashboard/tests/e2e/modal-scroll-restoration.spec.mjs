@@ -161,6 +161,11 @@ test('scroll position is restored after closing intent modal', async ({ page }) 
     const y = await page.evaluate(() => window.scrollY);
     return Math.abs(y - lockedScroll) <= 12;
   }, 2500, 60);
+  // Flush rAF so the post-close scrollTo(0, restoreY) inside requestAnimationFrame
+  // fires before we probe with scrollBy — otherwise it clobbers our delta.
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+  );
 
   // Check that scroll position was restored
   let scrollAfter = await page.evaluate(() => window.scrollY);

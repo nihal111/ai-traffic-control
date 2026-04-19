@@ -40,6 +40,7 @@ let tmpRoot = null;
 let dashboardProc = null;
 
 test.use({
+  browserName: 'chromium',
   ...devices['iPhone 13'],
 });
 

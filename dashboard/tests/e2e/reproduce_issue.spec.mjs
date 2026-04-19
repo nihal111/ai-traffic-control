@@ -12,6 +12,7 @@ const harness = new DashboardHarness({
 });
 
 test.use({
+  browserName: 'chromium',
   ...devices['iPhone 13'],
 });
 
