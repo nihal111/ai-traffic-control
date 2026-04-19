@@ -222,7 +222,14 @@ async function fetchProviderUsageOnce(providerKey, { force = false } = {}) {
     providerUsageRateCache[providerKey].lastAttemptAtMs = 0;
     saveUsageRateCacheToDisk(providerUsageRateCache);
   }
-  return fetchProviderUsageOnceModule({ runCommandFn: runCommand, providerUsageRateCache }, providerKey, { force });
+  const result = await fetchProviderUsageOnceModule(
+    { runCommandFn: runCommand, providerUsageRateCache },
+    providerKey,
+    { force },
+  );
+  const normalized = String(providerKey || '').toLowerCase();
+  const labels = normalized === 'gemini' ? ['24h primary', '24h secondary'] : ['5-hour', 'weekly'];
+  return decorateUsageWindows(result, labels);
 }
 
 async function refreshSingleProviderInBackground(providerKey, { force = false } = {}) {
@@ -232,6 +239,11 @@ async function refreshSingleProviderInBackground(providerKey, { force = false } 
   }
   try {
     const nextPayload = await fetchProviderUsageOnce(normalized, { force });
+    if (providerUsageRateCache[normalized]) {
+      providerUsageRateCache[normalized].lastAttemptAtMs = Date.now();
+      providerUsageRateCache[normalized].lastResult = nextPayload;
+      saveUsageRateCacheToDisk(providerUsageRateCache);
+    }
     const current = usageCache.value || buildBootUsageSummaryFromCaches();
     const nextValue = {
       ...current,
@@ -653,7 +665,8 @@ function buildBootUsageSummaryFromCaches() {
 
 function refreshUsageSummaryInBackground() {
   if (usageCache.pending) return usageCache.pending;
-  usageCache.pending = (async () => {
+  let pending = null;
+  pending = (async () => {
     try {
       const [codexRaw, claudeRaw, geminiRaw] = await Promise.all([
         fetchProviderUsageRateLimited('codex', 'cli', CODEX_USAGE_MIN_INTERVAL_MS),
@@ -673,15 +686,22 @@ function refreshUsageSummaryInBackground() {
         gemini: decorateUsageWindows(geminiRaw, ['24h primary', '24h secondary']),
       };
       saveActiveProfileUsageCache(value.claude);
-      usageCache = { value, fetchedAt: Date.now(), pending: null };
-      return value;
+      if (usageCache.pending === pending) {
+        usageCache = { value, fetchedAt: Date.now(), pending: null };
+        return value;
+      }
+      return usageCache.value || value;
     } catch (error) {
       const fallback = usageCache.value || errorUsageSummary(error?.message || 'Usage unavailable');
-      usageCache = { value: fallback, fetchedAt: Date.now(), pending: null };
-      return fallback;
+      if (usageCache.pending === pending) {
+        usageCache = { value: fallback, fetchedAt: Date.now(), pending: null };
+        return fallback;
+      }
+      return usageCache.value || fallback;
     }
   })();
-  return usageCache.pending;
+  usageCache.pending = pending;
+  return pending;
 }
 
 function getUsageSnapshot() {
@@ -3648,7 +3668,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const usage = await refreshSingleProviderInBackground(provider, { force });
-      json(res, 200, { ok: true, provider, usage: getUsageSnapshot() || usage });
+      json(res, 200, { ok: true, provider, usage });
     } catch (error) {
       json(res, 500, { error: error.message || 'usage refresh failed' });
     }
