@@ -5,6 +5,7 @@ nginx-ttyd-test/
 nginx-ttyd-notmux/
 dashboard/run/
 dashboard/state/
+/state/
 dashboard/runtime/
 dashboard/node_modules/
 dashboard/test-results/

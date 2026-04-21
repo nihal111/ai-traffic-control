@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { buildClaudeRefreshMeta, mergeClaudeUsageWindow } from './usage-cache.mjs';
-import { readProfilesJson, emptyProfileUsageCache } from './profile-catalog.mjs';
+import { readProfilesJson, emptyProfileUsageCache, syncActiveKeychainToCred } from './profile-catalog.mjs';
 
 const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
 const CLAUDE_OAUTH_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
@@ -361,6 +361,12 @@ async function fetchClaudeUsageRateLimited(context = {}, { force = false } = {})
       lastAttemptAt: attemptedAtIso,
       ...buildClaudeRefreshMeta(attemptedAtMs),
     };
+  }
+  // A successful poll confirms the active keychain credential is still live.
+  // Snapshot it to the active profile's .cred so silent background RT rotations
+  // don't strand us with a consumed single-use token at next switch.
+  if (resolvedLive?.ok) {
+    await syncActiveKeychainToCred();
   }
   return {
     ...resolvedLive,

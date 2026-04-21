@@ -442,6 +442,25 @@
       display: grid;
       gap: 4px;
     }
+    .profile-staleness {
+      margin-top: 6px;
+      font-size: 10px;
+      line-height: 1.3;
+      letter-spacing: 0.2px;
+    }
+    .profile-staleness.ok {
+      color: #8ec07c;
+    }
+    .profile-staleness.dim {
+      color: #928374;
+    }
+    .profile-staleness.warn {
+      color: #d79921;
+    }
+    .profile-staleness.critical {
+      color: #fb4934;
+      font-weight: 700;
+    }
     .mini {
       display: grid;
       grid-template-columns: 62px 34px minmax(0, 1.5fr) minmax(96px, 0.9fr);

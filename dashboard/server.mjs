@@ -14,6 +14,7 @@ import {
   getActiveProfile,
   getActiveProfileEmail,
   getProfileEmailByAlias,
+  computeProfileStaleness,
   PROFILES_DIR,
   PROFILES_JSON,
 } from './modules/profile-catalog.mjs';
@@ -2367,6 +2368,41 @@ function renderPage() {
       usageRefreshTicker = setInterval(tickUsageRefreshCountdown, 1000);
     }
 
+    function formatShortAge(ms) {
+      if (!Number.isFinite(ms) || ms < 0) return '';
+      const sec = Math.round(ms / 1000);
+      if (sec < 60) return sec + 's';
+      const min = Math.round(sec / 60);
+      if (min < 60) return min + 'm';
+      const hr = Math.round(min / 60);
+      if (hr < 48) return hr + 'h';
+      const day = Math.round(hr / 24);
+      return day + 'd';
+    }
+
+    function stalenessBadge(staleness, isActive) {
+      if (!staleness || typeof staleness !== 'object') return '';
+      const level = String(staleness.stalenessLevel || 'fresh');
+      const age = formatShortAge(staleness.lastSyncAgeMs);
+      if (isActive) {
+        // Active profile: only surface if sync is lagging (would imply the
+        // dashboard lost its keychain read loop).
+        if (level === 'fresh') {
+          return '<div class="profile-staleness ok">synced ' + esc(age) + ' ago</div>';
+        }
+        const label = level === 'critical' ? 'sync stalled' : 'sync lagging';
+        return '<div class="profile-staleness ' + level + '">⚠ ' + label + ' — last ' + esc(age) + ' ago</div>';
+      }
+      // Inactive profile: surface age when moderate, warn loudly near RT lifetime.
+      if (level === 'fresh') {
+        return '<div class="profile-staleness dim">last active ' + esc(age) + ' ago</div>';
+      }
+      if (level === 'warn') {
+        return '<div class="profile-staleness warn">last active ' + esc(age) + ' ago</div>';
+      }
+      return '<div class="profile-staleness critical">⚠ last active ' + esc(age) + ' ago — re-login likely needed</div>';
+    }
+
     function profileUsageCard(profile, activeAlias) {
       const usage = profile && profile.usageCache && typeof profile.usageCache === 'object' ? profile.usageCache : {};
       const alias = String(profile?.alias || '').trim();
@@ -2384,6 +2420,7 @@ function renderPage() {
           miniWindow(usage.primary || null) +
           miniWindow(usage.secondary || null) +
         '</div>' +
+        stalenessBadge(profile?.credStaleness, isActive) +
       '</button>';
     }
 
@@ -3887,6 +3924,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/profiles' && req.method === 'GET') {
     try {
       const catalog = readProfilesJson();
+      const now = Date.now();
       const profiles = Object.entries(catalog.profiles || {}).map(([alias, meta]) => {
         const rawCache =
           meta?.usageCache && typeof meta.usageCache === 'object'
@@ -3894,6 +3932,8 @@ const server = http.createServer(async (req, res) => {
             : emptyProfileUsageCache(meta?.email || null);
         // Profile email is authoritative per alias; avoid stale cache email bleed.
         if (meta?.email) rawCache.accountEmail = meta.email;
+        const isActive = catalog.active === alias;
+        const staleness = computeProfileStaleness(alias, { now, isActive });
         return {
           alias,
           displayName: meta.displayName || alias,
@@ -3901,6 +3941,7 @@ const server = http.createServer(async (req, res) => {
           subscriptionType: meta?.authState?.authStatus?.subscriptionType || null,
           createdAt: meta.createdAt || null,
           usageCache: decorateUsageWindows(rawCache, ['5-hour', 'weekly']),
+          credStaleness: staleness,
         };
       });
       json(res, 200, { active: catalog.active, profiles });
