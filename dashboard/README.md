@@ -142,7 +142,7 @@ Notes:
 
 If you have multiple Claude Pro/Max accounts, use `atc-profile` to switch between them from the CLI (and soon from the dashboard card itself).
 
-Detailed runbook: `dashboard/docs/claude-account-switching.md`
+Detailed runbook: `docs/claude-account-switching.md`
 
 ### Register a profile
 
