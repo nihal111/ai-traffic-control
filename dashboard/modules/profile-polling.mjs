@@ -67,12 +67,22 @@ async function pollUsageUntilProfileActive(options = {}) {
 
       if (onUsageUpdate) onUsageUpdate(usage);
 
+      // "fresh" = the batch refresh behind /api/usage ran *after* we kicked off
+      // the switch. Checking this is load-bearing: a response with
+      // activeProfile=<new alias> but fetchedAt older than switchStartedAt
+      // means the server is still returning the OUTGOING account's cached
+      // windows (plan, email, percent used) with just the active-profile
+      // marker flipped. Accepting that renders stale data on the card —
+      // exactly the "still shows the previous account" bug this poll exists
+      // to prevent. isThrottled alone used to be treated as success; it can't,
+      // because fetchClaudeUsageRateLimited returns throttled=true when it
+      // serves its in-process cache, which is always the old account right
+      // after a switch.
       const isFresh = usage.fetchedAt ? Date.parse(usage.fetchedAt) > switchStartedAt : false;
-      const isThrottled = !!usage.claude?.throttled;
       const profileMatches = usage.activeProfile === targetAlias;
       const claudeReady = usage.claude && !usage.claude.loading;
 
-      if (profileMatches && claudeReady && (isFresh || isThrottled)) {
+      if (profileMatches && claudeReady && isFresh) {
         if (onComplete) {
           try {
             const profileResp = await fetch(fetchProfilesUrl, { cache: 'no-store' });

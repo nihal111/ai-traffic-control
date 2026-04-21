@@ -663,14 +663,18 @@ function buildBootUsageSummaryFromCaches() {
   };
 }
 
-function refreshUsageSummaryInBackground() {
+function refreshUsageSummaryInBackground({ force = {} } = {}) {
+  // Callers (notably /api/profiles/switch) pass { force: { claude: true } } to
+  // bypass the in-process min-interval throttle — otherwise a fresh switch can
+  // return the previous account's cached windows with throttled=true, which the
+  // frontend polling accepts as "done" and renders stale data on the card.
   if (usageCache.pending) return usageCache.pending;
   let pending = null;
   pending = (async () => {
     try {
       const [codexRaw, claudeRaw, geminiRaw] = await Promise.all([
         fetchProviderUsageRateLimited('codex', 'cli', CODEX_USAGE_MIN_INTERVAL_MS),
-        fetchClaudeUsageRateLimited(),
+        fetchClaudeUsageRateLimited({ force: !!force.claude }),
         fetchProviderUsageRateLimited('gemini', 'auto', GEMINI_USAGE_MIN_INTERVAL_MS),
       ]);
       const claudeEmailFallback = getActiveProfileEmail();
@@ -1986,6 +1990,7 @@ function renderPage() {
         <button type="button" class="modal-close" id="profile-switch-close" aria-label="Close account switcher">&times;</button>
       </div>
       <div class="profile-switch-subtitle">Choose an account. Cached CLI usage is shown per profile.</div>
+      <div class="profile-switch-error" id="profile-switch-error" role="alert" hidden></div>
       <div class="profile-switch-list" id="profile-switch-list"></div>
       <div class="modal-actions">
         <button type="button" class="btn-secondary" id="profile-switch-cancel">Close</button>
@@ -2405,11 +2410,43 @@ function renderPage() {
     }
 
     function openProfileSwitchModal() {
+      clearProfileSwitchError();
       renderProfileSwitchModal();
       const modal = document.getElementById('profile-switch-modal');
       if (modal) modal.classList.add('open');
       profileSwitchState.open = true;
       toggleBodyScroll(true);
+    }
+
+    function showProfileSwitchError(message) {
+      const el = document.getElementById('profile-switch-error');
+      if (!el) return;
+      const text = String(message || '').trim() || 'Switch failed.';
+      el.textContent = text;
+      el.hidden = false;
+    }
+
+    function clearProfileSwitchError() {
+      const el = document.getElementById('profile-switch-error');
+      if (!el) return;
+      el.textContent = '';
+      el.hidden = true;
+    }
+
+    function summarizeSwitchError(raw) {
+      const text = String(raw || '').trim();
+      if (!text) return 'Switch failed.';
+      // atc-profile surfaces multi-line Anthropic/codexbar output. Pick the
+      // first non-Warning line so the toast reads as an actionable reason
+      // rather than leading with "Warning: ...".
+      for (const line of text.split(/\\r?\\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (trimmed.toLowerCase().startsWith('warning:')) continue;
+        return trimmed.length > 180 ? trimmed.slice(0, 179) + '…' : trimmed;
+      }
+      const first = text.split(/\\r?\\n/)[0].trim();
+      return first.length > 180 ? first.slice(0, 179) + '…' : (first || 'Switch failed.');
     }
 
     function closeProfileSwitchModal() {
@@ -2419,10 +2456,72 @@ function renderPage() {
       toggleBodyScroll(false);
     }
 
+    function targetProfileCache(alias) {
+      if (!alias || !Array.isArray(latestProfiles)) return null;
+      const match = latestProfiles.find(function (p) { return p && p.alias === alias; });
+      const cache = match && match.usageCache && typeof match.usageCache === 'object' ? match.usageCache : null;
+      return cache;
+    }
+
+    let postSwitchPollTimer = null;
+    function startPostSwitchReconcilePoll(alias, switchStartedAt) {
+      if (postSwitchPollTimer) {
+        clearTimeout(postSwitchPollTimer);
+        postSwitchPollTimer = null;
+      }
+      let attempts = 0;
+      const intervalMs = 2000;
+      const maxAttempts = 90;
+      const tick = async function () {
+        attempts += 1;
+        try {
+          const [usageResp, profilesResp] = await Promise.all([
+            fetch('/api/usage', { cache: 'no-store' }),
+            fetch('/api/profiles', { cache: 'no-store' }),
+          ]);
+          let usage = null;
+          if (usageResp.ok) {
+            try { usage = await usageResp.json(); } catch (_e) { usage = null; }
+          }
+          if (profilesResp.ok) {
+            try {
+              const profilesPayload = await profilesResp.json();
+              if (profilesPayload && Array.isArray(profilesPayload.profiles)) {
+                latestProfiles = profilesPayload.profiles;
+              }
+            } catch (_e) {}
+          }
+          if (usage && typeof usage === 'object') {
+            const isFresh = usage.fetchedAt ? Date.parse(usage.fetchedAt) > switchStartedAt : false;
+            const profileMatches = usage.activeProfile === alias;
+            const claudeReady = usage.claude && !usage.claude.loading;
+            if (isFresh && profileMatches && claudeReady) {
+              renderUsageGrid(usage);
+              postSwitchPollTimer = null;
+              return;
+            }
+          }
+        } catch (_error) {}
+        if (attempts >= maxAttempts) {
+          postSwitchPollTimer = null;
+          return;
+        }
+        postSwitchPollTimer = setTimeout(tick, intervalMs);
+      };
+      postSwitchPollTimer = setTimeout(tick, intervalMs);
+    }
+
     async function switchProfileTo(alias) {
       if (!alias || claudeSwitchingAlias) return;
+      const prevUsage = latestUsage;
       claudeSwitchingAlias = alias;
-      latestUsage = { ...(latestUsage || {}), activeProfile: alias };
+      clearProfileSwitchError();
+      const targetCache = targetProfileCache(alias);
+      latestUsage = {
+        ...(latestUsage || {}),
+        activeProfile: alias,
+        ...(targetCache ? { claude: targetCache } : {}),
+      };
       renderUsageGrid(latestUsage);
       renderProfileSwitchModal();
       const switchStartedAt = Date.now();
@@ -2433,9 +2532,13 @@ function renderPage() {
           body: JSON.stringify({ alias }),
         });
         if (!resp.ok) {
+          let errorBody = null;
+          try { errorBody = await resp.json(); } catch (_e) { errorBody = null; }
           claudeSwitchingAlias = '';
+          latestUsage = prevUsage;
           renderUsageGrid(latestUsage);
           renderProfileSwitchModal();
+          showProfileSwitchError(summarizeSwitchError(errorBody?.error));
           return;
         }
         await pollUsageUntilProfileActive({
@@ -2451,6 +2554,11 @@ function renderPage() {
               for (const key of ['codex', 'gemini']) {
                 if (usage[key]?.loading && latestUsage?.[key]) usage[key] = latestUsage[key];
               }
+              // Hold the target profile's cached Claude numbers visible while
+              // the background refresh is still running — otherwise a poll tick
+              // that reads a loading/null claude snapshot would flicker the card
+              // back to a spinner between the optimistic pre-render and onComplete.
+              if (usage.claude?.loading && targetCache) usage.claude = targetCache;
             }
           },
           onComplete: function (data) {
@@ -2463,15 +2571,24 @@ function renderPage() {
             closeProfileSwitchModal();
           },
           onTimeout: function () {
+            // Backend force-refresh didn't land inside the 16s wall-clock
+            // budget (codexbar OAuth + web + CLI fallbacks can exceed it on
+            // rate-limited accounts). Leave the optimistic cached render in
+            // place, close the modal, and keep polling in the background so
+            // the card swaps to live numbers without a manual refresh.
             claudeSwitchingAlias = '';
+            renderUsageGrid(latestUsage);
             renderProfileSwitchModal();
-            refresh().catch(() => {});
+            closeProfileSwitchModal();
+            startPostSwitchReconcilePoll(alias, switchStartedAt);
           },
         });
       } catch (error) {
         claudeSwitchingAlias = '';
+        latestUsage = prevUsage;
         renderUsageGrid(latestUsage);
         renderProfileSwitchModal();
+        showProfileSwitchError(summarizeSwitchError(error?.message));
       }
     }
 
@@ -3814,9 +3931,15 @@ const server = http.createServer(async (req, res) => {
         json(res, 500, { error: result.stderr || 'Profile switch failed' });
         return;
       }
-      // Keep previous usage visible while refreshing in background for a smoother UX.
-      usageCache = { value: usageCache.value, fetchedAt: usageCache.fetchedAt, pending: null };
-      refreshUsageSummaryInBackground().catch(() => {});
+      // Invalidate the cache entirely — the previous value belonged to a
+      // different Claude account, so keeping it around causes the home-page
+      // card (plan, windows, email) to render the OUTGOING account until the
+      // background refresh completes. Paired with { force: { claude: true } },
+      // this guarantees the next /api/usage response the frontend poller sees
+      // is either loading=true (still fetching) or fresh for the NEW account,
+      // never stale-but-throttled for the outgoing one.
+      usageCache = { value: null, fetchedAt: 0, pending: null };
+      refreshUsageSummaryInBackground({ force: { claude: true } }).catch(() => {});
       json(res, 200, { ok: true, active: alias });
     } catch (error) {
       json(res, 500, { error: error.message || 'switch failed' });

@@ -9,3 +9,5 @@ dashboard/runtime/
 dashboard/node_modules/
 dashboard/test-results/
 data/
+.DS_Store
+**/.DS_Store

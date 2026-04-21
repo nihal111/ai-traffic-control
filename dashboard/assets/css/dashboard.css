@@ -378,6 +378,17 @@
       line-height: 1.35;
       margin-bottom: 10px;
     }
+    .profile-switch-error {
+      background: #3c1f1f;
+      color: #fb4934;
+      border: 1px solid #cc241d;
+      border-radius: 4px;
+      padding: 8px 10px;
+      font-size: 12px;
+      line-height: 1.4;
+      margin-bottom: 10px;
+      word-break: break-word;
+    }
     .profile-switch-list {
       display: grid;
       gap: 8px;
