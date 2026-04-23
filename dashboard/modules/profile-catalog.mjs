@@ -1,10 +1,12 @@
 import fsSync from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import { recordEvent, fingerprint } from './credential-events.mjs';
 
 const PROFILES_DIR = path.join(process.env.HOME || '', '.claude-profiles');
 const PROFILES_JSON = path.join(PROFILES_DIR, 'profiles.json');
 const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
+const CLAUDE_GLOBAL_STATE = path.join(process.env.HOME || '', '.claude.json');
 
 function credPath(alias) {
   return path.join(PROFILES_DIR, `${alias}.cred`);
@@ -62,40 +64,70 @@ function readStoredCred(alias) {
 // Best-effort: any error (no active profile, keychain empty, filesystem fail)
 // is swallowed and reported via the returned object. Callers never await a
 // throw — the poll path must not fail because of this sync.
-async function syncActiveKeychainToCred() {
+async function syncActiveKeychainToCred({ trigger = 'poll', actor = 'sync-daemon' } = {}) {
   try {
     const catalog = readProfilesJson();
     const alias = typeof catalog.active === 'string' ? catalog.active.trim() : '';
-    if (!alias) return { synced: false, reason: 'no active profile' };
+    if (!alias) {
+      recordEvent({ actor, action: 'sync-skip', outcome: 'skipped:no-active-profile', trigger });
+      return { synced: false, reason: 'no active profile' };
+    }
+    const expectedEmail =
+      typeof catalog.profiles?.[alias]?.email === 'string'
+        ? catalog.profiles[alias].email.trim().toLowerCase()
+        : '';
 
     const keychainBlob = await readKeychainBlob();
-    if (!keychainBlob) return { synced: false, reason: 'keychain empty or unreadable' };
+    if (!keychainBlob) {
+      recordEvent({ actor, action: 'sync-skip', alias, outcome: 'skipped:keychain-empty', trigger });
+      return { synced: false, reason: 'keychain empty or unreadable' };
+    }
 
     const kcParsed = parseCredBlob(keychainBlob);
     const kcRefresh = String(kcParsed?.claudeAiOauth?.refreshToken || '').trim();
-    if (!kcRefresh) return { synced: false, reason: 'keychain blob has no refresh token' };
+    const kcAccess = String(kcParsed?.claudeAiOauth?.accessToken || '').trim();
+    if (!kcRefresh) {
+      recordEvent({ actor, action: 'sync-skip', alias, outcome: 'skipped:keychain-no-rt', trigger });
+      return { synced: false, reason: 'keychain blob has no refresh token' };
+    }
 
     const storedBlob = readStoredCred(alias);
-    if (storedBlob) {
-      const storedParsed = parseCredBlob(storedBlob);
-      const storedRefresh = String(storedParsed?.claudeAiOauth?.refreshToken || '').trim();
-      if (storedRefresh && storedRefresh === kcRefresh) {
-        // Touch mtime so "last successful sync check" stays fresh for the UI
-        // even when RT hasn't rotated. Without this, an active profile whose
-        // RT rotates rarely would look stale despite the dashboard polling it.
-        try {
-          const now = new Date();
-          fsSync.utimesSync(credPath(alias), now, now);
-        } catch {
-          // best-effort — missing file or perms issue is non-fatal
-        }
-        return { synced: false, reason: 'already in sync', alias };
-      }
+    const storedParsed = storedBlob ? parseCredBlob(storedBlob) : null;
+    const storedRefresh = String(storedParsed?.claudeAiOauth?.refreshToken || '').trim();
+
+    if (storedRefresh && storedRefresh === kcRefresh) {
+      try {
+        const now = new Date();
+        fsSync.utimesSync(credPath(alias), now, now);
+      } catch { /* best-effort */ }
+      recordEvent({
+        actor,
+        action: 'sync-check',
+        alias,
+        alias_email: expectedEmail || null,
+        rt_fp: fingerprint(kcRefresh),
+        at_fp: fingerprint(kcAccess),
+        outcome: 'unchanged',
+        trigger,
+      });
+      return { synced: false, reason: 'already in sync', alias };
     }
 
     writeCredAtomic(alias, keychainBlob);
+    recordEvent({
+      actor,
+      action: 'sync-write',
+      alias,
+      alias_email: expectedEmail || null,
+      rt_fp: fingerprint(kcRefresh),
+      prev_rt_fp: fingerprint(storedRefresh),
+      at_fp: fingerprint(kcAccess),
+      outcome: 'ok',
+      trigger,
+    });
     return { synced: true, alias };
   } catch (err) {
+    recordEvent({ actor, action: 'sync-error', outcome: `error:${err?.message || err}`, trigger });
     return { synced: false, reason: `error: ${err?.message || err}` };
   }
 }
@@ -224,6 +256,79 @@ function getProfileEmailByAlias(alias) {
   return typeof email === 'string' && email.trim() ? email.trim() : null;
 }
 
+// Watch ~/.claude.json for changes and trigger an immediate keychain→cred
+// sync. The Claude CLI writes to this file whenever it re-reads the keychain
+// (after a refresh or after detecting an external keychain swap), so its
+// mtime is our best proxy for "the keychain has probably rotated." Combined
+// with a slow safety poll, this gets us near-realtime sync without needing
+// native keychain-change notifications.
+//
+// Returns a stop() function the caller can use to tear down.
+function startCredentialWatcher({
+  debounceMs = 250,
+  safetyPollMs = Number(process.env.ATC_CREDENTIAL_SAFETY_POLL_MS || 10_000),
+  actor = 'sync-daemon',
+  onSync = null,
+} = {}) {
+  let watcher = null;
+  let debounceTimer = null;
+  let safetyTimer = null;
+  let stopped = false;
+
+  const fire = async (trigger) => {
+    if (stopped) return;
+    try {
+      const result = await syncActiveKeychainToCred({ trigger, actor });
+      if (onSync) onSync(result);
+    } catch (err) {
+      recordEvent({ actor, action: 'sync-error', outcome: `watcher-error:${err?.message || err}`, trigger });
+    }
+  };
+
+  const schedule = (trigger) => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      fire(trigger);
+    }, debounceMs);
+  };
+
+  const attachWatcher = () => {
+    try {
+      watcher = fsSync.watch(CLAUDE_GLOBAL_STATE, { persistent: false }, () => schedule('fs-watch'));
+      watcher.on('error', () => {
+        try { watcher?.close(); } catch { /* ignore */ }
+        watcher = null;
+        recordEvent({ actor, action: 'watcher-error', outcome: 'rescheduling', trigger: 'fs-watch' });
+        // Retry shortly — file may have been atomically replaced.
+        setTimeout(attachWatcher, 1000);
+      });
+      recordEvent({ actor, action: 'watcher-start', outcome: 'ok', target: CLAUDE_GLOBAL_STATE });
+    } catch (err) {
+      recordEvent({ actor, action: 'watcher-start', outcome: `error:${err?.message || err}`, target: CLAUDE_GLOBAL_STATE });
+      // If the file doesn't exist yet, retry later.
+      setTimeout(attachWatcher, 5000);
+    }
+  };
+
+  attachWatcher();
+
+  // Safety poll — catches rotations that happen without ~/.claude.json changing
+  // (should be rare but possible).
+  safetyTimer = setInterval(() => schedule('safety-poll'), safetyPollMs);
+  if (safetyTimer.unref) safetyTimer.unref();
+
+  // Initial sync at startup so the dashboard doesn't run with a stale snapshot.
+  schedule('startup');
+
+  return () => {
+    stopped = true;
+    if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+    if (safetyTimer) { clearInterval(safetyTimer); safetyTimer = null; }
+    if (watcher) { try { watcher.close(); } catch { /* ignore */ } watcher = null; }
+  };
+}
+
 export {
   readProfilesJson,
   writeProfilesJson,
@@ -233,9 +338,11 @@ export {
   getProfileEmailByAlias,
   readKeychainBlob,
   syncActiveKeychainToCred,
+  startCredentialWatcher,
   computeProfileStaleness,
   credPath,
   parseCredBlob,
   PROFILES_DIR,
   PROFILES_JSON,
+  CLAUDE_GLOBAL_STATE,
 };

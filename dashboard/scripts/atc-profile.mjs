@@ -18,8 +18,18 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import readline from 'node:readline/promises';
+import { recordEvent, tailEvents, fingerprint, parseDuration } from '../modules/credential-events.mjs';
+import { checkBudget, recordAttempt, forgetLineage, listCooldowns } from '../modules/refresh-budget.mjs';
+
+// Ensure the credential event log + refresh-budget state live in the same
+// dashboard/runtime directory whether this script is invoked standalone or
+// from the dashboard server. Skip if the caller has already pinned a dir.
+if (!process.env.ATC_DASHBOARD_RUNTIME_DIR) {
+  const __thisFile = fileURLToPath(import.meta.url);
+  process.env.ATC_DASHBOARD_RUNTIME_DIR = path.resolve(path.dirname(__thisFile), '..', 'runtime');
+}
 
 const KEYCHAIN_SERVICE = 'Claude Code-credentials';
 const PROFILES_DIR = path.join(os.homedir(), '.claude-profiles');
@@ -322,14 +332,109 @@ export function parseRefreshResponse(raw) {
   return { httpStatus, responseBody, payload };
 }
 
-function refreshCredentialBlob(blob) {
+// Pure: parse `curl -i -w '\n%{http_code}'` output.
+// Format: <status_line>\r\n<header_lines>\r\n\r\n<body>\n<http_code>
+// Returns httpStatus, responseBody, payload, and a lower-cased headers map so
+// callers can surface Retry-After / x-ratelimit-* / request-id in events —
+// critical signal for distinguishing transient vs lineage-cap rate limits.
+export function parseRefreshResponseWithHeaders(raw) {
+  const str = String(raw || '');
+  const lastNewline = str.lastIndexOf('\n');
+  const httpStatus = lastNewline >= 0 ? Number(str.slice(lastNewline + 1).trim()) : 0;
+  const rest = lastNewline >= 0 ? str.slice(0, lastNewline) : str;
+
+  let sepIdx = rest.indexOf('\r\n\r\n');
+  let sepLen = 4;
+  if (sepIdx < 0) {
+    sepIdx = rest.indexOf('\n\n');
+    sepLen = 2;
+  }
+  let headersRaw = '';
+  let responseBody = rest;
+  if (sepIdx >= 0) {
+    headersRaw = rest.slice(0, sepIdx);
+    responseBody = rest.slice(sepIdx + sepLen);
+  }
+  responseBody = responseBody.trim();
+
+  const headers = {};
+  if (headersRaw) {
+    for (const line of headersRaw.split(/\r?\n/)) {
+      if (!line || /^HTTP\//i.test(line)) continue;
+      const colonIdx = line.indexOf(':');
+      if (colonIdx < 0) continue;
+      const key = line.slice(0, colonIdx).trim().toLowerCase();
+      const val = line.slice(colonIdx + 1).trim();
+      if (key) headers[key] = val;
+    }
+  }
+
+  let payload = null;
+  try {
+    payload = responseBody ? JSON.parse(responseBody) : null;
+  } catch {
+    // non-JSON; caller treats as error
+  }
+  return { httpStatus, responseBody, payload, headers };
+}
+
+// Pick just the rate-limit / correlation headers from a raw header map.
+// Null out empty fields so the event-log JSON stays compact.
+export function pickRateLimitHeaders(headers) {
+  if (!headers || typeof headers !== 'object') return {};
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (!v) continue;
+    if (/^retry-after$/i.test(k)) out.retry_after = v;
+    else if (/ratelimit/i.test(k)) out[k.replace(/-/g, '_')] = v;
+    else if (/^(x-)?request-id$/i.test(k) || /^anthropic-request-id$/i.test(k)) out.request_id = v;
+    else if (/^anthropic-/i.test(k)) out[k.replace(/-/g, '_')] = v;
+  }
+  return out;
+}
+
+// Wrap refreshCredentialBlob with: pre-check against the refresh budget
+// (rate-limit cooldown + dedup), logging, and post-call budget accounting.
+// Callers can opt out of budget enforcement with { bypassBudget: true } for
+// the rare cases (rotate's final re-register) where we know we hold a fresh
+// lineage that hasn't been seen before.
+function refreshCredentialBlob(blob, { actor = 'refresh', alias = null, phase = 'proactive', bypassBudget = false } = {}) {
   const parsed = parseCredentialBlob(blob);
   const refreshToken = String(parsed?.claudeAiOauth?.refreshToken || '').trim();
   if (!refreshToken) {
+    recordEvent({ actor, action: 'refresh-skip', alias, phase, outcome: 'error:missing-refresh-token' });
     const err = new Error('saved credential is missing Claude OAuth refreshToken');
     err.oauthError = 'missing_refresh_token';
     throw err;
   }
+  const rtFp = fingerprint(refreshToken);
+
+  if (!bypassBudget) {
+    const budget = checkBudget(rtFp);
+    if (!budget.allowed) {
+      recordEvent({
+        actor,
+        action: 'refresh-skip',
+        alias,
+        phase,
+        rt_fp: rtFp,
+        outcome: `skipped:${budget.reason}`,
+        retry_at: budget.retryAt ? new Date(budget.retryAt).toISOString() : null,
+      });
+      const err = new Error(
+        budget.reason === 'cooldown'
+          ? `OAuth refresh blocked: lineage is in cooldown until ${new Date(budget.retryAt).toISOString()}${budget.error ? ` (last error: ${budget.error})` : ''}`
+          : `OAuth refresh deduplicated: last attempt was <${Math.ceil((budget.retryAt - Date.now()) / 1000)}s ago`,
+      );
+      err.oauthError = budget.reason === 'cooldown' ? 'rate_limit_error' : 'dedup';
+      err.httpStatus = budget.reason === 'cooldown' ? 429 : 0;
+      err.budgetReason = budget.reason;
+      err.retryAt = budget.retryAt;
+      throw err;
+    }
+  }
+
+  recordEvent({ actor, action: 'refresh-request', alias, phase, rt_fp: rtFp, outcome: 'sent' });
 
   const body = JSON.stringify({
     grant_type: 'refresh_token',
@@ -342,26 +447,49 @@ function refreshCredentialBlob(blob) {
   try {
     raw = execFileSync('curl', [
       '-sS',
+      '-i',
       '-w', '\n%{http_code}',
       '--max-time', String(Number(process.env.ATC_CLAUDE_REFRESH_TIMEOUT_SEC || 15)),
       '-X', 'POST',
       '-H', 'Content-Type: application/json',
       '-d', body,
       CLAUDE_OAUTH_TOKEN_URL,
-    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 2 * 1024 * 1024 }).trim();
+    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 2 * 1024 * 1024 });
   } catch (error) {
     const detail = typeof error?.stderr === 'string' && error.stderr.trim()
       ? error.stderr.trim()
       : error.message || 'unknown refresh failure';
+    recordEvent({ actor, action: 'refresh-response', alias, phase, rt_fp: rtFp, outcome: `error:network`, detail });
+    recordAttempt(rtFp, { outcome: 'network_error', error: detail, alias });
     const err = new Error(`OAuth refresh request failed: ${detail}`);
     err.oauthError = 'network_error';
     throw err;
   }
 
-  const { httpStatus, responseBody, payload } = parseRefreshResponse(raw);
+  const { httpStatus, responseBody, payload, headers } = parseRefreshResponseWithHeaders(raw);
+  const rateLimitHeaders = pickRateLimitHeaders(headers);
 
   if (!Number.isFinite(httpStatus) || httpStatus < 200 || httpStatus >= 300) {
     const { code, desc } = classifyRefreshError(httpStatus, payload, responseBody);
+    recordEvent({
+      actor,
+      action: 'refresh-response',
+      alias,
+      phase,
+      rt_fp: rtFp,
+      http_status: httpStatus,
+      oauth_error: code,
+      detail: desc,
+      outcome: `error:${code}`,
+      ...rateLimitHeaders,
+    });
+    if (httpStatus === 429 || code === 'rate_limit_error') {
+      recordAttempt(rtFp, { outcome: 'rate_limited', error: `${code}: ${desc}`, alias });
+    } else if (isFatalRefreshError(code, httpStatus)) {
+      recordAttempt(rtFp, { outcome: 'fatal', error: `${code}: ${desc}`, alias });
+    } else {
+      recordAttempt(rtFp, { outcome: 'network_error', error: `${code}: ${desc}`, alias });
+    }
     const err = new Error(`OAuth refresh rejected (${code}): ${desc}`);
     err.oauthError = code;
     err.httpStatus = httpStatus;
@@ -369,6 +497,37 @@ function refreshCredentialBlob(blob) {
   }
 
   const next = buildRefreshedBlob(parsed, payload);
+  const newRtFp = fingerprint(next?.claudeAiOauth?.refreshToken);
+  const newAtFp = fingerprint(next?.claudeAiOauth?.accessToken);
+  const rotated = Boolean(newRtFp && newRtFp !== rtFp);
+  recordEvent({
+    actor,
+    action: 'refresh-response',
+    alias,
+    phase,
+    rt_fp: rtFp,
+    new_rt_fp: newRtFp,
+    new_at_fp: newAtFp,
+    rt_rotated: rotated,
+    expires_at: next?.claudeAiOauth?.expiresAt ? new Date(next.claudeAiOauth.expiresAt).toISOString() : null,
+    http_status: httpStatus,
+    outcome: 'ok',
+    ...rateLimitHeaders,
+  });
+  // Dedicated lineage-chain event — one line per RT hop, easy to grep & join.
+  recordEvent({
+    actor,
+    action: 'rt-rotation',
+    alias,
+    phase,
+    prev_rt_fp: rtFp,
+    new_rt_fp: newRtFp,
+    rotated,
+    outcome: rotated ? 'rotated' : 'reused',
+  });
+  recordAttempt(rtFp, { outcome: 'ok', alias });
+  // The old RT is dead server-side now; forget its budget state.
+  if (rotated) forgetLineage(rtFp);
   return JSON.stringify(next);
 }
 
@@ -580,18 +739,26 @@ function keychainExport() {
   }
 }
 
-function keychainDelete() {
+function keychainDelete({ actor = 'atc-profile', reason = null } = {}) {
+  let existed = true;
   try {
     execFileSync('security', [
       'delete-generic-password',
       '-s', KEYCHAIN_SERVICE,
     ], { stdio: 'ignore' });
   } catch {
-    // entry may not exist — that's fine
+    existed = false;
   }
+  recordEvent({
+    actor,
+    action: 'keychain-delete',
+    outcome: existed ? 'ok' : 'skipped:not-present',
+    reason,
+  });
 }
 
-function keychainImport(blob) {
+function keychainImport(blob, { actor = 'atc-profile', alias = null, reason = null } = {}) {
+  const parsed = parseCredentialBlob(blob);
   execFileSync('security', [
     'add-generic-password',
     '-s', KEYCHAIN_SERVICE,
@@ -599,6 +766,16 @@ function keychainImport(blob) {
     '-w', blob,
     '-U',           // update if already exists (safety net)
   ], { stdio: 'ignore' });
+  recordEvent({
+    actor,
+    action: 'keychain-write',
+    alias,
+    rt_fp: fingerprint(parsed?.claudeAiOauth?.refreshToken),
+    at_fp: fingerprint(parsed?.claudeAiOauth?.accessToken),
+    expires_at: parsed?.claudeAiOauth?.expiresAt ? new Date(parsed.claudeAiOauth.expiresAt).toISOString() : null,
+    outcome: 'ok',
+    reason,
+  });
 }
 
 // ── profile credential files ─────────────────────────────────────────────────
@@ -607,23 +784,97 @@ function credPath(alias) {
   return path.join(PROFILES_DIR, `${alias}.cred`);
 }
 
-function saveCredential(alias, blob) {
+function saveCredential(alias, blob, { actor = 'atc-profile', reason = null, source = null } = {}) {
   ensureDir(PROFILES_DIR);
-  fs.writeFileSync(credPath(alias), blob, { encoding: 'utf8', mode: 0o600 });
+  const parsed = parseCredentialBlob(blob);
+  const p = credPath(alias);
+  // Capture what's on disk BEFORE we overwrite — we want to know if we're
+  // trampling a newer RT that some other flow put there.
+  let prevRtFp = null;
+  let prevAtFp = null;
+  let prevMtime = null;
+  try {
+    const st = fs.statSync(p);
+    prevMtime = new Date(st.mtimeMs).toISOString();
+    const existing = fs.readFileSync(p, 'utf8').trim();
+    const prevParsed = parseCredentialBlob(existing);
+    prevRtFp = fingerprint(prevParsed?.claudeAiOauth?.refreshToken);
+    prevAtFp = fingerprint(prevParsed?.claudeAiOauth?.accessToken);
+  } catch { /* no prior file — fine */ }
+
+  fs.writeFileSync(p, blob, { encoding: 'utf8', mode: 0o600 });
+  const newRtFp = fingerprint(parsed?.claudeAiOauth?.refreshToken);
+  const newAtFp = fingerprint(parsed?.claudeAiOauth?.accessToken);
+  recordEvent({
+    actor,
+    action: 'disk-write',
+    alias,
+    rt_fp: newRtFp,
+    at_fp: newAtFp,
+    prev_rt_fp: prevRtFp,
+    prev_at_fp: prevAtFp,
+    prev_mtime: prevMtime,
+    rt_changed: prevRtFp ? prevRtFp !== newRtFp : null,
+    expires_at: parsed?.claudeAiOauth?.expiresAt ? new Date(parsed.claudeAiOauth.expiresAt).toISOString() : null,
+    scopes: Array.isArray(parsed?.claudeAiOauth?.scopes) ? parsed.claudeAiOauth.scopes : null,
+    size: Buffer.byteLength(blob, 'utf8'),
+    outcome: 'ok',
+    reason,
+    source,
+  });
 }
 
-function loadCredential(alias) {
+function loadCredential(alias, { actor = 'atc-profile', reason = null } = {}) {
   const p = credPath(alias);
   if (!fs.existsSync(p)) {
+    recordEvent({ actor, action: 'disk-read', alias, outcome: 'missing', reason });
     throw new Error(`No saved credential for profile "${alias}" at ${p}`);
   }
-  return fs.readFileSync(p, 'utf8').trim();
+  const blob = fs.readFileSync(p, 'utf8').trim();
+  let rtFp = null;
+  let atFp = null;
+  let expiresAt = null;
+  let mtime = null;
+  try {
+    const parsed = parseCredentialBlob(blob);
+    rtFp = fingerprint(parsed?.claudeAiOauth?.refreshToken);
+    atFp = fingerprint(parsed?.claudeAiOauth?.accessToken);
+    expiresAt = parsed?.claudeAiOauth?.expiresAt
+      ? new Date(parsed.claudeAiOauth.expiresAt).toISOString()
+      : null;
+  } catch { /* parse errors logged as outcome */ }
+  try {
+    mtime = new Date(fs.statSync(p).mtimeMs).toISOString();
+  } catch { /* ignore */ }
+  recordEvent({
+    actor,
+    action: 'disk-read',
+    alias,
+    rt_fp: rtFp,
+    at_fp: atFp,
+    expires_at: expiresAt,
+    mtime,
+    size: Buffer.byteLength(blob, 'utf8'),
+    outcome: 'ok',
+    reason,
+  });
+  return blob;
 }
 
-function backupCurrent(blob) {
+function backupCurrent(blob, { actor = 'atc-profile', alias = null } = {}) {
   ensureDir(BACKUP_DIR);
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  fs.writeFileSync(path.join(BACKUP_DIR, `${ts}.cred`), blob, { encoding: 'utf8', mode: 0o600 });
+  const file = path.join(BACKUP_DIR, `${ts}.cred`);
+  fs.writeFileSync(file, blob, { encoding: 'utf8', mode: 0o600 });
+  const parsed = parseCredentialBlob(blob);
+  recordEvent({
+    actor,
+    action: 'backup-write',
+    alias,
+    rt_fp: fingerprint(parsed?.claudeAiOauth?.refreshToken),
+    outcome: 'ok',
+    file: path.basename(file),
+  });
 }
 
 // ── commands ──────────────────────────────────────────────────────────────────
@@ -700,7 +951,7 @@ async function cmdAdd(alias) {
     }
   }
 
-  saveCredential(alias, blob);
+  saveCredential(alias, blob, { actor: 'add', reason: existingProfile ? 'refresh-alias' : 'register', source: 'keychain-export' });
   const codexbarAccountLabel = syncCodexbarTokenAccount(alias, codexbarToken, { setActive: true, webAuth });
 
   catalog.profiles[alias] = {
@@ -759,6 +1010,30 @@ function cmdCurrent() {
   }
 }
 
+// Phase 4: skip-if-fresh guard.
+//
+// Before firing a proactive refresh on a near-expiry blob, check whether we
+// actually *need* to. If the target's access token still has runway AND we
+// verified its identity recently, skip the refresh entirely and let the
+// reactive path handle only the case where the server actually rejects us.
+// This cuts refresh-endpoint traffic to the minimum and reduces rate-limit
+// exposure for healthy profiles.
+function canSkipProactiveRefresh(blob, profile, nowMs = Date.now()) {
+  const exp = blobExpiresAtMs(blob);
+  if (exp == null) return false;
+  const tokenRunwayMs = exp - nowMs;
+  const minRunway = Number(process.env.ATC_SKIP_REFRESH_MIN_RUNWAY_MS || 5 * 60 * 1000);
+  if (tokenRunwayMs < minRunway) return false;
+
+  const capturedAtIso = profile?.authState?.capturedAt;
+  if (!capturedAtIso) return false;
+  const capturedAt = Date.parse(capturedAtIso);
+  if (!Number.isFinite(capturedAt)) return false;
+  const identityAgeMs = nowMs - capturedAt;
+  const maxIdentityAge = Number(process.env.ATC_SKIP_REFRESH_MAX_IDENTITY_AGE_MS || 10 * 60 * 1000);
+  return identityAgeMs < maxIdentityAge;
+}
+
 function switchProfile(alias, options = {}) {
   if (!alias) die('Usage: atc-profile use <alias>');
   // Default: capture the currently-active profile's rotated tokens before swap,
@@ -776,6 +1051,18 @@ function switchProfile(alias, options = {}) {
     return { authState: catalog.profiles[alias]?.authState || null };
   }
 
+  const switchId = randomUUID();
+  const fromAlias = catalog.active || null;
+  recordEvent({
+    actor: 'switch',
+    action: 'switch-start',
+    alias,
+    from_alias: fromAlias,
+    switch_id: switchId,
+    sync_active: syncActive,
+    outcome: 'started',
+  });
+
   // NOTE: sync-active used to run here, at the top of switchProfile. It has
   // been moved down to just before keychainDelete so we capture the keychain
   // as close as possible to the swap — narrowing the window in which another
@@ -785,37 +1072,77 @@ function switchProfile(alias, options = {}) {
   //    so .cred snapshots can drift: the access token may be dead well before
   //    its stored expiresAt (another claude process rotated it away). We handle
   //    both signals — near-expiry proactively, and live 401 reactively.
-  let targetBlob = loadCredential(alias);
+  let targetBlob = loadCredential(alias, { actor: 'switch', reason: 'load-target' });
   let refreshed = false;
 
-  const attemptRefresh = () => {
-    const next = refreshCredentialBlob(targetBlob);
-    saveCredential(alias, next);
+  const attemptRefresh = (phase) => {
+    const next = refreshCredentialBlob(targetBlob, { actor: 'switch', alias, phase });
+    saveCredential(alias, next, { actor: 'switch', reason: `${phase}-refresh`, source: 'refresh' });
     targetBlob = next;
     refreshed = true;
   };
 
   const fatalRefreshMessage = (error) =>
     `Profile "${alias}" has a dead refresh token (${error?.oauthError || 'unauthorized'}).\n` +
-    `Recover with:\n` +
-    `  1) claude /logout\n` +
-    `  2) close other running claude processes (tmux, IDE, MCP)\n` +
-    `  3) restart your shell, then: claude /login\n` +
-    `  4) atc-profile add ${alias}\n` +
+    `This refresh-token lineage has been revoked server-side. A passive\n` +
+    `refresh cannot recover this — a fresh OAuth login is required.\n` +
+    `\n` +
+    `Recover with (single safe path):\n` +
+    `  atc-profile rotate ${alias}\n` +
+    `\n` +
+    `This will:\n` +
+    `  • freeze any running session's tokens first\n` +
+    `  • guide you through claude /login as the ${alias} account\n` +
+    `  • rebind "${alias}" to the fresh lineage\n` +
     `Original error: ${error.message}`;
 
-  if (blobNeedsRefresh(targetBlob)) {
+  const rateLimitRecoveryMessage = (targetAlias, error) => {
+    const retryAtIso = error?.retryAt ? new Date(error.retryAt).toISOString() : null;
+    const waitMsg = retryAtIso
+      ? `Cooldown lifts at ${retryAtIso}.`
+      : 'Cooldown is ~10 minutes from the last rate-limit response.';
+    return (
+      `Profile "${targetAlias}" refresh-token lineage is rate-limited.\n` +
+      `${waitMsg}\n` +
+      `\n` +
+      `Retrying will not help and may extend the lockout. Options:\n` +
+      `  1) wait for the cooldown to lift, then: atc-profile use ${targetAlias}\n` +
+      `  2) skip the refresh endpoint entirely with a fresh login:\n` +
+      `     atc-profile rotate ${targetAlias}\n` +
+      `Original error: ${error?.message || 'rate_limit_error'}`
+    );
+  };
+
+  const targetProfile = catalog.profiles[alias];
+  if (blobNeedsRefresh(targetBlob) && !canSkipProactiveRefresh(targetBlob, targetProfile)) {
     try {
-      attemptRefresh();
+      attemptRefresh('proactive');
     } catch (error) {
       const code = error?.oauthError || '';
       if (isFatalRefreshError(code, error?.httpStatus)) {
+        recordEvent({ actor: 'switch', action: 'switch-abort', alias, switch_id: switchId, outcome: `fatal:${code}` });
         die(fatalRefreshMessage(error));
       }
-      // Non-fatal (network / rate-limit / malformed): warn and let validation
-      // below decide. If the access token is still valid, the swap succeeds.
-      console.warn(`  Warning: proactive refresh for "${alias}" failed: ${error.message}`);
+      if (code === 'rate_limit_error' || error?.httpStatus === 429 || error?.budgetReason === 'cooldown') {
+        console.warn(`  Warning: proactive refresh for "${alias}" rate-limited.`);
+        if (error?.retryAt) {
+          console.warn(`  Cooldown until ${new Date(error.retryAt).toISOString()}. Falling through to live validation.`);
+        }
+      } else {
+        console.warn(`  Warning: proactive refresh for "${alias}" failed: ${error.message}`);
+      }
+      // Non-fatal (network / rate-limit / dedup): let validation below decide.
+      // If the access token is still valid, the swap succeeds.
     }
+  } else if (blobNeedsRefresh(targetBlob)) {
+    recordEvent({
+      actor: 'switch',
+      action: 'refresh-skip',
+      alias,
+      phase: 'proactive',
+      switch_id: switchId,
+      outcome: 'skipped:fresh-identity',
+    });
   }
 
   // 2. Live validation with reactive refresh on 401/403. This is the key
@@ -843,29 +1170,36 @@ function switchProfile(alias, options = {}) {
 
     // Reactive refresh: access token was dead despite expiresAt looking fine.
     console.warn(`  Access token rejected — attempting reactive refresh...`);
+    recordEvent({ actor: 'switch', action: 'reactive-refresh-start', alias, switch_id: switchId, outcome: 'started' });
     try {
-      attemptRefresh();
+      attemptRefresh('reactive');
     } catch (refreshErr) {
       const code = refreshErr?.oauthError || '';
       if (isFatalRefreshError(code, refreshErr?.httpStatus)) {
+        recordEvent({ actor: 'switch', action: 'switch-abort', alias, switch_id: switchId, outcome: `fatal:${code}` });
         die(fatalRefreshMessage(refreshErr));
       }
+      if (code === 'rate_limit_error' || refreshErr?.httpStatus === 429 || refreshErr?.budgetReason === 'cooldown') {
+        recordEvent({ actor: 'switch', action: 'switch-abort', alias, switch_id: switchId, outcome: 'rate_limited' });
+        die(rateLimitRecoveryMessage(alias, refreshErr));
+      }
+      recordEvent({ actor: 'switch', action: 'switch-abort', alias, switch_id: switchId, outcome: `reactive-refresh-error:${code}` });
       die(
         `Profile "${alias}" access token is invalid and reactive refresh failed: ${refreshErr.message}\n` +
-        `This usually means the refresh endpoint rate-limited us (429) or the\n` +
-        `network is unreachable. Recovery:\n` +
-        `  1) wait ~15 min if rate-limited, then: atc-profile use ${alias}\n` +
-        `  2) or re-login: claude /logout && claude /login && atc-profile add ${alias}`
+        `Recovery:\n` +
+        `  1) check network connectivity\n` +
+        `  2) re-login: atc-profile rotate ${alias}`,
       );
     }
 
     try {
       authState = fetchClaudeAccountStateFromBlob(targetBlob);
     } catch (retryError) {
+      recordEvent({ actor: 'switch', action: 'switch-abort', alias, switch_id: switchId, outcome: `retry-identity-error:${retryError?.httpStatus || '?'}` });
       die(
         `Profile "${alias}" still rejected after reactive refresh (${retryError?.httpStatus || '?'}).\n` +
-        `Recover with: claude /logout && claude /login && atc-profile add ${alias}\n` +
-        `Original error: ${retryError.message}`
+        `Recover with: atc-profile rotate ${alias}\n` +
+        `Original error: ${retryError.message}`,
       );
     }
   }
@@ -886,7 +1220,7 @@ function switchProfile(alias, options = {}) {
     let currentBlob;
     try {
       currentBlob = keychainExport();
-      backupCurrent(currentBlob);
+      backupCurrent(currentBlob, { actor: 'switch', alias: catalog.active });
     } catch {
       // Keychain empty (e.g. user already ran /logout) — nothing to save.
     }
@@ -902,9 +1236,9 @@ function switchProfile(alias, options = {}) {
       // losing the freshly-rotated RT is exactly the bug this code prevents.
       if (blobNeedsRefresh(currentBlob)) {
         try {
-          const refreshed = refreshCredentialBlob(currentBlob);
-          keychainImport(refreshed);
-          currentBlob = refreshed;
+          const refreshedBlob = refreshCredentialBlob(currentBlob, { actor: 'switch', alias: catalog.active, phase: 'sync-active' });
+          keychainImport(refreshedBlob, { actor: 'switch', alias: catalog.active, reason: 'sync-active-refresh' });
+          currentBlob = refreshedBlob;
         } catch (error) {
           console.warn(`  Warning: sync-active refresh for "${catalog.active}" failed: ${error.message}`);
         }
@@ -915,13 +1249,22 @@ function switchProfile(alias, options = {}) {
         try {
           const activeAuthState = fetchClaudeAccountStateFromBlob(currentBlob);
           observedEmail = String(activeAuthState?.authStatus?.email || '').trim().toLowerCase();
+          recordEvent({
+            actor: 'switch',
+            action: 'identity-check',
+            alias: catalog.active,
+            expected_email: expectedEmail,
+            observed_email: observedEmail,
+            outcome: observedEmail === expectedEmail ? 'match' : 'mismatch',
+          });
         } catch (error) {
+          recordEvent({ actor: 'switch', action: 'identity-check', alias: catalog.active, outcome: `error:${error?.httpStatus || 'unknown'}`, detail: error.message });
           console.warn(`  Warning: could not verify keychain identity for "${catalog.active}": ${error.message}`);
           console.warn(`  Skipping cred save to avoid drift risk.`);
         }
 
         if (observedEmail && observedEmail === expectedEmail) {
-          saveCredential(catalog.active, currentBlob);
+          saveCredential(catalog.active, currentBlob, { actor: 'switch', reason: 'sync-active-save', source: 'keychain-export' });
           if (activeProfile) {
             activeProfile.updatedAt = new Date().toISOString();
           }
@@ -932,7 +1275,7 @@ function switchProfile(alias, options = {}) {
       } else {
         // Legacy profile with no recorded email — save without identity check
         // to preserve the pre-fix-#2 behavior.
-        saveCredential(catalog.active, currentBlob);
+        saveCredential(catalog.active, currentBlob, { actor: 'switch', reason: 'sync-active-legacy', source: 'keychain-export' });
         if (activeProfile) {
           activeProfile.updatedAt = new Date().toISOString();
         }
@@ -941,8 +1284,8 @@ function switchProfile(alias, options = {}) {
   }
 
   // 3. Swap Keychain entry.
-  keychainDelete();
-  keychainImport(targetBlob);
+  keychainDelete({ actor: 'switch', reason: `pre-swap-to-${alias}` });
+  keychainImport(targetBlob, { actor: 'switch', alias, reason: 'final-swap' });
   applyClaudeGlobalAuthState(authState);
   const token = resolveCodexbarTokenForProfile(catalog.profiles?.[alias], targetBlob);
   if (token) {
@@ -961,6 +1304,16 @@ function switchProfile(alias, options = {}) {
   }
   saveCatalog(catalog);
 
+  recordEvent({
+    actor: 'switch',
+    action: 'switch-complete',
+    alias,
+    from_alias: fromAlias,
+    switch_id: switchId,
+    refreshed,
+    observed_email: authState?.authStatus?.email || null,
+    outcome: 'ok',
+  });
   console.log(`✓ Switched to profile "${alias}".${refreshed ? ' (refreshed OAuth token)' : ''}`);
   console.log('  Any running claude sessions will use this account on their next API call.');
   return { authState };
@@ -993,41 +1346,106 @@ function freezeActiveKeychain(catalog, { allowLegacy = true } = {}) {
   const expectedEmail = typeof activeProfile?.email === 'string'
     ? activeProfile.email.trim().toLowerCase()
     : '';
+  const preParsed = parseCredentialBlob(blob);
+  const preRtFp = fingerprint(preParsed?.claudeAiOauth?.refreshToken);
+  recordEvent({
+    actor: 'rotate',
+    action: 'freeze-start',
+    alias: activeAlias,
+    expected_email: expectedEmail || null,
+    pre_rt_fp: preRtFp,
+    pre_expires_at: preParsed?.claudeAiOauth?.expiresAt
+      ? new Date(preParsed.claudeAiOauth.expiresAt).toISOString()
+      : null,
+    pre_needs_refresh: blobNeedsRefresh(blob),
+    outcome: 'started',
+  });
+
   if (blobNeedsRefresh(blob)) {
     try {
-      const refreshed = refreshCredentialBlob(blob);
-      keychainImport(refreshed);
-      blob = refreshed;
+      const refreshedBlob = refreshCredentialBlob(blob, { actor: 'rotate', alias: activeAlias, phase: 'freeze' });
+      keychainImport(refreshedBlob, { actor: 'rotate', alias: activeAlias, reason: 'freeze-refresh' });
+      blob = refreshedBlob;
     } catch (error) {
+      // Dead RT → the blob we still hold has a dead AT+RT. Saving it puts a
+      // zombie on disk. Abort freeze-save rather than persisting a poisoned RT.
+      const code = error?.oauthError || '';
+      const isRateLimited = code === 'rate_limit_error' || error?.httpStatus === 429 || error?.budgetReason === 'cooldown';
+      const isFatal = isFatalRefreshError(code, error?.httpStatus);
+      recordEvent({
+        actor: 'rotate',
+        action: 'freeze-refresh-failed',
+        alias: activeAlias,
+        oauth_error: code,
+        http_status: error?.httpStatus || null,
+        rate_limited: isRateLimited,
+        fatal: isFatal,
+        retry_at: error?.retryAt ? new Date(error.retryAt).toISOString() : null,
+        outcome: isFatal || isRateLimited ? 'abort-save' : 'continue-unrefreshed',
+        detail: error?.message || null,
+      });
       console.warn(`  Warning: could not refresh "${activeAlias}" before freeze: ${error.message}`);
+      if (isFatal || isRateLimited) {
+        console.warn(`  Refusing to freeze-save: on-disk RT would be poisoned. Leaving ${activeAlias}.cred untouched.`);
+        return null;
+      }
     }
   }
-  if (expectedEmail) {
-    let observedEmail = null;
-    try {
-      const authState = fetchClaudeAccountStateFromBlob(blob);
-      observedEmail = String(authState?.authStatus?.email || '').trim().toLowerCase();
-    } catch (error) {
-      console.warn(`  Warning: identity check for "${activeAlias}" failed: ${error.message}`);
-    }
-    if (observedEmail && observedEmail === expectedEmail) {
-      backupCurrent(blob);
-      saveCredential(activeAlias, blob);
-      if (activeProfile) activeProfile.updatedAt = new Date().toISOString();
-      return blob;
-    }
-    if (observedEmail && observedEmail !== expectedEmail) {
-      console.error(`✗ Keychain holds ${observedEmail}, not the expected ${expectedEmail} for active profile "${activeAlias}".`);
-      console.error(`  Aborting to avoid clobbering ${activeAlias}.cred with the wrong account's credentials.`);
-      console.error(`  To register the current login, run: atc-profile add <alias>`);
-      process.exit(1);
-    }
+
+  // Always run identity check before save — even in the "legacy no-expected-email"
+  // branch — so we have forensic evidence of what Anthropic thought of this blob
+  // at freeze-save time.
+  let authState = null;
+  let observedEmail = null;
+  let subscriptionType = null;
+  let identityHttpStatus = null;
+  let identityError = null;
+  try {
+    authState = fetchClaudeAccountStateFromBlob(blob);
+    observedEmail = String(authState?.authStatus?.email || '').trim().toLowerCase();
+    subscriptionType = String(authState?.authStatus?.subscriptionType || authState?.subscriptionType || '').trim() || null;
+  } catch (error) {
+    identityHttpStatus = error?.httpStatus || null;
+    identityError = error?.message || String(error);
+  }
+  const identityOutcome = identityError
+    ? `error:${identityHttpStatus || 'unknown'}`
+    : (expectedEmail && observedEmail && observedEmail !== expectedEmail ? 'mismatch' : (observedEmail ? 'match' : 'unverified'));
+  recordEvent({
+    actor: 'rotate',
+    action: 'identity-check',
+    alias: activeAlias,
+    expected_email: expectedEmail || null,
+    observed_email: observedEmail || null,
+    subscription_type: subscriptionType,
+    http_status: identityHttpStatus,
+    phase: 'pre-freeze-save',
+    outcome: identityOutcome,
+    detail: identityError,
+  });
+
+  if (identityError && (identityHttpStatus === 401 || identityHttpStatus === 403)) {
+    console.warn(`  Refusing to freeze-save: identity check rejected (${identityHttpStatus}). ${activeAlias}.cred left untouched.`);
+    return null;
+  }
+  if (expectedEmail && observedEmail && observedEmail !== expectedEmail) {
+    console.error(`✗ Keychain holds ${observedEmail}, not the expected ${expectedEmail} for active profile "${activeAlias}".`);
+    console.error(`  Aborting to avoid clobbering ${activeAlias}.cred with the wrong account's credentials.`);
+    console.error(`  To register the current login, run: atc-profile add <alias>`);
+    process.exit(1);
+  }
+  if (expectedEmail && !observedEmail) {
     console.warn(`  Warning: could not verify keychain identity; skipping cred save for "${activeAlias}".`);
     return null;
   }
-  if (allowLegacy) {
-    backupCurrent(blob);
-    saveCredential(activeAlias, blob);
+
+  if (expectedEmail || allowLegacy) {
+    backupCurrent(blob, { actor: 'rotate', alias: activeAlias });
+    saveCredential(activeAlias, blob, {
+      actor: 'rotate',
+      reason: expectedEmail ? 'freeze-save' : 'freeze-save-legacy',
+      source: 'keychain-export',
+    });
     if (activeProfile) activeProfile.updatedAt = new Date().toISOString();
     return blob;
   }
@@ -1053,6 +1471,15 @@ async function cmdRotate(alias) {
   const activeAlias = catalog.active;
   const activeProfile = activeAlias ? catalog.profiles?.[activeAlias] : null;
   const activeEmail = activeProfile?.email || null;
+  const rotateId = randomUUID();
+  recordEvent({
+    actor: 'rotate',
+    action: 'rotate-start',
+    alias,
+    from_alias: activeAlias,
+    rotate_id: rotateId,
+    outcome: 'started',
+  });
 
   if (activeAlias) {
     console.log(`  Active profile: ${activeAlias}${activeEmail ? ` <${activeEmail}>` : ''}`);
@@ -1070,7 +1497,7 @@ async function cmdRotate(alias) {
   }
 
   // Phase 1b — clear keychain so no running claude process can consume the RT
-  keychainDelete();
+  keychainDelete({ actor: 'rotate', reason: 'pre-login-clear' });
   console.log('✓ Cleared keychain.');
 
   // Phase 2 — user logs in as the target account
@@ -1086,7 +1513,7 @@ async function cmdRotate(alias) {
   if (!loggedIn) {
     if (savedBlob) {
       try {
-        keychainImport(savedBlob);
+        keychainImport(savedBlob, { actor: 'rotate', alias: activeAlias, reason: 'rollback' });
         console.log(`✓ Restored keychain to "${activeAlias}" — nothing changed.`);
         return;
       } catch (error) {
@@ -1146,7 +1573,7 @@ async function cmdRotate(alias) {
   const oauthAccessToken = extractClaudeOauthAccessToken(newBlob);
   const codexbarToken = oauthAccessToken || webAuth.sessionKey;
 
-  saveCredential(alias, newBlob);
+  saveCredential(alias, newBlob, { actor: 'rotate', reason: existingProfile ? 're-register' : 'register', source: 'keychain-export-post-login' });
   const codexbarAccountLabel = syncCodexbarTokenAccount(alias, codexbarToken, { setActive: true, webAuth });
 
   catalog.profiles[alias] = {
@@ -1169,6 +1596,16 @@ async function cmdRotate(alias) {
   applyClaudeGlobalAuthState(newAuthState);
   saveCatalog(catalog);
 
+  recordEvent({
+    actor: 'rotate',
+    action: 'rotate-complete',
+    alias,
+    from_alias: activeAlias,
+    rotate_id: rotateId,
+    observed_email: observedEmail,
+    re_registered: !!existingProfile,
+    outcome: 'ok',
+  });
   const verb = existingProfile ? 'Re-registered' : 'Registered';
   console.log(`✓ ${verb} "${alias}" (${observedEmail}) and set as active.`);
   if (activeAlias && activeAlias !== alias) {
@@ -1273,7 +1710,7 @@ function cmdSyncWeb(alias) {
   }
   const webAuth = captureClaudeWebAuth();
   catalog.profiles[alias].webAuth = webAuth;
-  const activeToken = resolveCodexbarTokenForProfile(catalog.profiles[alias], loadCredential(alias));
+  const activeToken = resolveCodexbarTokenForProfile(catalog.profiles[alias], loadCredential(alias, { actor: 'sync-web', reason: 'read-for-codexbar-token' }));
   catalog.profiles[alias].codexbarToken = {
     kind: classifyClaudeCodexbarToken(activeToken) || 'unknown',
     token: activeToken,
@@ -1293,6 +1730,51 @@ function cmdSyncWeb(alias) {
   console.log(`  Codexbar account label: ${catalog.profiles[alias].codexbarAccountLabel}`);
 }
 
+function cmdLog({ alias = null, sinceArg = null, limit = 50, json = false } = {}) {
+  const sinceMs = sinceArg ? Date.now() - parseDuration(sinceArg) : null;
+  const events = tailEvents({ alias, sinceMs, limit });
+  if (events.length === 0) {
+    console.log(alias ? `(no events for "${alias}")` : '(no events)');
+    return;
+  }
+  if (json) {
+    for (const e of events) console.log(JSON.stringify(e));
+    return;
+  }
+  for (const e of events) {
+    const parts = [e.ts, `[${e.actor}]`, e.action];
+    if (e.alias) parts.push(`alias=${e.alias}`);
+    if (e.phase) parts.push(`phase=${e.phase}`);
+    if (e.http_status) parts.push(`http=${e.http_status}`);
+    if (e.oauth_error) parts.push(`oauth_error=${e.oauth_error}`);
+    if (e.rt_fp) parts.push(`rt=${e.rt_fp}`);
+    if (e.observed_email) parts.push(`email=${e.observed_email}`);
+    if (e.trigger) parts.push(`trigger=${e.trigger}`);
+    parts.push(`outcome=${e.outcome}`);
+    if (e.detail) parts.push(`(${String(e.detail).slice(0, 120)})`);
+    console.log(parts.join(' '));
+  }
+}
+
+function cmdCooldowns({ json = false } = {}) {
+  const cooldowns = listCooldowns();
+  if (cooldowns.length === 0) {
+    console.log('No active cooldowns. All RT lineages are free to refresh.');
+    return;
+  }
+  if (json) {
+    console.log(JSON.stringify(cooldowns, null, 2));
+    return;
+  }
+  console.log('Active refresh-endpoint cooldowns:');
+  for (const c of cooldowns) {
+    const remaining = Math.max(0, Math.round((Date.parse(c.cooldownUntil) - Date.now()) / 1000));
+    console.log(`  ${c.alias || '(unknown alias)'}: until ${c.cooldownUntil} (${remaining}s left)`);
+    if (c.error) console.log(`    last error: ${c.error}`);
+    console.log(`    recovery: atc-profile rotate ${c.alias || '<alias>'}`);
+  }
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 function die(msg) {
@@ -1302,16 +1784,31 @@ function die(msg) {
 
 // Parse command flags from remaining args
 function parseArgs(args) {
-  const result = { positional: [], yes: false, syncActive: true };
+  const result = { positional: [], yes: false, syncActive: true, alias: null, since: null, limit: null, json: false };
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--yes') {
+    const arg = args[i];
+    if (arg === '--yes') {
       result.yes = true;
-    } else if (args[i] === '--sync-active') {
+    } else if (arg === '--sync-active') {
       result.syncActive = true;
-    } else if (args[i] === '--no-sync-active') {
+    } else if (arg === '--no-sync-active') {
       result.syncActive = false;
+    } else if (arg === '--json') {
+      result.json = true;
+    } else if (arg === '--alias' && i + 1 < args.length) {
+      result.alias = args[++i];
+    } else if (arg.startsWith('--alias=')) {
+      result.alias = arg.slice('--alias='.length);
+    } else if (arg === '--since' && i + 1 < args.length) {
+      result.since = args[++i];
+    } else if (arg.startsWith('--since=')) {
+      result.since = arg.slice('--since='.length);
+    } else if (arg === '--limit' && i + 1 < args.length) {
+      result.limit = Number(args[++i]);
+    } else if (arg.startsWith('--limit=')) {
+      result.limit = Number(arg.slice('--limit='.length));
     } else {
-      result.positional.push(args[i]);
+      result.positional.push(arg);
     }
   }
   return result;
@@ -1327,7 +1824,7 @@ if (isMainModule) {
 
 async function main() {
 const [,, command, ...rest] = process.argv;
-const { positional, yes: confirmYes, syncActive } = parseArgs(rest);
+const { positional, yes: confirmYes, syncActive, alias: aliasFlag, since, limit, json } = parseArgs(rest);
 const arg = positional[0];
 switch (command) {
   case 'add':     await cmdAdd(arg); break;
@@ -1339,6 +1836,8 @@ switch (command) {
   case 'wipe':    cmdWipe(confirmYes); break;
   case 'probe-web': cmdProbeWeb(); break;
   case 'sync-web': cmdSyncWeb(arg); break;
+  case 'log':     cmdLog({ alias: aliasFlag || arg || null, sinceArg: since, limit: Number.isFinite(limit) && limit > 0 ? limit : 50, json }); break;
+  case 'cooldowns': cmdCooldowns({ json }); break;
   default:
     console.error(`atc-profile — Claude account profile manager
 
@@ -1357,6 +1856,10 @@ Commands:
   wipe --yes      delete Claude Keychain cred + all saved atc-profile creds/catalog
   probe-web       print detected Claude web sessionKey from Firefox cookies
   sync-web <alias> capture current Firefox Claude sessionKey into an existing profile
+  log [--alias X] [--since 1h] [--limit N] [--json]
+                  tail the credential event log for post-mortem debugging
+  cooldowns [--json]
+                  list active refresh-endpoint cooldowns per RT lineage
 `);
     process.exit(command ? 1 : 0);
 }

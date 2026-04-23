@@ -10,6 +10,8 @@ import {
   isFatalRefreshError,
   buildRefreshedBlob,
   parseRefreshResponse,
+  parseRefreshResponseWithHeaders,
+  pickRateLimitHeaders,
 } from './atc-profile.mjs';
 
 let passed = 0;
@@ -200,6 +202,57 @@ function throws(name, fn, expectedCode) {
   eq('parseRefresh: malformed (no newline) → httpStatus 0, body=raw',
     { status: noNewline.httpStatus, body: noNewline.responseBody },
     { status: 0, body: '200' });
+}
+
+// ── parseRefreshResponseWithHeaders ──────────────────────────────────────────
+{
+  const okRaw =
+    'HTTP/2 200\r\n' +
+    'content-type: application/json\r\n' +
+    'request-id: req_abc123\r\n' +
+    '\r\n' +
+    '{"access_token":"x","expires_in":3600}\n200';
+  const ok = parseRefreshResponseWithHeaders(okRaw);
+  eq('parseWithHeaders: 200 status extracted', ok.httpStatus, 200);
+  eq('parseWithHeaders: payload JSON parsed', ok.payload?.access_token, 'x');
+  eq('parseWithHeaders: request-id header captured', ok.headers['request-id'], 'req_abc123');
+
+  const errRaw =
+    'HTTP/2 429\r\n' +
+    'retry-after: 60\r\n' +
+    'x-ratelimit-remaining: 0\r\n' +
+    'anthropic-request-id: req_xyz\r\n' +
+    '\r\n' +
+    '{"error":{"type":"rate_limit_error","message":"slow down"}}\n429';
+  const err = parseRefreshResponseWithHeaders(errRaw);
+  eq('parseWithHeaders: 429 status', err.httpStatus, 429);
+  eq('parseWithHeaders: retry-after captured', err.headers['retry-after'], '60');
+  eq('parseWithHeaders: ratelimit-remaining captured', err.headers['x-ratelimit-remaining'], '0');
+  eq('parseWithHeaders: anthropic-request-id captured', err.headers['anthropic-request-id'], 'req_xyz');
+
+  // Body-only input (no header block at all) should still extract status.
+  const bare = parseRefreshResponseWithHeaders('{"access_token":"x","expires_in":3600}\n200');
+  eq('parseWithHeaders: bare body still parses', bare.payload?.access_token, 'x');
+  eq('parseWithHeaders: bare body still returns status', bare.httpStatus, 200);
+}
+
+// ── pickRateLimitHeaders ─────────────────────────────────────────────────────
+{
+  const picked = pickRateLimitHeaders({
+    'retry-after': '120',
+    'x-ratelimit-limit': '100',
+    'x-ratelimit-remaining': '0',
+    'x-ratelimit-reset': '1700000000',
+    'anthropic-request-id': 'req_abc',
+    'content-type': 'application/json',
+    'date': 'Mon, 01 Jan 2026 00:00:00 GMT',
+  });
+  eq('pickRateLimit: retry_after', picked.retry_after, '120');
+  eq('pickRateLimit: ratelimit keys snake_cased', picked.x_ratelimit_remaining, '0');
+  eq('pickRateLimit: request_id canonicalized', picked.request_id, 'req_abc');
+  eq('pickRateLimit: content-type dropped', picked['content-type'], undefined);
+  eq('pickRateLimit: date dropped', picked.date, undefined);
+  eq('pickRateLimit: empty input', JSON.stringify(pickRateLimitHeaders(null)), '{}');
 }
 
 // ── summary ──────────────────────────────────────────────────────────────────

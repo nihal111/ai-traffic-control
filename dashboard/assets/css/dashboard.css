@@ -407,6 +407,10 @@
       border-color: #d79921;
       box-shadow: 0 0 0 1px #d7992133 inset;
     }
+    .profile-switch-card.needs-recovery {
+      border-color: #cc241d;
+      box-shadow: 0 0 0 1px #cc241d55 inset;
+    }
     .profile-switch-card:disabled {
       opacity: 0.6;
       cursor: wait;

@@ -366,7 +366,7 @@ async function fetchClaudeUsageRateLimited(context = {}, { force = false } = {})
   // Snapshot it to the active profile's .cred so silent background RT rotations
   // don't strand us with a consumed single-use token at next switch.
   if (resolvedLive?.ok) {
-    await syncActiveKeychainToCred();
+    await syncActiveKeychainToCred({ trigger: 'usage-poll', actor: 'sync-daemon' });
   }
   return {
     ...resolvedLive,
