@@ -356,6 +356,13 @@ function runCommand(cmd, args, timeoutMs = 12000) {
   });
 }
 
+function runCalendarPython(args, timeoutMs = 15000) {
+  const calendarAutomationDir = path.join(HOME_DIRECTORY, 'Code', 'CalendarAutomation');
+  const scriptPath = path.join(calendarAutomationDir, args[0]);
+  const cmdArgs = [scriptPath, ...args.slice(1)];
+  return runCommand('python3', cmdArgs, timeoutMs);
+}
+
 function formatCountdown(targetIso) {
   if (!targetIso) return '—';
   const target = new Date(targetIso).getTime();
@@ -3199,7 +3206,11 @@ function renderPage() {
           ev.preventDefault();
           const dialId = card.getAttribute('data-agent-dial-id');
           if (!dialId) return;
-          openAgentModal(dialId);
+          if (dialId === 'calendar_manager') {
+            location.assign('/calendar');
+          } else {
+            openAgentModal(dialId);
+          }
         });
       }
     }
@@ -3764,6 +3775,1608 @@ function renderPage() {
 </html>`;
 }
 
+function renderCalendarPage() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Calendar</title>
+  <style>
+    html { background: #1b1d1e; }
+    :root {
+      --bg0: #1b1d1e;
+      --bg1: #232526;
+      --text: #f8f8f2;
+      --muted: #7e8e91;
+      --line: #49483e;
+      --green: #a6e22e;
+      --amber: #e6db74;
+      --red: #f92672;
+      --cyan: #66d9ef;
+      --purple: #ae81ff;
+      --surface0: #232526;
+      --surface1: #293739;
+      --accent: #fd971f;
+      --accent-strong: #f92672;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1200px 600px at 0% -20%, #d7992124 0%, transparent 55%),
+        radial-gradient(1000px 600px at 100% 0%, #689d6a1f 0%, transparent 50%),
+        linear-gradient(180deg, var(--bg0) 0%, var(--bg1) 100%);
+      min-height: 100vh;
+      padding: 16px;
+    }
+    .calendar-page {
+      max-width: 700px;
+      margin: 0 auto;
+      transition: max-width 200ms ease-out;
+    }
+    .calendar-page.week-view-active {
+      max-width: 980px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      padding: 14px 16px;
+      border: 1px solid #665c54;
+      border-radius: 12px;
+      background:
+        radial-gradient(280px 90px at 94% 18%, #d7992130 0%, transparent 78%),
+        linear-gradient(180deg, #3a342f, #2a2624);
+      box-shadow: 0 10px 28px #00000033;
+      position: relative;
+      overflow: hidden;
+    }
+    header::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, #d79921 0%, #fe8019 60%, #fb4934 100%);
+      opacity: 0.95;
+    }
+    header::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(-45deg, transparent 0 14px, #1d202110 14px 15px);
+      pointer-events: none;
+    }
+    header h1 {
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      position: relative;
+      z-index: 1;
+    }
+    .back-btn {
+      position: relative;
+      z-index: 1;
+      padding: 8px 12px;
+      background: #3c3836;
+      border: 1px solid #7c6f64;
+      border-radius: 7px;
+      color: #ebdbb2;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+    }
+    .back-btn:hover { background: #504945; border-color: #928374; }
+    .header-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      position: relative;
+      z-index: 1;
+    }
+    .refresh-ring-btn {
+      position: relative;
+      width: 34px;
+      height: 34px;
+      border-radius: 999px;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      color: #ebdbb2;
+      background: conic-gradient(#d79921 calc(var(--refresh-pct, 0) * 1%), #3a3634 0);
+      display: grid;
+      place-items: center;
+      box-sizing: border-box;
+    }
+    .refresh-ring-btn::after {
+      content: "";
+      position: absolute;
+      inset: 4px;
+      border-radius: 999px;
+      background: #3c3836;
+      border: none;
+      box-sizing: border-box;
+      transition: background 100ms ease-out;
+    }
+    .refresh-ring-btn:hover::after { background: #504945; }
+    .refresh-ring-btn .refresh-icon {
+      position: relative;
+      z-index: 1;
+      width: 18px;
+      height: 18px;
+    }
+    .refresh-ring-btn.refreshing {
+      pointer-events: none;
+      background: conic-gradient(#d79921 0%, #d79921 25%, #3a3634 25%);
+      animation: refresh-dial-rotate 1s linear infinite;
+    }
+    .refresh-ring-btn.refreshing::after {
+      transition: none;
+    }
+    .refresh-ring-btn.refreshing .refresh-icon {
+      animation: refresh-icon-counter 1s linear infinite;
+    }
+    @keyframes refresh-dial-rotate {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    @keyframes refresh-icon-counter {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(-360deg); }
+    }
+    .refresh-ring-btn:active:not(.refreshing)::after {
+      background: #504945;
+    }
+    .brief-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      gap: 16px;
+    }
+    .brief-date {
+      font-size: 12px;
+      color: #d5c4a1;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 12px;
+      background: #2a2624;
+      padding: 3px;
+      border-radius: 8px;
+      border: 1px solid #665c54;
+      width: fit-content;
+    }
+    .tab {
+      padding: 6px 14px;
+      background: transparent;
+      border: none;
+      border-radius: 6px;
+      color: #a89984;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      font-family: inherit;
+    }
+    .tab.active {
+      background: linear-gradient(180deg, #d79921, #d97706);
+      color: #1b1d1e;
+    }
+    .day-header {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: #fd971f;
+      margin: 12px 0 6px;
+      padding-left: 2px;
+    }
+    .day-header:first-child { margin-top: 0; }
+    /* Week view: Google Calendar-style multi-day timeline */
+    .week-timeline {
+      display: grid;
+      grid-template-columns: 40px repeat(7, 1fr);
+      grid-template-rows: auto 1fr;
+      gap: 2px;
+      position: relative;
+    }
+    .week-hours-header {
+      border-bottom: 1px solid #665c54;
+    }
+    .week-day-header {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      color: #fd971f;
+      text-align: center;
+      line-height: 1.25;
+      padding: 4px 2px;
+      border-bottom: 1px solid #665c54;
+      white-space: nowrap;
+    }
+    .week-day-header.today {
+      background: rgba(215, 153, 33, 0.12);
+      color: #ffd866;
+      border-radius: 4px 4px 0 0;
+    }
+    .week-day-header .wd-num {
+      display: block;
+      font-size: 12px;
+      font-weight: 800;
+      margin-top: 1px;
+    }
+    .week-day-col {
+      position: relative;
+      border-left: 1px solid #49483e;
+      background-image:
+        repeating-linear-gradient(
+          to bottom,
+          #3a3634 0,
+          #3a3634 1px,
+          transparent 1px,
+          transparent 60px
+        ),
+        repeating-linear-gradient(
+          to bottom,
+          transparent 0,
+          transparent 29px,
+          #2f2b2a 29px,
+          #2f2b2a 30px,
+          transparent 30px,
+          transparent 60px
+        );
+    }
+    .week-day-col.today {
+      background-color: rgba(215, 153, 33, 0.04);
+    }
+    /* Compact events for the narrow week columns */
+    .tl-event.compact {
+      padding: 2px 4px;
+      font-size: 10px;
+      line-height: 1.15;
+    }
+    .tl-event.compact .tl-event-title {
+      font-size: 10px;
+      white-space: normal;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+    }
+    .tl-event-time-stack {
+      font-size: 9px;
+      opacity: 0.9;
+      line-height: 1.1;
+      margin-top: 1px;
+    }
+    .tl-event-time-stack div {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tl-event.compact.short {
+      padding: 1px 4px;
+      display: block;
+    }
+    .tl-event.compact.short .tl-event-title {
+      -webkit-line-clamp: 1;
+      font-size: 9px;
+    }
+    .tl-event.compact.short .tl-event-time-stack {
+      display: none;
+    }
+    /* Google Calendar-style timeline for today view */
+    .timeline {
+      display: grid;
+      grid-template-columns: 44px 1fr;
+      gap: 4px;
+      position: relative;
+    }
+    .tl-hours {
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+    .tl-hour {
+      font-size: 10px;
+      color: #928374;
+      text-align: right;
+      padding-right: 6px;
+      line-height: 1;
+      padding-top: 2px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+    }
+    .tl-grid {
+      position: relative;
+      border-left: 1px solid #49483e;
+      background-image:
+        repeating-linear-gradient(
+          to bottom,
+          #3a3634 0,
+          #3a3634 1px,
+          transparent 1px,
+          transparent 60px
+        ),
+        repeating-linear-gradient(
+          to bottom,
+          transparent 0,
+          transparent 29px,
+          #2f2b2a 29px,
+          #2f2b2a 30px,
+          transparent 30px,
+          transparent 60px
+        );
+    }
+    .tl-event {
+      position: absolute;
+      border-radius: 4px;
+      padding: 3px 6px;
+      font-size: 11px;
+      color: #fff;
+      overflow: hidden;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+      cursor: pointer;
+      line-height: 1.2;
+      border-left: 3px solid rgba(0,0,0,0.25);
+    }
+    .tl-event-title {
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tl-event-time {
+      font-size: 10px;
+      opacity: 0.88;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tl-event.short {
+      padding: 1px 6px;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .tl-event.short .tl-event-title {
+      flex: 1;
+      min-width: 0;
+    }
+    .tl-event.short .tl-event-time {
+      flex-shrink: 0;
+    }
+    .tl-event.past { opacity: 0.5; }
+    .tl-event.routine { opacity: 0.7; }
+    .tl-now-line {
+      position: absolute;
+      left: -6px;
+      right: 0;
+      height: 2px;
+      background: #f92672;
+      z-index: 20;
+      pointer-events: none;
+      box-shadow: 0 0 6px rgba(249, 38, 114, 0.55);
+    }
+    .tl-now-line::before {
+      content: "";
+      position: absolute;
+      left: -4px;
+      top: -4px;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #f92672;
+      box-shadow: 0 0 8px rgba(249, 38, 114, 0.7);
+    }
+    .tl-now-label {
+      position: absolute;
+      right: 4px;
+      top: -18px;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.4px;
+      color: #f92672;
+      background: #2a2624;
+      padding: 2px 6px;
+      border-radius: 8px;
+      border: 1px solid #f92672;
+      white-space: nowrap;
+    }
+    .section {
+      background: linear-gradient(180deg, #3a342f 0%, #2a2624 100%);
+      border: 1px solid #665c54;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 12px;
+      box-shadow: 0 10px 28px #00000033;
+    }
+    .section-title {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      color: #d5c4a1;
+      margin-bottom: 12px;
+    }
+    .quick-ask {
+      display: flex;
+      gap: 8px;
+    }
+    .quick-ask input {
+      flex: 1;
+      padding: 10px 12px;
+      border: 1px solid #7c6f64;
+      border-radius: 8px;
+      background: #3c3836;
+      color: var(--text);
+      font-size: 13px;
+      font-family: inherit;
+    }
+    .quick-ask input::placeholder { color: #7e8e91; }
+    .quick-ask input:focus {
+      outline: none;
+      border-color: #d79921;
+      background: #504945;
+    }
+    .quick-ask button {
+      padding: 10px 16px;
+      background: linear-gradient(180deg, #d79921, #d97706);
+      color: #1b1d1e;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 12px;
+      letter-spacing: 0.1px;
+    }
+    .quick-ask button:hover { background: linear-gradient(180deg, #e8a82f, #e67e0a); }
+    .skeleton {
+      background: linear-gradient(90deg, #3c3836 25%, #504945 50%, #3c3836 75%);
+      background-size: 200% 100%;
+      animation: loading 1.5s infinite;
+      height: 50px;
+      border-radius: 8px;
+      margin-bottom: 8px;
+    }
+    @keyframes loading {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+    .event-list, .backlog-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .slots-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .event-item {
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: none;
+      min-height: 28px;
+      display: flex;
+      flex-direction: row;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      color: #fff;
+      font-weight: 500;
+    }
+    .event-item > div:first-child {
+      font-size: 13px;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .event-item .event-time {
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.9);
+      margin-top: 0;
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+    .event-item.slot-block {
+      background: rgba(166, 226, 46, 0.15);
+      border: 1px dashed #a6e22e;
+      color: #a6e22e;
+    }
+    .event-item.slot-block .event-time {
+      color: rgba(166, 226, 46, 0.9);
+    }
+    .event-item.routine {
+      opacity: 0.65;
+    }
+    .event-item.past {
+      opacity: 0.55;
+    }
+    .event-time { font-size: 11px; margin-top: 4px; opacity: 0.85; }
+    /* Google Calendar event colors (color_id 1-11) - full background */
+    .gc-color-1  { background: #7986cb; color: #fff; } /* Lavender */
+    .gc-color-2  { background: #33b679; color: #fff; } /* Sage */
+    .gc-color-3  { background: #8e24aa; color: #fff; } /* Grape */
+    .gc-color-4  { background: #e67c73; color: #fff; } /* Flamingo */
+    .gc-color-5  { background: #f6bf26; color: #000; } /* Banana */
+    .gc-color-6  { background: #f4511e; color: #fff; } /* Tangerine */
+    .gc-color-7  { background: #039be5; color: #fff; } /* Peacock */
+    .gc-color-8  { background: #616161; color: #fff; } /* Graphite */
+    .gc-color-9  { background: #3f51b5; color: #fff; } /* Blueberry */
+    .gc-color-10 { background: #0b8043; color: #fff; } /* Basil */
+    .gc-color-11 { background: #d50000; color: #fff; } /* Tomato */
+    .gc-color-default { background: #4285f4; color: #fff; } /* Calendar default blue */
+    /* Now-line separator */
+    .now-line {
+      position: relative;
+      height: 2px;
+      background: linear-gradient(90deg, transparent 0%, #fd971f 15%, #f92672 50%, #fd971f 85%, transparent 100%);
+      margin: 8px 0;
+      border-radius: 2px;
+    }
+    .now-line::before {
+      content: "NOW " attr(data-time);
+      position: absolute;
+      left: 50%;
+      top: -9px;
+      transform: translateX(-50%);
+      background: #2a2624;
+      border: 1px solid #665c54;
+      border-radius: 10px;
+      padding: 2px 8px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      color: #fd971f;
+    }
+    .slot-item, .backlog-item {
+      padding: 12px;
+      background: #3c3836;
+      border-radius: 8px;
+      border-left: 3px solid var(--cyan);
+      font-size: 13px;
+      border: 1px solid #665c54;
+      border-left-width: 3px;
+    }
+    .slot-item {
+      border-left-color: var(--green);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .backlog-item {
+      border-left-color: var(--accent);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .backlog-title {
+      font-weight: 600;
+    }
+    .backlog-meta {
+      font-size: 11px;
+      color: #7e8e91;
+      margin-top: 4px;
+    }
+    .backlog-actions {
+      display: flex;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .action-btn {
+      padding: 6px 10px;
+      background: #504945;
+      border: 1px solid #7c6f64;
+      border-radius: 6px;
+      color: #ebdbb2;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.1px;
+    }
+    .action-btn:hover { background: #665c54; border-color: #928374; }
+    .backlog-add-btn {
+      width: 100%;
+      padding: 10px;
+      background: transparent;
+      border: 1px dashed #7c6f64;
+      border-radius: 8px;
+      color: #a89984;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      font-family: inherit;
+      margin-bottom: 8px;
+    }
+    .backlog-add-btn:hover { border-color: #fd971f; color: #fd971f; }
+    .backlog-form {
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+      background: #2a2624;
+      border: 1px solid #665c54;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 8px;
+    }
+    .backlog-form.open { display: flex; }
+    .backlog-form input,
+    .backlog-form select,
+    .backlog-form textarea {
+      padding: 8px 10px;
+      border: 1px solid #7c6f64;
+      border-radius: 6px;
+      background: #3c3836;
+      color: var(--text);
+      font-size: 13px;
+      font-family: inherit;
+    }
+    .backlog-form textarea { resize: vertical; min-height: 54px; }
+    .backlog-form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+    }
+    .backlog-form-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    .backlog-form-actions button {
+      padding: 8px 14px;
+      border-radius: 6px;
+      border: 1px solid #7c6f64;
+      background: #504945;
+      color: #ebdbb2;
+      font-weight: 700;
+      font-size: 12px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .backlog-form-actions .primary {
+      background: linear-gradient(180deg, #d79921, #d97706);
+      color: #1b1d1e;
+      border: none;
+    }
+    .priority-high { color: #f92672; font-weight: 700; }
+    .priority-medium { color: #e6db74; }
+    .priority-low { color: #7e8e91; }
+    .backlog-badges {
+      display: inline-flex;
+      gap: 4px;
+      margin-top: 4px;
+      flex-wrap: wrap;
+    }
+    .badge {
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: #504945;
+      color: #ebdbb2;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+    }
+    .badge.stale { background: #f92672; color: #1b1d1e; }
+    .badge.tag { background: #3c3836; color: #66d9ef; border: 1px solid #49483e; }
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      z-index: 50;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      background: linear-gradient(180deg, #3a342f 0%, #2a2624 100%);
+      border: 1px solid #665c54;
+      border-radius: 12px;
+      width: 100%;
+      max-width: 520px;
+      max-height: 80vh;
+      overflow-y: auto;
+      padding: 20px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 14px;
+    }
+    .modal-title { font-size: 14px; font-weight: 800; letter-spacing: 0.3px; text-transform: uppercase; color: #fd971f; }
+    .modal-subtitle { font-size: 12px; color: #a89984; margin-top: 4px; }
+    .modal-close {
+      background: transparent;
+      border: none;
+      color: #a89984;
+      font-size: 20px;
+      cursor: pointer;
+      line-height: 1;
+    }
+    .slot-option {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 12px;
+      background: #3c3836;
+      border: 1px solid #665c54;
+      border-left: 3px solid #a6e22e;
+      border-radius: 8px;
+      margin-bottom: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .slot-option:hover { background: #504945; }
+    .slot-option.too-short {
+      opacity: 0.4;
+      cursor: not-allowed;
+      border-left-color: #7e8e91;
+    }
+    .slot-day-header {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: #fd971f;
+      margin: 12px 0 6px;
+    }
+    .slot-day-header:first-child { margin-top: 0; }
+    .empty-state {
+      text-align: center;
+      padding: 24px;
+      color: #7e8e91;
+    }
+    .last-updated {
+      text-align: center;
+      font-size: 11px;
+      color: #7e8e91;
+      margin-top: 16px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+      text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+  <div class="calendar-page">
+    <header>
+      <h1>Calendar</h1>
+      <div class="header-actions">
+        <button class="refresh-ring-btn" id="refreshBtn" onclick="refreshDashboard()" aria-label="Refresh" style="--refresh-pct: 0;">
+          <svg class="refresh-icon" viewBox="0 0 52 52" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M46.5,4h-3C42.7,4,42,4.7,42,5.5v7c0,0.9-0.5,1.3-1.2,0.7l0,0c-0.3-0.4-0.6-0.7-1-1c-5-5-12-7.1-19.2-5.7c-2.5,0.5-4.9,1.5-7,2.9c-6.1,4-9.6,10.5-9.7,17.5c-0.1,5.4,2,10.8,5.8,14.7c4,4.2,9.4,6.5,15.2,6.5c5.1,0,9.9-1.8,13.7-5c0.7-0.6,0.7-1.6,0.1-2.2l-2.1-2.1c-0.5-0.5-1.4-0.6-2-0.1c-3.6,3-8.5,4.2-13.4,3c-1.3-0.3-2.6-0.9-3.8-1.6C11.7,36.6,9,30,10.6,23.4c0.3-1.3,0.9-2.6,1.6-3.8C15,14.7,19.9,12,25.1,12c4,0,7.8,1.6,10.6,4.4c0.5,0.4,0.9,0.9,1.2,1.4c0.3,0.8-0.4,1.2-1.3,1.2h-7c-0.8,0-1.5,0.7-1.5,1.5v3.1c0,0.8,0.6,1.4,1.4,1.4h18.3c0.7,0,1.3-0.6,1.3-1.3V5.5C48,4.7,47.3,4,46.5,4z"/>
+          </svg>
+        </button>
+        <button class="back-btn" onclick="history.back()">← Back</button>
+      </div>
+    </header>
+
+    <div class="section">
+      <div class="section-title">Quick Ask</div>
+      <div class="quick-ask">
+        <input type="text" id="quickAskInput" placeholder="What's on your mind?" />
+        <button onclick="sendQuickAsk()">Ask</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Brief</div>
+      <div class="brief-header">
+        <div class="tabs">
+          <button class="tab active" data-view="today" onclick="setBriefView('today')">Today</button>
+          <button class="tab" data-view="week" onclick="setBriefView('week')">Week</button>
+        </div>
+        <div class="brief-date" id="briefDate"></div>
+      </div>
+      <div id="briefContent" class="loading">
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Open Slots Today</div>
+      <div id="slotsContent" class="loading">
+        <div class="skeleton"></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Backlog</div>
+      <button class="backlog-add-btn" onclick="toggleBacklogForm()">+ Add Item</button>
+      <form class="backlog-form" id="backlogForm" onsubmit="submitBacklogForm(event)">
+        <input type="text" id="bfTitle" placeholder="Title" required />
+        <div class="backlog-form-row">
+          <select id="bfPriority">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+          </select>
+          <select id="bfEnergy">
+            <option value="any" selected>Any energy</option>
+            <option value="morning">Morning</option>
+            <option value="afternoon">Afternoon</option>
+            <option value="evening">Evening</option>
+            <option value="weekend">Weekend</option>
+          </select>
+          <input type="number" id="bfEstimate" placeholder="mins" min="5" step="5" value="30" />
+        </div>
+        <input type="text" id="bfTags" placeholder="Tags (comma separated)" />
+        <textarea id="bfNotes" placeholder="Notes (optional)"></textarea>
+        <div class="backlog-form-actions">
+          <button type="button" onclick="toggleBacklogForm()">Cancel</button>
+          <button type="submit" class="primary">Add</button>
+        </div>
+      </form>
+      <div id="backlogContent" class="loading">
+        <div class="skeleton"></div>
+      </div>
+    </div>
+
+    <div class="last-updated">
+      Updated: <span id="lastUpdated">—</span>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="slotModal" onclick="if(event.target.id==='slotModal') closeSlotModal()">
+    <div class="modal">
+      <div class="modal-header">
+        <div>
+          <div class="modal-title">Slot It</div>
+          <div class="modal-subtitle" id="slotModalSubtitle"></div>
+        </div>
+        <button class="modal-close" onclick="closeSlotModal()">✕</button>
+      </div>
+      <div id="slotModalBody"></div>
+    </div>
+  </div>
+
+  <script>
+    let briefView = 'today';
+    let lastState = null;
+    let calendarLastRefreshAt = 0;
+    const CALENDAR_REFRESH_INTERVAL_MS = 60000; // 1 minute cooldown
+    let calendarRefreshTicker = null;
+
+    function tickCalendarRefreshCountdown() {
+      const btn = document.getElementById('refreshBtn');
+      if (!btn) return;
+
+      // While actively refreshing, the .refreshing class owns the ring (spinner). Skip.
+      if (btn.classList.contains('refreshing')) return;
+
+      if (calendarLastRefreshAt === 0) {
+        btn.style.setProperty('--refresh-pct', '0');
+        return;
+      }
+
+      const now = Date.now();
+      const elapsed = now - calendarLastRefreshAt;
+      const remainingMs = Math.max(0, CALENDAR_REFRESH_INTERVAL_MS - elapsed);
+      const pct = Math.max(0, Math.min(100, ((CALENDAR_REFRESH_INTERVAL_MS - remainingMs) / CALENDAR_REFRESH_INTERVAL_MS) * 100));
+      btn.style.setProperty('--refresh-pct', String(pct));
+
+      // Auto-trigger refresh when cooldown expires (button remains clickable throughout)
+      if (remainingMs <= 0) {
+        calendarLastRefreshAt = now; // prevent re-trigger while fetch is in flight
+        loadDashboard(true);
+      }
+    }
+
+    function bindCalendarRefreshTicker() {
+      if (calendarRefreshTicker) clearInterval(calendarRefreshTicker);
+      tickCalendarRefreshCountdown();
+      calendarRefreshTicker = setInterval(tickCalendarRefreshCountdown, 1000);
+    }
+
+    function updateBriefDate() {
+      const today = new Date();
+      const dateStr = today.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+      document.getElementById('briefDate').textContent = dateStr;
+    }
+
+    function setBriefView(view) {
+      briefView = view;
+      document.querySelectorAll('.tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.view === view);
+      });
+      const page = document.querySelector('.calendar-page');
+      if (page) page.classList.toggle('week-view-active', view === 'week');
+      if (lastState) renderBrief(lastState);
+    }
+
+    const CACHE_KEY = 'calendarDashboardState';
+
+    function loadFromCache() {
+      try {
+        const raw = localStorage.getItem(CACHE_KEY);
+        if (!raw) return null;
+        return JSON.parse(raw);
+      } catch { return null; }
+    }
+    function saveToCache(data) {
+      try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch {}
+    }
+
+    function formatDuration(minutes) {
+      const h = Math.floor(minutes / 60);
+      const m = minutes % 60;
+      if (h === 0) return m + 'm';
+      if (m === 0) return h + 'h';
+      return h + 'h ' + m + 'm';
+    }
+
+    function renderEventItem(ev) {
+      const now = new Date();
+      const startDate = new Date(ev.start);
+      const endDate = new Date(ev.end);
+      const isPast = endDate < now;
+      const durationMs = endDate - startDate;
+      const durationMins = Math.round(durationMs / 60000);
+      const minHeight = 28 + Math.max(0, durationMins * 0.08);
+      const routineClass = ev.routine ? ' routine' : '';
+      const pastClass = isPast ? ' past' : '';
+      const colorClass = ev.color_id ? ' gc-color-' + ev.color_id : ' gc-color-default';
+      const start = startDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const end = endDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      return \`<div class="event-item\${routineClass}\${pastClass}\${colorClass}" style="min-height: \${minHeight}px;">
+        <div>\${ev.summary || '(untitled)'}</div>
+        <span class="event-time">\${start} – \${end}</span>
+      </div>\`;
+    }
+
+    function renderTodayTimeline(data, container) {
+      const brief = data.brief || {};
+      const rawEvents = (brief.all_events || brief.events || []).slice();
+      const todayIso = brief.date || new Date().toISOString().slice(0, 10);
+      if (rawEvents.length === 0) {
+        container.innerHTML = '<div class="empty-state">No events today</div>';
+        return;
+      }
+
+      const now = new Date();
+      const nowLabel = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+      // Clip each event to today (handles events spanning midnight)
+      const clipped = [];
+      for (const ev of rawEvents) {
+        const clip = clipEventToDay(ev, todayIso);
+        if (!clip) continue;
+        clipped.push({ ...ev, _clip: clip });
+      }
+      if (clipped.length === 0) {
+        container.innerHTML = '<div class="empty-state">No events today</div>';
+        return;
+      }
+
+      // Compute dynamic hour range from clipped start/end minutes
+      let minHour = 7, maxHour = 22;
+      for (const ev of clipped) {
+        minHour = Math.min(minHour, Math.floor(ev._clip.startMin / 60));
+        maxHour = Math.max(maxHour, Math.ceil(ev._clip.endMin / 60));
+      }
+      minHour = Math.max(0, minHour - 1);
+      maxHour = Math.min(24, maxHour + 1);
+      if (now.getHours() < minHour) minHour = Math.max(0, now.getHours());
+      if (now.getHours() + 1 > maxHour) maxHour = Math.min(24, now.getHours() + 1);
+
+      const PX_PER_MIN = 1; // 60px per hour
+      const totalMinutes = (maxHour - minHour) * 60;
+      const totalHeight = totalMinutes * PX_PER_MIN;
+
+      // Hour labels
+      let hoursHtml = '<div class="tl-hours">';
+      for (let h = minHour; h < maxHour; h++) {
+        const displayH = h % 24;
+        const hr = displayH % 12 === 0 ? 12 : displayH % 12;
+        const ampm = displayH < 12 ? 'AM' : 'PM';
+        hoursHtml += '<div class="tl-hour" style="height: ' + (60 * PX_PER_MIN) + 'px;">' + hr + ' ' + ampm + '</div>';
+      }
+      hoursHtml += '</div>';
+
+      // Sort by clipped start, assign lanes based on clipped intervals
+      const sorted = clipped.slice().sort((a, b) => a._clip.startMin - b._clip.startMin);
+      const active = [];
+      for (const ev of sorted) {
+        for (let i = active.length - 1; i >= 0; i--) {
+          if (active[i]._clip.endMin <= ev._clip.startMin) active.splice(i, 1);
+        }
+        const used = new Set(active.map(e => e._lane));
+        let lane = 0;
+        while (used.has(lane)) lane++;
+        ev._lane = lane;
+        active.push(ev);
+      }
+      for (const ev of sorted) {
+        let maxLane = 0;
+        for (const other of sorted) {
+          if (other._clip.startMin < ev._clip.endMin && other._clip.endMin > ev._clip.startMin) {
+            maxLane = Math.max(maxLane, other._lane);
+          }
+        }
+        ev._totalLanes = maxLane + 1;
+      }
+
+      // Events
+      let eventsHtml = '';
+      const dayStartMinutes = minHour * 60;
+      for (const ev of sorted) {
+        const top = Math.max(0, (ev._clip.startMin - dayStartMinutes) * PX_PER_MIN);
+        const rawHeight = (ev._clip.endMin - ev._clip.startMin) * PX_PER_MIN;
+        const height = Math.max(18, rawHeight);
+        if (top > totalHeight) continue;
+        const colorClass = ev.color_id ? 'gc-color-' + ev.color_id : 'gc-color-default';
+        const isPast = ev._clip.origEnd < now;
+        const pastClass = isPast ? ' past' : '';
+        const routineClass = ev.routine ? ' routine' : '';
+        const shortClass = rawHeight < 32 ? ' short' : '';
+        const lanePct = 100 / ev._totalLanes;
+        const leftPct = ev._lane * lanePct;
+        const start = ev._clip.origStart.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        const end = ev._clip.origEnd.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        const title = (ev.summary || '(untitled)').replace(/</g, '&lt;');
+        eventsHtml += '<div class="tl-event ' + colorClass + pastClass + routineClass + shortClass + '" '
+          + 'style="top: ' + top + 'px; height: ' + height + 'px; left: calc(' + leftPct + '% + 2px); width: calc(' + lanePct + '% - 4px);">'
+          + '<div class="tl-event-title">' + title + '</div>'
+          + '<div class="tl-event-time">' + start + ' – ' + end + '</div>'
+          + '</div>';
+      }
+
+      // Now line
+      let nowLineHtml = '';
+      const nowMin = now.getHours() * 60 + now.getMinutes();
+      const nowTop = (nowMin - dayStartMinutes) * PX_PER_MIN;
+      if (nowTop >= 0 && nowTop <= totalHeight) {
+        nowLineHtml = '<div class="tl-now-line" style="top: ' + nowTop + 'px;">'
+          + '<div class="tl-now-label">' + nowLabel + '</div>'
+          + '</div>';
+      }
+
+      container.innerHTML = '<div class="timeline" style="height: ' + totalHeight + 'px;">'
+        + hoursHtml
+        + '<div class="tl-grid">' + eventsHtml + nowLineHtml + '</div>'
+        + '</div>';
+    }
+
+    function renderBrief(data) {
+      const container = document.getElementById('briefContent');
+      if (briefView === 'today') {
+        renderTodayTimeline(data, container);
+      } else {
+        renderWeekTimeline(data, container);
+      }
+      updateBriefDate();
+    }
+
+    function clipEventToDay(ev, dayIso) {
+      const dayStart = new Date(dayIso + 'T00:00:00');
+      const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+      const evStart = new Date(ev.start);
+      const evEnd = new Date(ev.end);
+      if (evEnd <= dayStart || evStart >= dayEnd) return null;
+      const clipStart = evStart < dayStart ? dayStart : evStart;
+      const clipEnd = evEnd > dayEnd ? dayEnd : evEnd;
+      return {
+        startMin: Math.round((clipStart - dayStart) / 60000),
+        endMin: Math.round((clipEnd - dayStart) / 60000),
+        clippedStart: evStart < dayStart,
+        clippedEnd: evEnd > dayEnd,
+        origStart: evStart,
+        origEnd: evEnd,
+      };
+    }
+
+    function assignLanes(sorted) {
+      const active = [];
+      for (const ev of sorted) {
+        const s = new Date(ev.start);
+        for (let i = active.length - 1; i >= 0; i--) {
+          if (new Date(active[i].end) <= s) active.splice(i, 1);
+        }
+        const used = new Set(active.map(e => e._lane));
+        let lane = 0;
+        while (used.has(lane)) lane++;
+        ev._lane = lane;
+        active.push(ev);
+      }
+      for (const ev of sorted) {
+        const s = new Date(ev.start);
+        const e = new Date(ev.end);
+        let maxLane = 0;
+        for (const other of sorted) {
+          const os = new Date(other.start);
+          const oe = new Date(other.end);
+          if (os < e && oe > s) maxLane = Math.max(maxLane, other._lane);
+        }
+        ev._totalLanes = maxLane + 1;
+      }
+    }
+
+    function renderWeekTimeline(data, container) {
+      const weekEvents = (data.week_events || []).slice();
+      // Include today's events so we have a full 7-day window starting today
+      const todayIsoApi = data.brief?.date || new Date().toISOString().slice(0, 10);
+      const todayEvents = (data.brief?.all_events || []).map(ev => ({ ...ev, day: todayIsoApi }));
+      const allEvents = todayEvents.concat(weekEvents);
+
+      if (allEvents.length === 0) {
+        container.innerHTML = '<div class="empty-state">No events this week</div>';
+        return;
+      }
+
+      const byDay = {};
+      for (const ev of allEvents) {
+        (byDay[ev.day] = byDay[ev.day] || []).push(ev);
+      }
+
+      // Build the 7-day window starting from today (using local date to avoid TZ drift)
+      const todayLocal = new Date();
+      const todayIso = todayLocal.getFullYear() + '-'
+        + String(todayLocal.getMonth() + 1).padStart(2, '0') + '-'
+        + String(todayLocal.getDate()).padStart(2, '0');
+      const days = [];
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(todayLocal.getFullYear(), todayLocal.getMonth(), todayLocal.getDate() + i);
+        days.push(d.getFullYear() + '-'
+          + String(d.getMonth() + 1).padStart(2, '0') + '-'
+          + String(d.getDate()).padStart(2, '0'));
+      }
+
+      // Clip every event to its day and store on a per-day basis
+      const clippedByDay = {};
+      for (const day of days) {
+        clippedByDay[day] = [];
+        const rawList = byDay[day] || [];
+        // Deduplicate by event id (same event may appear from today's brief and week_events)
+        const seen = new Set();
+        for (const ev of rawList) {
+          const key = ev.id + '|' + day;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const clip = clipEventToDay(ev, day);
+          if (!clip) continue;
+          clippedByDay[day].push({ ...ev, _clip: clip });
+        }
+      }
+
+      // Compute global min/max hour from the clipped intervals
+      let minHour = 7, maxHour = 22;
+      for (const day of days) {
+        for (const ev of clippedByDay[day]) {
+          minHour = Math.min(minHour, Math.floor(ev._clip.startMin / 60));
+          maxHour = Math.max(maxHour, Math.ceil(ev._clip.endMin / 60));
+        }
+      }
+      minHour = Math.max(0, minHour - 1);
+      maxHour = Math.min(24, maxHour + 1);
+
+      const PX_PER_MIN = 1; // 60px per hour (matches daily view)
+      const totalMinutes = (maxHour - minHour) * 60;
+      const totalHeight = totalMinutes * PX_PER_MIN;
+      const dayStartMinutes = minHour * 60;
+      const now = new Date();
+
+      // Headers row
+      let headersHtml = '<div class="week-hours-header"></div>';
+      for (const day of days) {
+        const dateObj = new Date(day + 'T12:00:00');
+        const dayName = dateObj.toLocaleDateString([], { weekday: 'short' });
+        const dayNum = dateObj.getDate();
+        const isToday = day === todayIso;
+        headersHtml += '<div class="week-day-header' + (isToday ? ' today' : '') + '">'
+          + dayName + '<span class="wd-num">' + dayNum + '</span>'
+          + '</div>';
+      }
+
+      // Hour labels column
+      let hoursHtml = '<div class="tl-hours" style="height: ' + totalHeight + 'px;">';
+      for (let h = minHour; h < maxHour; h++) {
+        const displayH = h % 24;
+        const hr = displayH % 12 === 0 ? 12 : displayH % 12;
+        const ampm = displayH < 12 ? 'AM' : 'PM';
+        hoursHtml += '<div class="tl-hour" style="height: ' + (60 * PX_PER_MIN) + 'px;">' + hr + ' ' + ampm + '</div>';
+      }
+      hoursHtml += '</div>';
+
+      // Day columns with events
+      let daysHtml = '';
+      for (const day of days) {
+        const isToday = day === todayIso;
+        const dayEvents = clippedByDay[day].slice().sort((a, b) => a._clip.startMin - b._clip.startMin);
+
+        // Lane assignment on clipped intervals
+        const active = [];
+        for (const ev of dayEvents) {
+          for (let i = active.length - 1; i >= 0; i--) {
+            if (active[i]._clip.endMin <= ev._clip.startMin) active.splice(i, 1);
+          }
+          const used = new Set(active.map(e => e._lane));
+          let lane = 0;
+          while (used.has(lane)) lane++;
+          ev._lane = lane;
+          active.push(ev);
+        }
+        for (const ev of dayEvents) {
+          let maxLane = 0;
+          for (const other of dayEvents) {
+            if (other._clip.startMin < ev._clip.endMin && other._clip.endMin > ev._clip.startMin) {
+              maxLane = Math.max(maxLane, other._lane);
+            }
+          }
+          ev._totalLanes = maxLane + 1;
+        }
+
+        let eventsHtml = '';
+        for (const ev of dayEvents) {
+          const top = Math.max(0, (ev._clip.startMin - dayStartMinutes) * PX_PER_MIN);
+          const rawHeight = (ev._clip.endMin - ev._clip.startMin) * PX_PER_MIN;
+          const height = Math.max(16, rawHeight);
+          if (top > totalHeight) continue;
+          const colorClass = ev.color_id ? 'gc-color-' + ev.color_id : 'gc-color-default';
+          const isPast = ev._clip.origEnd < now;
+          const pastClass = isPast ? ' past' : '';
+          const routineClass = ev.routine ? ' routine' : '';
+          const shortClass = rawHeight < 30 ? ' short' : '';
+          const lanePct = 100 / ev._totalLanes;
+          const leftPct = ev._lane * lanePct;
+          const start = ev._clip.origStart.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+          const end = ev._clip.origEnd.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+          const title = (ev.summary || '(untitled)').replace(/</g, '&lt;');
+          eventsHtml += '<div class="tl-event compact ' + colorClass + pastClass + routineClass + shortClass + '" '
+            + 'style="top: ' + top + 'px; height: ' + height + 'px; left: calc(' + leftPct + '% + 1px); width: calc(' + lanePct + '% - 2px);">'
+            + '<div class="tl-event-title">' + title + '</div>'
+            + '<div class="tl-event-time-stack"><div>' + start + '</div><div>' + end + '</div></div>'
+            + '</div>';
+        }
+
+        // Now-line in today's column
+        let nowLineHtml = '';
+        if (isToday) {
+          const nowMin = now.getHours() * 60 + now.getMinutes();
+          const nowTop = (nowMin - dayStartMinutes) * PX_PER_MIN;
+          if (nowTop >= 0 && nowTop <= totalHeight) {
+            nowLineHtml = '<div class="tl-now-line" style="top: ' + nowTop + 'px;"></div>';
+          }
+        }
+
+        daysHtml += '<div class="week-day-col' + (isToday ? ' today' : '') + '" style="height: ' + totalHeight + 'px;">'
+          + eventsHtml + nowLineHtml
+          + '</div>';
+      }
+
+      container.innerHTML = '<div class="week-timeline">'
+        + headersHtml
+        + hoursHtml
+        + daysHtml
+        + '</div>';
+    }
+
+    function renderSlots(data) {
+      const slotsToday = (data.slots_today || []).slice(0, 5);
+      let slotsHtml = '';
+      if (slotsToday.length > 0) {
+        slotsHtml += '<div class="slots-list">';
+        for (const slot of slotsToday) {
+          const start = new Date(slot.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          const end = new Date(slot.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          const duration = formatDuration(slot.duration_minutes);
+          slotsHtml += \`<div class="slot-item">
+            <div>\${start} – \${end} (\${duration})</div>
+          </div>\`;
+        }
+        slotsHtml += '</div>';
+      } else {
+        slotsHtml = '<div class="empty-state">No open slots today</div>';
+      }
+      document.getElementById('slotsContent').innerHTML = slotsHtml;
+    }
+
+    function renderBacklog(data) {
+      const items = (data.backlog || []).slice();
+      const stale = new Set((data.stale || []).map(i => i.id));
+      if (items.length === 0) {
+        document.getElementById('backlogContent').innerHTML = '<div class="empty-state">No backlog items</div>';
+        return;
+      }
+      // Sort: high priority first, then oldest created first
+      const rank = { high: 0, medium: 1, low: 2 };
+      items.sort((a, b) => {
+        const pr = (rank[a.priority] ?? 99) - (rank[b.priority] ?? 99);
+        if (pr !== 0) return pr;
+        return new Date(a.created) - new Date(b.created);
+      });
+      let html = '<div class="backlog-list">';
+      for (const item of items) {
+        const priClass = 'priority-' + item.priority;
+        const isStale = stale.has(item.id);
+        const ageDays = Math.floor((Date.now() - new Date(item.created).getTime()) / 86400000);
+        let badges = '';
+        if (isStale) badges += '<span class="badge stale">stale</span>';
+        badges += '<span class="badge">' + item.energy + '</span>';
+        badges += '<span class="badge">' + item.estimate_minutes + 'm</span>';
+        badges += '<span class="badge">' + ageDays + 'd old</span>';
+        for (const tag of (item.tags || [])) {
+          badges += '<span class="badge tag">#' + tag + '</span>';
+        }
+        html += \`<div class="backlog-item">
+          <div style="flex: 1; min-width: 0;">
+            <div class="backlog-title"><span class="\${priClass}">●</span> \${item.title}</div>
+            <div class="backlog-badges">\${badges}</div>
+          </div>
+          <div class="backlog-actions">
+            <button class="action-btn" title="Slot it" onclick="openSlotModal('\${item.id}')">⏰</button>
+            <button class="action-btn" title="Done" onclick="markDone('\${item.id}')">✓</button>
+            <button class="action-btn" title="Drop" onclick="markDropped('\${item.id}')">✗</button>
+          </div>
+        </div>\`;
+      }
+      html += '</div>';
+      document.getElementById('backlogContent').innerHTML = html;
+    }
+
+    function renderAll(data) {
+      renderBrief(data);
+      renderSlots(data);
+      renderBacklog(data);
+    }
+
+    async function loadDashboard(forceNetwork = false) {
+      // 1. Render cached immediately if available and not forcing
+      if (!forceNetwork) {
+        const cached = loadFromCache();
+        if (cached) {
+          lastState = cached;
+          renderAll(cached);
+          const genAt = cached.generated_at ? new Date(cached.generated_at) : null;
+          if (genAt) document.getElementById('lastUpdated').textContent = genAt.toLocaleTimeString() + ' (cached)';
+        }
+      }
+      // 2. Fetch fresh in background
+      const btn = document.getElementById('refreshBtn');
+      if (btn) btn.classList.add('refreshing');
+      try {
+        const resp = await fetch('/api/calendar/state');
+        const data = await resp.json();
+        if (data.error) {
+          document.getElementById('briefContent').innerHTML = \`<div class="empty-state">Error: \${data.error}</div>\`;
+          return;
+        }
+        lastState = data;
+        saveToCache(data);
+        renderAll(data);
+        document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString();
+        // Reset cooldown on successful refresh
+        calendarLastRefreshAt = Date.now();
+      } catch (error) {
+        console.error('Load failed:', error);
+        if (!lastState) document.getElementById('briefContent').innerHTML = '<div class="empty-state">Failed to load</div>';
+      } finally {
+        if (btn) btn.classList.remove('refreshing');
+      }
+    }
+
+    async function refreshDashboard() {
+      await loadDashboard(true);
+    }
+
+    async function sendQuickAsk() {
+      const input = document.getElementById('quickAskInput');
+      const prompt = input.value.trim();
+      if (!prompt) return;
+
+      try {
+        const resp = await fetch('/api/agents/spawn', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dialId: 'calendar_manager', initialPrompt: prompt })
+        });
+        const result = await resp.json();
+        if (result.ok) {
+          input.value = '';
+          console.log('Agent spawned');
+        }
+      } catch (error) {
+        console.error('Send failed:', error);
+      }
+    }
+
+    function toggleBacklogForm() {
+      const form = document.getElementById('backlogForm');
+      form.classList.toggle('open');
+      if (form.classList.contains('open')) {
+        document.getElementById('bfTitle').focus();
+      }
+    }
+
+    async function submitBacklogForm(ev) {
+      ev.preventDefault();
+      const title = document.getElementById('bfTitle').value.trim();
+      if (!title) return;
+      const tagsRaw = document.getElementById('bfTags').value.trim();
+      const body = {
+        title,
+        priority: document.getElementById('bfPriority').value,
+        energy: document.getElementById('bfEnergy').value,
+        estimate_minutes: parseInt(document.getElementById('bfEstimate').value, 10) || 30,
+        tags: tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [],
+        notes: document.getElementById('bfNotes').value.trim(),
+      };
+      try {
+        const resp = await fetch('/api/calendar/backlog', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const result = await resp.json();
+        if (result.ok) {
+          document.getElementById('backlogForm').reset();
+          document.getElementById('bfPriority').value = 'medium';
+          document.getElementById('bfEnergy').value = 'any';
+          document.getElementById('bfEstimate').value = '30';
+          toggleBacklogForm();
+          await loadDashboard(true);
+        } else {
+          alert('Add failed: ' + (result.error || 'unknown'));
+        }
+      } catch (e) {
+        alert('Add failed: ' + e.message);
+      }
+    }
+
+    let slotModalItem = null;
+
+    function openSlotModal(itemId) {
+      if (!lastState) return;
+      const item = (lastState.backlog || []).find(i => i.id === itemId);
+      if (!item) return;
+      slotModalItem = item;
+      document.getElementById('slotModalSubtitle').textContent =
+        item.title + ' · needs ' + item.estimate_minutes + 'm';
+      const body = document.getElementById('slotModalBody');
+      const needed = item.estimate_minutes;
+
+      // Group slots by day: today first, then week
+      const groups = [];
+      if ((lastState.slots_today || []).length > 0) {
+        groups.push({ label: 'Today', slots: lastState.slots_today.map(s => ({ ...s, day: new Date(s.start).toISOString().slice(0,10) })) });
+      }
+      const weekByDay = {};
+      for (const s of (lastState.slots_week || [])) {
+        (weekByDay[s.day] = weekByDay[s.day] || []).push(s);
+      }
+      for (const day of Object.keys(weekByDay).sort()) {
+        const dateObj = new Date(day + 'T12:00:00');
+        groups.push({ label: dateObj.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' }), slots: weekByDay[day] });
+      }
+
+      if (groups.length === 0) {
+        body.innerHTML = '<div class="empty-state">No open slots available</div>';
+      } else {
+        let html = '';
+        for (const g of groups) {
+          html += \`<div class="slot-day-header">\${g.label}</div>\`;
+          for (const slot of g.slots) {
+            const start = new Date(slot.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const end = new Date(slot.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const fits = slot.duration_minutes >= needed;
+            const klass = fits ? 'slot-option' : 'slot-option too-short';
+            const onClick = fits ? \`onclick="confirmSlot('\${slot.start}', this)"\` : '';
+            html += \`<div class="\${klass}" \${onClick}>
+              <span>\${start} – \${end}</span>
+              <span style="color: #7e8e91; font-size: 11px;">\${formatDuration(slot.duration_minutes)}</span>
+            </div>\`;
+          }
+        }
+        body.innerHTML = html;
+      }
+
+      document.getElementById('slotModal').classList.add('open');
+    }
+
+    function closeSlotModal() {
+      document.getElementById('slotModal').classList.remove('open');
+      slotModalItem = null;
+    }
+
+    async function confirmSlot(slotStartIso, btn) {
+      if (!slotModalItem) return;
+      const start = new Date(slotStartIso);
+      const end = new Date(start.getTime() + slotModalItem.estimate_minutes * 60000);
+      btn.style.pointerEvents = 'none';
+      btn.style.opacity = '0.5';
+      try {
+        const resp = await fetch('/api/calendar/backlog/' + slotModalItem.id + '/slot', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ start: start.toISOString(), end: end.toISOString() }),
+        });
+        const result = await resp.json();
+        if (result.ok) {
+          closeSlotModal();
+          await loadDashboard(true);
+        } else {
+          alert('Slot failed: ' + (result.error || 'unknown'));
+          btn.style.pointerEvents = '';
+          btn.style.opacity = '';
+        }
+      } catch (e) {
+        alert('Slot failed: ' + e.message);
+        btn.style.pointerEvents = '';
+        btn.style.opacity = '';
+      }
+    }
+
+    async function markDone(itemId) {
+      try {
+        await fetch('/api/calendar/backlog/' + itemId, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'done' })
+        });
+        loadDashboard();
+      } catch (error) {
+        console.error('Mark done failed:', error);
+      }
+    }
+
+    async function markDropped(itemId) {
+      try {
+        await fetch('/api/calendar/backlog/' + itemId, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'drop' })
+        });
+        loadDashboard();
+      } catch (error) {
+        console.error('Mark dropped failed:', error);
+      }
+    }
+
+    // Paint cached state instantly, then fetch fresh in background
+    loadDashboard();
+
+    // Bind the refresh cooldown ticker (every 1 second check, auto-refresh every 1 minute)
+    bindCalendarRefreshTicker();
+
+    // Re-fetch when tab regains focus
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) loadDashboard();
+    });
+
+    // Update now-line every minute for today view
+    setInterval(() => {
+      if (briefView === 'today' && lastState) {
+        renderBrief(lastState);
+      }
+    }, 60000);
+  </script>
+</body>
+</html>`;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 
@@ -3825,6 +5438,11 @@ const server = http.createServer(async (req, res) => {
     } catch {
       json(res, 404, { error: 'asset not found' });
     }
+    return;
+  }
+
+  if (url.pathname === '/calendar') {
+    html(res, 200, renderCalendarPage());
     return;
   }
 
@@ -4043,6 +5661,124 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, { ok: true, active: alias });
     } catch (error) {
       json(res, 500, { error: error.message || 'switch failed' });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/calendar/state' && req.method === 'GET') {
+    try {
+      const result = await runCalendarPython(['scripts/dashboard_state.py']);
+      if (!result.ok) {
+        json(res, 500, { error: result.stderr || 'dashboard state generation failed' });
+        return;
+      }
+      const state = JSON.parse(result.stdout);
+      json(res, 200, state);
+    } catch (error) {
+      json(res, 500, { error: error.message || 'calendar state failed' });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/calendar/backlog' && req.method === 'GET') {
+    try {
+      const status = String(url.searchParams.get('status') || '').trim();
+      const stale = url.searchParams.get('stale') ? Number(url.searchParams.get('stale')) : null;
+      const args = ['scripts/backlog.py', 'ls', '--json'];
+      if (status) args.push('--status', status);
+      if (stale) args.push('--stale', String(stale));
+      const result = await runCalendarPython(args);
+      if (!result.ok) {
+        json(res, 500, { error: result.stderr || 'backlog list failed' });
+        return;
+      }
+      const items = JSON.parse(result.stdout);
+      json(res, 200, { items });
+    } catch (error) {
+      json(res, 500, { error: error.message || 'backlog list failed' });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/calendar/backlog' && req.method === 'POST') {
+    try {
+      const body = await readJsonBody(req);
+      const title = String(body.title || '').trim();
+      if (!title) {
+        json(res, 400, { error: 'title is required' });
+        return;
+      }
+      const args = ['scripts/backlog.py', 'add', title, '--json'];
+      if (body.priority) args.push('--priority', String(body.priority));
+      if (body.energy) args.push('--energy', String(body.energy));
+      if (body.estimate_minutes) args.push('--estimate', String(body.estimate_minutes));
+      if (body.tags && Array.isArray(body.tags)) {
+        for (const tag of body.tags) {
+          args.push('--tag', String(tag));
+        }
+      }
+      if (body.notes) args.push('--notes', String(body.notes));
+      const result = await runCalendarPython(args);
+      if (!result.ok) {
+        json(res, 500, { error: result.stderr || 'backlog add failed' });
+        return;
+      }
+      const item = JSON.parse(result.stdout);
+      json(res, 200, { ok: true, item });
+    } catch (error) {
+      json(res, 500, { error: error.message || 'backlog add failed' });
+    }
+    return;
+  }
+
+  if (url.pathname.startsWith('/api/calendar/backlog/') && req.method === 'PATCH') {
+    try {
+      const itemId = url.pathname.split('/').pop();
+      const body = await readJsonBody(req);
+      const action = String(body.action || '').trim();
+      if (!action) {
+        json(res, 400, { error: 'action is required (done|drop|update)' });
+        return;
+      }
+      const args = ['scripts/backlog.py', action, itemId, '--json'];
+      if (action === 'update') {
+        if (body.title) args.push('--title', String(body.title));
+        if (body.priority) args.push('--priority', String(body.priority));
+        if (body.status) args.push('--status', String(body.status));
+      }
+      const result = await runCalendarPython(args);
+      if (!result.ok) {
+        json(res, 500, { error: result.stderr || `backlog ${action} failed` });
+        return;
+      }
+      const item = JSON.parse(result.stdout);
+      json(res, 200, { ok: true, item });
+    } catch (error) {
+      json(res, 500, { error: error.message || 'backlog action failed' });
+    }
+    return;
+  }
+
+  if (url.pathname.includes('/api/calendar/backlog/') && url.pathname.includes('/slot') && req.method === 'POST') {
+    try {
+      const parts = url.pathname.split('/');
+      const itemId = parts[parts.indexOf('backlog') + 1];
+      const body = await readJsonBody(req);
+      const start = String(body.start || '').trim();
+      const end = String(body.end || '').trim();
+      if (!start || !end) {
+        json(res, 400, { error: 'start and end times are required' });
+        return;
+      }
+      const result = await runCalendarPython(['scripts/slot_backlog_item.py', itemId, start, end, '--json']);
+      if (!result.ok) {
+        json(res, 500, { error: result.stderr || 'slot creation failed' });
+        return;
+      }
+      const slotResult = JSON.parse(result.stdout);
+      json(res, 200, slotResult);
+    } catch (error) {
+      json(res, 500, { error: error.message || 'slot creation failed' });
     }
     return;
   }
