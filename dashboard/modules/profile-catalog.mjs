@@ -7,6 +7,22 @@ const PROFILES_DIR = path.join(process.env.HOME || '', '.claude-profiles');
 const PROFILES_JSON = path.join(PROFILES_DIR, 'profiles.json');
 const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
 const CLAUDE_GLOBAL_STATE = path.join(process.env.HOME || '', '.claude.json');
+const CLAUDE_OAUTH_ACCOUNT_URL = 'https://api.anthropic.com/api/oauth/account';
+
+// A rotate lock older than this is treated as stale and ignored. 30 min is far
+// longer than any legitimate rotate should take (claude /login is seconds to
+// a minute) but short enough that a crashed/abandoned rotate doesn't silently
+// paralyze the sync daemon for days. The identity check downstream is the real
+// defense — the lock is a defense-in-depth optimization — so falling through
+// on a stale lock is safe.
+const ROTATE_LOCK_STALE_MS = 30 * 60 * 1000;
+
+function isRotateLockStale(rotation, nowMs = Date.now()) {
+  if (!rotation || !rotation.inProgress) return false;
+  const startedAt = Date.parse(rotation.startedAt || '');
+  if (!Number.isFinite(startedAt)) return true;
+  return (nowMs - startedAt) > ROTATE_LOCK_STALE_MS;
+}
 
 function credPath(alias) {
   return path.join(PROFILES_DIR, `${alias}.cred`);
@@ -21,6 +37,12 @@ function parseCredBlob(blob) {
   }
 }
 
+function normalizeEmail(value) {
+  return typeof value === 'string' && value.trim()
+    ? value.trim().toLowerCase()
+    : null;
+}
+
 function readKeychainBlob() {
   if (process.platform !== 'darwin') return Promise.resolve(null);
   return new Promise((resolve) => {
@@ -32,6 +54,51 @@ function readKeychainBlob() {
         if (err) return resolve(null);
         const blob = String(stdout || '').trim();
         resolve(blob || null);
+      },
+    );
+  });
+}
+
+function readBlobEmail(blob) {
+  const parsed = parseCredBlob(blob);
+  return normalizeEmail(parsed?.claudeAiOauth?.emailAddress || parsed?.claudeAiOauth?.email || null);
+}
+
+function fetchOAuthAccountEmailFromBlob(blob) {
+  const parsed = parseCredBlob(blob);
+  const accessToken = String(parsed?.claudeAiOauth?.accessToken || '').trim();
+  if (!accessToken) {
+    return Promise.resolve({ email: null, httpStatus: null, error: 'missing_access_token' });
+  }
+  return new Promise((resolve) => {
+    execFile(
+      'curl',
+      [
+        '-sS',
+        '-w', '\n%{http_code}',
+        '--max-time', String(Number(process.env.ATC_CLAUDE_ACCOUNT_TIMEOUT_SEC || 8)),
+        '-H', `Authorization: Bearer ${accessToken}`,
+        '-H', 'anthropic-beta: oauth-2025-04-20',
+        CLAUDE_OAUTH_ACCOUNT_URL,
+      ],
+      { timeout: 10_000, encoding: 'utf8' },
+      (err, stdout) => {
+        if (err) {
+          resolve({ email: null, httpStatus: null, error: err.message || 'curl_failed' });
+          return;
+        }
+        const raw = String(stdout || '');
+        const splitAt = raw.lastIndexOf('\n');
+        const status = splitAt >= 0 ? Number(raw.slice(splitAt + 1).trim()) : 0;
+        const body = splitAt >= 0 ? raw.slice(0, splitAt) : raw;
+        let payload = null;
+        try { payload = body ? JSON.parse(body) : null; } catch { /* ignore */ }
+        const email = normalizeEmail(payload?.email_address || payload?.email || null);
+        if (!Number.isFinite(status) || status < 200 || status >= 300) {
+          resolve({ email, httpStatus: status || null, error: payload?.error?.type || `http_${status || 'unknown'}` });
+          return;
+        }
+        resolve({ email, httpStatus: status, error: null });
       },
     );
   });
@@ -67,6 +134,32 @@ function readStoredCred(alias) {
 async function syncActiveKeychainToCred({ trigger = 'poll', actor = 'sync-daemon' } = {}) {
   try {
     const catalog = readProfilesJson();
+    if (catalog?.rotation?.inProgress) {
+      if (isRotateLockStale(catalog.rotation)) {
+        const startedAtMs = Date.parse(catalog.rotation.startedAt || '');
+        recordEvent({
+          actor,
+          action: 'rotate-lock-stale',
+          outcome: 'stale-fall-through',
+          trigger,
+          rotate_id: catalog.rotation.rotateId || null,
+          started_at: catalog.rotation.startedAt || null,
+          age_ms: Number.isFinite(startedAtMs) ? Date.now() - startedAtMs : null,
+        });
+        // Fall through — the identity check below is the real safety net.
+      } else {
+        recordEvent({
+          actor,
+          action: 'sync-skip',
+          outcome: 'skipped:rotate-lock',
+          trigger,
+          rotate_id: catalog.rotation.rotateId || null,
+          from_alias: catalog.rotation.fromAlias || null,
+          to_alias: catalog.rotation.toAlias || null,
+        });
+        return { synced: false, reason: 'rotate lock active' };
+      }
+    }
     const alias = typeof catalog.active === 'string' ? catalog.active.trim() : '';
     if (!alias) {
       recordEvent({ actor, action: 'sync-skip', outcome: 'skipped:no-active-profile', trigger });
@@ -111,6 +204,47 @@ async function syncActiveKeychainToCred({ trigger = 'poll', actor = 'sync-daemon
         trigger,
       });
       return { synced: false, reason: 'already in sync', alias };
+    }
+
+    if (expectedEmail) {
+      let observedEmail = readBlobEmail(keychainBlob);
+      let observedVia = observedEmail ? 'blob' : null;
+      let observedStatus = null;
+      if (!observedEmail || observedEmail !== expectedEmail) {
+        const identity = await fetchOAuthAccountEmailFromBlob(keychainBlob);
+        observedStatus = identity.httpStatus || null;
+        if (identity.email) {
+          observedEmail = identity.email;
+          observedVia = 'oauth-account';
+        }
+      }
+      if (!observedEmail) {
+        recordEvent({
+          actor,
+          action: 'sync-skip',
+          alias,
+          alias_email: expectedEmail,
+          observed_email: null,
+          http_status: observedStatus,
+          outcome: 'skipped:identity-unverified',
+          trigger,
+        });
+        return { synced: false, reason: 'identity could not be verified', alias };
+      }
+      if (observedEmail !== expectedEmail) {
+        recordEvent({
+          actor,
+          action: 'sync-skip',
+          alias,
+          alias_email: expectedEmail,
+          observed_email: observedEmail,
+          observed_via: observedVia,
+          http_status: observedStatus,
+          outcome: 'skipped:identity-mismatch',
+          trigger,
+        });
+        return { synced: false, reason: 'identity mismatch', alias };
+      }
     }
 
     writeCredAtomic(alias, keychainBlob);
@@ -342,6 +476,10 @@ export {
   computeProfileStaleness,
   credPath,
   parseCredBlob,
+  normalizeEmail,
+  readBlobEmail,
+  isRotateLockStale,
+  ROTATE_LOCK_STALE_MS,
   PROFILES_DIR,
   PROFILES_JSON,
   CLAUDE_GLOBAL_STATE,

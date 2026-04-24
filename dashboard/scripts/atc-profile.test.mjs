@@ -12,6 +12,8 @@ import {
   parseRefreshResponse,
   parseRefreshResponseWithHeaders,
   pickRateLimitHeaders,
+  validateAliasIdentity,
+  readCredentialBlobEmail,
 } from './atc-profile.mjs';
 
 let passed = 0;
@@ -253,6 +255,170 @@ function throws(name, fn, expectedCode) {
   eq('pickRateLimit: content-type dropped', picked['content-type'], undefined);
   eq('pickRateLimit: date dropped', picked.date, undefined);
   eq('pickRateLimit: empty input', JSON.stringify(pickRateLimitHeaders(null)), '{}');
+}
+
+// ── validateAliasIdentity ────────────────────────────────────────────────────
+{
+  eq(
+    'validateAliasIdentity: matching emails pass',
+    validateAliasIdentity('User@Example.com', ' user@example.com '),
+    { ok: true, reason: 'match' },
+  );
+  eq(
+    'validateAliasIdentity: mismatch fails',
+    validateAliasIdentity('one@example.com', 'two@example.com'),
+    { ok: false, reason: 'mismatch' },
+  );
+  eq(
+    'validateAliasIdentity: missing observed fails',
+    validateAliasIdentity('one@example.com', ''),
+    { ok: false, reason: 'unverified' },
+  );
+  eq(
+    'validateAliasIdentity: missing expected is allowed',
+    validateAliasIdentity('', 'whatever@example.com'),
+    { ok: true, reason: 'no-expected-email' },
+  );
+  eq(
+    'validateAliasIdentity: null observed → unverified',
+    validateAliasIdentity('one@example.com', null),
+    { ok: false, reason: 'unverified' },
+  );
+  eq(
+    'validateAliasIdentity: undefined observed → unverified',
+    validateAliasIdentity('one@example.com', undefined),
+    { ok: false, reason: 'unverified' },
+  );
+  eq(
+    'validateAliasIdentity: whitespace observed → unverified',
+    validateAliasIdentity('one@example.com', '   '),
+    { ok: false, reason: 'unverified' },
+  );
+  eq(
+    'validateAliasIdentity: both null → no-expected-email (vacuously ok)',
+    validateAliasIdentity(null, null),
+    { ok: true, reason: 'no-expected-email' },
+  );
+  eq(
+    'validateAliasIdentity: case-insensitive match',
+    validateAliasIdentity('A@B.COM', 'a@b.com'),
+    { ok: true, reason: 'match' },
+  );
+  eq(
+    'validateAliasIdentity: unicode local-part preserved in comparison',
+    validateAliasIdentity('Jös@example.com', 'jös@example.com'),
+    { ok: true, reason: 'match' },
+  );
+}
+
+// ── readCredentialBlobEmail ──────────────────────────────────────────────────
+{
+  eq(
+    'readCredentialBlobEmail: emailAddress field returned lowercased',
+    readCredentialBlobEmail(JSON.stringify({ claudeAiOauth: { emailAddress: 'User@Example.com' } })),
+    'user@example.com',
+  );
+  eq(
+    'readCredentialBlobEmail: falls back to email field when emailAddress absent',
+    readCredentialBlobEmail(JSON.stringify({ claudeAiOauth: { email: 'fallback@example.com' } })),
+    'fallback@example.com',
+  );
+  eq(
+    'readCredentialBlobEmail: emailAddress wins over email',
+    readCredentialBlobEmail(JSON.stringify({ claudeAiOauth: { emailAddress: 'primary@example.com', email: 'legacy@example.com' } })),
+    'primary@example.com',
+  );
+  eq(
+    'readCredentialBlobEmail: missing claudeAiOauth → null',
+    readCredentialBlobEmail(JSON.stringify({ other: 'value' })),
+    null,
+  );
+  eq(
+    'readCredentialBlobEmail: missing email fields → null',
+    readCredentialBlobEmail(JSON.stringify({ claudeAiOauth: { accessToken: 'x' } })),
+    null,
+  );
+  eq(
+    'readCredentialBlobEmail: malformed JSON → null',
+    readCredentialBlobEmail('not-json'),
+    null,
+  );
+  eq(
+    'readCredentialBlobEmail: null blob → null',
+    readCredentialBlobEmail(null),
+    null,
+  );
+  eq(
+    'readCredentialBlobEmail: empty blob → null',
+    readCredentialBlobEmail(''),
+    null,
+  );
+  eq(
+    'readCredentialBlobEmail: non-string emailAddress → null',
+    readCredentialBlobEmail(JSON.stringify({ claudeAiOauth: { emailAddress: 42 } })),
+    null,
+  );
+  eq(
+    'readCredentialBlobEmail: whitespace-only email → null',
+    readCredentialBlobEmail(JSON.stringify({ claudeAiOauth: { emailAddress: '   ' } })),
+    null,
+  );
+  eq(
+    'readCredentialBlobEmail: trims surrounding whitespace',
+    readCredentialBlobEmail(JSON.stringify({ claudeAiOauth: { emailAddress: '  spaced@example.com  ' } })),
+    'spaced@example.com',
+  );
+}
+
+// ── pre-refresh identity guard semantics ────────────────────────────────────
+// These exercise the combination used inside switchProfile before it decides
+// whether to proactively refresh. The guard:
+//   1) extracts the embedded email from <alias>.cred
+//   2) compares it against the alias's bound email
+//   3) aborts if they disagree (abort before saveCredential is reached)
+{
+  function guardDecision(aliasExpected, blob) {
+    const observed = readCredentialBlobEmail(blob);
+    const result = validateAliasIdentity(aliasExpected, observed);
+    if (result.ok) return { proceed: true, reason: result.reason };
+    return { proceed: false, reason: result.reason, observed };
+  }
+
+  const primaryBlob = JSON.stringify({
+    claudeAiOauth: { emailAddress: 'primary@example.com', accessToken: 'at', refreshToken: 'rt', expiresAt: Date.now() + 3600_000 },
+  });
+  const mismatchedBlob = JSON.stringify({
+    claudeAiOauth: { emailAddress: 'secondary@example.com', accessToken: 'at', refreshToken: 'rt', expiresAt: Date.now() + 3600_000 },
+  });
+  const emailMissingBlob = JSON.stringify({
+    claudeAiOauth: { accessToken: 'at', refreshToken: 'rt', expiresAt: Date.now() + 3600_000 },
+  });
+
+  eq(
+    'pre-refresh guard: matching email → proceed',
+    guardDecision('primary@example.com', primaryBlob),
+    { proceed: true, reason: 'match' },
+  );
+  eq(
+    'pre-refresh guard: mismatched email → abort with observed email exposed',
+    guardDecision('primary@example.com', mismatchedBlob),
+    { proceed: false, reason: 'mismatch', observed: 'secondary@example.com' },
+  );
+  eq(
+    'pre-refresh guard: missing email in blob → unverified (caller falls through to live check)',
+    guardDecision('primary@example.com', emailMissingBlob),
+    { proceed: false, reason: 'unverified', observed: null },
+  );
+  eq(
+    'pre-refresh guard: profile has no expected email → vacuously proceed',
+    guardDecision('', primaryBlob),
+    { proceed: true, reason: 'no-expected-email' },
+  );
+  eq(
+    'pre-refresh guard: case-insensitive match passes',
+    guardDecision('PRIMARY@example.com', primaryBlob),
+    { proceed: true, reason: 'match' },
+  );
 }
 
 // ── summary ──────────────────────────────────────────────────────────────────

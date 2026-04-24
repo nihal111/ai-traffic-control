@@ -23,6 +23,12 @@ const {
   computeProfileStaleness,
   parseCredBlob,
   credPath,
+  syncActiveKeychainToCred,
+  writeProfilesJson,
+  normalizeEmail,
+  readBlobEmail,
+  isRotateLockStale,
+  ROTATE_LOCK_STALE_MS,
 } = await import('../../modules/profile-catalog.mjs');
 
 function writeCred(alias, payload, ageMs = 0) {
@@ -201,4 +207,193 @@ test('computeProfileStaleness honors injected now for deterministic thresholds',
   const result = computeProfileStaleness('injected-now', { now: fileMtimeMs + 100 * 60_000, isActive: true });
   assert.equal(result.stalenessLevel, 'critical');
   assert(result.lastSyncAgeMs >= 99 * 60_000);
+});
+
+test('syncActiveKeychainToCred skips while rotate lock is active', async () => {
+  writeProfilesJson({
+    version: 1,
+    active: 'secondary',
+    rotation: {
+      inProgress: true,
+      rotateId: 'test-rotate-id',
+      fromAlias: 'secondary',
+      toAlias: 'primary',
+      startedAt: new Date().toISOString(),
+    },
+    profiles: {
+      secondary: { displayName: 'secondary', email: 'secondary@example.com' },
+      primary: { displayName: 'primary', email: 'primary@example.com' },
+    },
+  });
+
+  const result = await syncActiveKeychainToCred({ trigger: 'test', actor: 'unit-test' });
+  assert.equal(result.synced, false);
+  assert.equal(result.reason, 'rotate lock active');
+});
+
+// ── normalizeEmail ──────────────────────────────────────────────────────────
+test('normalizeEmail lowercases and trims', () => {
+  assert.equal(normalizeEmail('  User@Example.COM  '), 'user@example.com');
+});
+
+test('normalizeEmail returns null for empty/whitespace/non-string', () => {
+  assert.equal(normalizeEmail(''), null);
+  assert.equal(normalizeEmail('   '), null);
+  assert.equal(normalizeEmail(null), null);
+  assert.equal(normalizeEmail(undefined), null);
+  assert.equal(normalizeEmail(42), null);
+  assert.equal(normalizeEmail({}), null);
+});
+
+// ── readBlobEmail ───────────────────────────────────────────────────────────
+test('readBlobEmail extracts emailAddress field', () => {
+  const blob = JSON.stringify({ claudeAiOauth: { emailAddress: 'Primary@Example.com' } });
+  assert.equal(readBlobEmail(blob), 'primary@example.com');
+});
+
+test('readBlobEmail falls back to email field', () => {
+  const blob = JSON.stringify({ claudeAiOauth: { email: 'legacy@example.com' } });
+  assert.equal(readBlobEmail(blob), 'legacy@example.com');
+});
+
+test('readBlobEmail returns null when both fields absent', () => {
+  const blob = JSON.stringify({ claudeAiOauth: { accessToken: 'x' } });
+  assert.equal(readBlobEmail(blob), null);
+});
+
+test('readBlobEmail returns null for malformed blob', () => {
+  assert.equal(readBlobEmail('nope'), null);
+  assert.equal(readBlobEmail(''), null);
+  assert.equal(readBlobEmail(null), null);
+});
+
+// ── isRotateLockStale ───────────────────────────────────────────────────────
+test('isRotateLockStale: returns false when lock not present', () => {
+  assert.equal(isRotateLockStale(null), false);
+  assert.equal(isRotateLockStale(undefined), false);
+  assert.equal(isRotateLockStale({}), false);
+  assert.equal(isRotateLockStale({ inProgress: false }), false);
+});
+
+test('isRotateLockStale: fresh lock (< 30min) is not stale', () => {
+  const fresh = { inProgress: true, startedAt: new Date(Date.now() - 60_000).toISOString() };
+  assert.equal(isRotateLockStale(fresh), false);
+});
+
+test('isRotateLockStale: old lock (> 30min) is stale', () => {
+  const old = { inProgress: true, startedAt: new Date(Date.now() - ROTATE_LOCK_STALE_MS - 1_000).toISOString() };
+  assert.equal(isRotateLockStale(old), true);
+});
+
+test('isRotateLockStale: missing startedAt treated as stale (conservative fall-through)', () => {
+  assert.equal(isRotateLockStale({ inProgress: true }), true);
+  assert.equal(isRotateLockStale({ inProgress: true, startedAt: null }), true);
+  assert.equal(isRotateLockStale({ inProgress: true, startedAt: '' }), true);
+  assert.equal(isRotateLockStale({ inProgress: true, startedAt: 'not-a-date' }), true);
+});
+
+test('isRotateLockStale: honors injected nowMs for determinism', () => {
+  const startedAt = '2026-04-24T00:00:00.000Z';
+  const beforeTtl = Date.parse(startedAt) + ROTATE_LOCK_STALE_MS - 1;
+  const afterTtl = Date.parse(startedAt) + ROTATE_LOCK_STALE_MS + 1;
+  assert.equal(isRotateLockStale({ inProgress: true, startedAt }, beforeTtl), false);
+  assert.equal(isRotateLockStale({ inProgress: true, startedAt }, afterTtl), true);
+});
+
+test('isRotateLockStale: boundary — exactly TTL is NOT stale (> not >=)', () => {
+  const startedAt = '2026-04-24T00:00:00.000Z';
+  const exactly = Date.parse(startedAt) + ROTATE_LOCK_STALE_MS;
+  assert.equal(isRotateLockStale({ inProgress: true, startedAt }, exactly), false);
+});
+
+// ── syncActiveKeychainToCred + rotate-lock interactions ─────────────────────
+test('syncActiveKeychainToCred: stale lock (old startedAt) is ignored and falls through', async () => {
+  writeProfilesJson({
+    version: 1,
+    active: 'secondary',
+    rotation: {
+      inProgress: true,
+      rotateId: 'abandoned-rotate',
+      fromAlias: 'secondary',
+      toAlias: 'primary',
+      startedAt: new Date(Date.now() - ROTATE_LOCK_STALE_MS - 60_000).toISOString(),
+    },
+    profiles: {
+      secondary: { displayName: 'secondary', email: 'secondary@example.com' },
+    },
+  });
+
+  // On platforms without keychain (non-darwin CI) this will short-circuit on
+  // keychain-empty; on darwin it may proceed further. Either way, the key
+  // assertion is that we did NOT return `rotate lock active` — we fell through.
+  const result = await syncActiveKeychainToCred({ trigger: 'test', actor: 'unit-test' });
+  assert.notEqual(result.reason, 'rotate lock active');
+});
+
+test('syncActiveKeychainToCred: lock with no startedAt treated as stale (fall through)', async () => {
+  writeProfilesJson({
+    version: 1,
+    active: 'secondary',
+    rotation: {
+      inProgress: true,
+      rotateId: 'bad-rotate',
+      fromAlias: 'secondary',
+      toAlias: 'primary',
+      // no startedAt field at all — defensive fall-through
+    },
+    profiles: {
+      secondary: { displayName: 'secondary', email: 'secondary@example.com' },
+    },
+  });
+
+  const result = await syncActiveKeychainToCred({ trigger: 'test', actor: 'unit-test' });
+  assert.notEqual(result.reason, 'rotate lock active');
+});
+
+test('syncActiveKeychainToCred: rotation.inProgress=false does NOT block sync', async () => {
+  writeProfilesJson({
+    version: 1,
+    active: 'secondary',
+    rotation: { inProgress: false, rotateId: 'completed-rotate' },
+    profiles: {
+      secondary: { displayName: 'secondary', email: 'secondary@example.com' },
+    },
+  });
+
+  const result = await syncActiveKeychainToCred({ trigger: 'test', actor: 'unit-test' });
+  assert.notEqual(result.reason, 'rotate lock active');
+});
+
+test('syncActiveKeychainToCred: no active profile → skip', async () => {
+  writeProfilesJson({
+    version: 1,
+    active: null,
+    profiles: {
+      secondary: { displayName: 'secondary', email: 'secondary@example.com' },
+    },
+  });
+
+  const result = await syncActiveKeychainToCred({ trigger: 'test', actor: 'unit-test' });
+  assert.equal(result.synced, false);
+  assert.equal(result.reason, 'no active profile');
+});
+
+test('syncActiveKeychainToCred: whitespace-only active alias → skip', async () => {
+  writeProfilesJson({
+    version: 1,
+    active: '   ',
+    profiles: {
+      secondary: { displayName: 'secondary', email: 'secondary@example.com' },
+    },
+  });
+
+  const result = await syncActiveKeychainToCred({ trigger: 'test', actor: 'unit-test' });
+  assert.equal(result.synced, false);
+  assert.equal(result.reason, 'no active profile');
+});
+
+test('syncActiveKeychainToCred: absent profiles.json → handled gracefully (no throw)', async () => {
+  try { fs.unlinkSync(path.join(TEST_PROFILES_DIR, 'profiles.json')); } catch { /* best-effort */ }
+  const result = await syncActiveKeychainToCred({ trigger: 'test', actor: 'unit-test' });
+  assert.equal(result.synced, false);
 });

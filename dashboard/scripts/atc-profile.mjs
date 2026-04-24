@@ -102,6 +102,38 @@ function saveCatalog(catalog) {
   writeJsonAtomic(PROFILES_JSON, catalog);
 }
 
+function setRotateLock(catalog, { rotateId, fromAlias, toAlias }) {
+  catalog.rotation = {
+    inProgress: true,
+    rotateId,
+    fromAlias: fromAlias || null,
+    toAlias: toAlias || null,
+    startedAt: new Date().toISOString(),
+  };
+  saveCatalog(catalog);
+  recordEvent({
+    actor: 'rotate',
+    action: 'rotate-lock-set',
+    rotate_id: rotateId,
+    from_alias: fromAlias || null,
+    to_alias: toAlias || null,
+    outcome: 'ok',
+  });
+}
+
+function clearRotateLock(catalog, rotateId, outcome = 'ok') {
+  if (!catalog?.rotation?.inProgress) return;
+  if (rotateId && catalog.rotation.rotateId && catalog.rotation.rotateId !== rotateId) return;
+  delete catalog.rotation;
+  saveCatalog(catalog);
+  recordEvent({
+    actor: 'rotate',
+    action: 'rotate-lock-clear',
+    rotate_id: rotateId || null,
+    outcome,
+  });
+}
+
 function readClaudeGlobalState() {
   return readJson(CLAUDE_GLOBAL_STATE, {});
 }
@@ -1034,6 +1066,26 @@ function canSkipProactiveRefresh(blob, profile, nowMs = Date.now()) {
   return identityAgeMs < maxIdentityAge;
 }
 
+export function validateAliasIdentity(expectedEmail, observedEmail) {
+  const expected = typeof expectedEmail === 'string' ? expectedEmail.trim().toLowerCase() : '';
+  const observed = typeof observedEmail === 'string' ? observedEmail.trim().toLowerCase() : '';
+  if (!expected) return { ok: true, reason: 'no-expected-email' };
+  if (!observed) return { ok: false, reason: 'unverified' };
+  if (observed !== expected) return { ok: false, reason: 'mismatch' };
+  return { ok: true, reason: 'match' };
+}
+
+// Extract the account email embedded in a credential blob. Claude Code writes
+// it into claudeAiOauth.emailAddress at login; some older blobs use `email`.
+// Returns a lowercased trimmed string, or null when absent/malformed.
+export function readCredentialBlobEmail(blob) {
+  const parsed = parseCredentialBlob(blob);
+  const raw = parsed?.claudeAiOauth?.emailAddress || parsed?.claudeAiOauth?.email || null;
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim().toLowerCase();
+  return trimmed || null;
+}
+
 function switchProfile(alias, options = {}) {
   if (!alias) die('Usage: atc-profile use <alias>');
   // Default: capture the currently-active profile's rotated tokens before swap,
@@ -1114,6 +1166,35 @@ function switchProfile(alias, options = {}) {
   };
 
   const targetProfile = catalog.profiles[alias];
+  const targetExpectedEmail = typeof targetProfile?.email === 'string'
+    ? targetProfile.email.trim().toLowerCase()
+    : '';
+
+  // Pre-refresh identity guard: if the blob's embedded email disagrees with
+  // the alias's expected email, the file on disk is corrupted. Refreshing it
+  // would burn the wrong lineage's quota and persist fresh-but-wrong tokens
+  // back to disk. Abort immediately; the downstream live identity check is a
+  // second layer but runs after a network call we don't want to make.
+  if (targetExpectedEmail) {
+    const targetBlobEmail = readCredentialBlobEmail(targetBlob);
+    if (targetBlobEmail && targetBlobEmail !== targetExpectedEmail) {
+      recordEvent({
+        actor: 'switch',
+        action: 'switch-abort',
+        alias,
+        switch_id: switchId,
+        expected_email: targetExpectedEmail,
+        observed_email: targetBlobEmail,
+        outcome: 'pre-refresh-identity-mismatch',
+      });
+      die(
+        `Refusing switch: ${alias}.cred is bound to ${targetExpectedEmail}, but the blob on disk holds credentials for ${targetBlobEmail}.\n` +
+        `This file is corrupted (likely from a prior sync race). No keychain or disk writes were attempted.\n` +
+        `Recover with: atc-profile rotate ${alias}`
+      );
+    }
+  }
+
   if (blobNeedsRefresh(targetBlob) && !canSkipProactiveRefresh(targetBlob, targetProfile)) {
     try {
       attemptRefresh('proactive');
@@ -1202,6 +1283,40 @@ function switchProfile(alias, options = {}) {
         `Original error: ${retryError.message}`,
       );
     }
+  }
+  const targetObservedEmail = String(authState?.authStatus?.email || '').trim().toLowerCase();
+  const targetIdentity = validateAliasIdentity(targetExpectedEmail, targetObservedEmail);
+  if (!targetIdentity.ok && targetIdentity.reason === 'mismatch') {
+    recordEvent({
+      actor: 'switch',
+      action: 'switch-abort',
+      alias,
+      switch_id: switchId,
+      expected_email: targetExpectedEmail,
+      observed_email: targetObservedEmail,
+      outcome: 'target-identity-mismatch',
+    });
+    die(
+      `Refusing switch: profile "${alias}" is bound to ${targetExpectedEmail}, but loaded credential is ${targetObservedEmail}.\n` +
+      `No keychain or catalog changes were applied.\n` +
+      `Recovery: atc-profile rotate ${alias}`
+    );
+  }
+  if (!targetIdentity.ok && targetIdentity.reason === 'unverified') {
+    recordEvent({
+      actor: 'switch',
+      action: 'switch-abort',
+      alias,
+      switch_id: switchId,
+      expected_email: targetExpectedEmail,
+      observed_email: null,
+      outcome: 'target-identity-unverified',
+    });
+    die(
+      `Refusing switch: could not verify identity for profile "${alias}" before swap.\n` +
+      `No keychain or catalog changes were applied.\n` +
+      `Recovery: atc-profile rotate ${alias}`
+    );
   }
   const profile = catalog.profiles[alias];
   if (profile) {
@@ -1496,6 +1611,10 @@ async function cmdRotate(alias) {
     console.log(`  (nothing to freeze for "${activeAlias}" — keychain was empty or unmatched)`);
   }
 
+  // Prevent background sync from writing keychain state into the outgoing alias
+  // while rotate is in the login window.
+  setRotateLock(catalog, { rotateId, fromAlias: activeAlias, toAlias: alias });
+
   // Phase 1b — clear keychain so no running claude process can consume the RT
   keychainDelete({ actor: 'rotate', reason: 'pre-login-clear' });
   console.log('✓ Cleared keychain.');
@@ -1515,13 +1634,16 @@ async function cmdRotate(alias) {
       try {
         keychainImport(savedBlob, { actor: 'rotate', alias: activeAlias, reason: 'rollback' });
         console.log(`✓ Restored keychain to "${activeAlias}" — nothing changed.`);
+        clearRotateLock(catalog, rotateId, 'rollback');
         return;
       } catch (error) {
+        clearRotateLock(catalog, rotateId, 'rollback-failed');
         console.error(`✗ Could not restore keychain: ${error.message}`);
         console.error(`  ${activeAlias}.cred is intact — recover with: atc-profile use ${activeAlias}`);
         process.exit(1);
       }
     }
+    clearRotateLock(catalog, rotateId, 'cancelled');
     console.log('  Keychain remains empty. Nothing to roll back.');
     return;
   }
@@ -1531,6 +1653,7 @@ async function cmdRotate(alias) {
   try {
     newBlob = keychainExport();
   } catch {
+    clearRotateLock(catalog, rotateId, 'post-login-empty');
     console.error('✗ Keychain is still empty — claude /login did not complete.');
     if (activeAlias) {
       console.error(`  To restore "${activeAlias}", run: atc-profile use ${activeAlias}`);
@@ -1538,11 +1661,18 @@ async function cmdRotate(alias) {
     process.exit(1);
   }
 
-  const newAuthState = fetchClaudeAccountStateFromBlob(newBlob);
+  let newAuthState;
+  try {
+    newAuthState = fetchClaudeAccountStateFromBlob(newBlob);
+  } catch (error) {
+    clearRotateLock(catalog, rotateId, 'post-login-identity-error');
+    throw error;
+  }
   const observedEmail = typeof newAuthState?.authStatus?.email === 'string'
     ? newAuthState.authStatus.email.trim().toLowerCase()
     : null;
   if (!observedEmail) {
+    clearRotateLock(catalog, rotateId, 'post-login-email-missing');
     die('Could not determine logged-in email from Claude OAuth account metadata.');
   }
 
@@ -1551,6 +1681,7 @@ async function cmdRotate(alias) {
     if (otherAlias === alias) continue;
     const otherEmail = String(otherProfile?.email || '').trim().toLowerCase();
     if (otherEmail && otherEmail === observedEmail) {
+      clearRotateLock(catalog, rotateId, 'duplicate-email');
       console.error(`✗ Email ${observedEmail} is already registered as profile "${otherAlias}".`);
       console.error(`  Use a different alias, or remove "${otherAlias}" first.`);
       process.exit(1);
@@ -1562,6 +1693,7 @@ async function cmdRotate(alias) {
   if (existingProfile) {
     const existingEmail = String(existingProfile.email || '').trim().toLowerCase();
     if (existingEmail && existingEmail !== observedEmail) {
+      clearRotateLock(catalog, rotateId, 'alias-rebind-mismatch');
       console.error(`✗ Profile "${alias}" is bound to ${existingEmail}, but new login is ${observedEmail}.`);
       console.error(`  Use a different alias, or remove "${alias}" first to rebind it.`);
       process.exit(1);
@@ -1595,6 +1727,7 @@ async function cmdRotate(alias) {
   catalog.active = alias;
   applyClaudeGlobalAuthState(newAuthState);
   saveCatalog(catalog);
+  clearRotateLock(catalog, rotateId, 'ok');
 
   recordEvent({
     actor: 'rotate',
