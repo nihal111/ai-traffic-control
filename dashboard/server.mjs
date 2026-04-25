@@ -37,6 +37,7 @@ import {
   fetchProviderUsageOnce as fetchProviderUsageOnceModule,
 } from './modules/provider-usage.mjs';
 import { pollUsageUntilProfileActive } from './modules/profile-polling.mjs';
+import { loadClientModuleSource } from './modules/client-script-loader.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -62,6 +63,8 @@ const TMUX_SLOT_WINDOW = process.env.TMUX_SLOT_WINDOW || 'atc';
 const HOME_DIRECTORY = process.env.HOME || process.env.USERPROFILE || '/';
 const DEFAULT_WORKDIR = process.env.DEFAULT_SESSION_WORKDIR || HOME_DIRECTORY;
 const SHELL_HOOK_WRITER = process.env.SHELL_HOOK_WRITER || path.join(__dirname, 'scripts', 'shell-hook-writer.mjs');
+// Browser-safe source for <script> injection — see modules/client-script-loader.mjs.
+const CLIENT_PROFILE_POLLING_JS = loadClientModuleSource(path.join(__dirname, 'modules', 'profile-polling.mjs'));
 const ENABLE_SHELL_HOOKS = process.env.ENABLE_SHELL_HOOKS !== '0';
 const SOURCE_USER_ZSHRC = process.env.ATC_SOURCE_USER_ZSHRC !== '0';
 const USER_ZSHRC_PATH = process.env.ATC_USER_ZSHRC || path.join(process.env.HOME || '', '.zshrc');
@@ -2030,6 +2033,7 @@ function renderPage() {
   </div>
 
   <script>
+    ${CLIENT_PROFILE_POLLING_JS}
     const refreshing = new Set();
     const spawning = new Set();
     const killing = new Set();
@@ -5836,5 +5840,6 @@ export {
   personaConfig,
   personaIdsForTemplate,
   PERSONA_CONFIGS,
+  renderPage,
   selectLastInteractionAtFromOutput,
 };
