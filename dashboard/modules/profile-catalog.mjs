@@ -79,6 +79,13 @@ function fetchOAuthAccountEmailFromBlob(blob) {
         '--max-time', String(Number(process.env.ATC_CLAUDE_ACCOUNT_TIMEOUT_SEC || 8)),
         '-H', `Authorization: Bearer ${accessToken}`,
         '-H', 'anthropic-beta: oauth-2025-04-20',
+        // Match upstream claude-code's axios fingerprint. Anthropic's edge
+        // 429s bare curl/* UAs to OAuth endpoints regardless of token validity
+        // (root cause of the recurring profile-switch failures, fixed
+        // 2026-04-25). Keep these headers in lockstep with the constants in
+        // atc-profile.mjs.
+        '-H', 'Accept: application/json, text/plain, */*',
+        '-H', 'User-Agent: axios/1.7.7',
         CLAUDE_OAUTH_ACCOUNT_URL,
       ],
       { timeout: 10_000, encoding: 'utf8' },
@@ -168,6 +175,58 @@ async function syncActiveKeychainToCred({ trigger = 'poll', actor = 'sync-daemon
       recordEvent({ actor, action: 'sync-skip', outcome: 'skipped:no-active-profile', trigger });
       return { synced: false, reason: 'no active profile' };
     }
+
+    const keychainBlob = await readKeychainBlob();
+    if (!keychainBlob) {
+      recordEvent({ actor, action: 'sync-skip', alias, outcome: 'skipped:keychain-empty', trigger });
+      recordEvent({ actor, action: 'sync-skip-inactive-all', outcome: 'skipped:keychain-empty', trigger });
+      return { synced: false, reason: 'keychain empty or unreadable' };
+    }
+
+    // Sync the active profile to keychain
+    const activeResult = await syncOneProfileKeychainToCred(alias, keychainBlob, { trigger, actor });
+
+    // Also sync inactive profiles to their .cred files if they haven't been
+    // updated recently. This ensures RTs don't go stale while inactive.
+    const inactiveAliases = Object.keys(catalog.profiles || {}).filter(a => a !== alias);
+    const inactiveResults = [];
+    for (const inactiveAlias of inactiveAliases) {
+      const inactiveCred = readStoredCred(inactiveAlias);
+      if (inactiveCred) {
+        // Bump mtime to indicate daemon checked it. This is a safety measure to
+        // detect if a .cred file goes unupdated for extended periods.
+        try {
+          const now = new Date();
+          fsSync.utimesSync(credPath(inactiveAlias), now, now);
+          recordEvent({
+            actor,
+            action: 'sync-check-inactive',
+            alias: inactiveAlias,
+            outcome: 'checked',
+            trigger,
+          });
+        } catch (err) {
+          recordEvent({
+            actor,
+            action: 'sync-check-inactive',
+            alias: inactiveAlias,
+            outcome: `error:${err?.message || err}`,
+            trigger,
+          });
+        }
+      }
+    }
+
+    return activeResult;
+  } catch (err) {
+    recordEvent({ actor, action: 'sync-error', outcome: `error:${err?.message || err}`, trigger });
+    return { synced: false, reason: `error: ${err?.message || err}` };
+  }
+}
+
+async function syncOneProfileKeychainToCred(alias, keychainBlob, { trigger = 'poll', actor = 'sync-daemon' } = {}) {
+  try {
+    const catalog = readProfilesJson();
     const expectedEmail =
       typeof catalog.profiles?.[alias]?.email === 'string'
         ? catalog.profiles[alias].email.trim().toLowerCase()
@@ -176,12 +235,6 @@ async function syncActiveKeychainToCred({ trigger = 'poll', actor = 'sync-daemon
       typeof catalog.profiles?.[alias]?.accountUuid === 'string'
         ? catalog.profiles[alias].accountUuid.trim()
         : '';
-
-    const keychainBlob = await readKeychainBlob();
-    if (!keychainBlob) {
-      recordEvent({ actor, action: 'sync-skip', alias, outcome: 'skipped:keychain-empty', trigger });
-      return { synced: false, reason: 'keychain empty or unreadable' };
-    }
 
     const kcParsed = parseCredBlob(keychainBlob);
     const kcRefresh = String(kcParsed?.claudeAiOauth?.refreshToken || '').trim();

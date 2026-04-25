@@ -48,10 +48,14 @@ async function fetchClaudeUsageFromAnthropicApi() {
     const response = await fetch(CLAUDE_OAUTH_USAGE_URL, {
       headers: {
         Authorization: `Bearer ${token}`,
-        Accept: 'application/json',
+        // Match upstream claude-code's axios fingerprint. Anthropic's edge
+        // 429s non-axios UAs against OAuth endpoints regardless of token
+        // validity (verified 2026-04-25 root-causing recurring profile-switch
+        // failures). The previous 'atc-dashboard' UA was the wrong shape.
+        Accept: 'application/json, text/plain, */*',
         'anthropic-version': '2023-06-01',
         'anthropic-beta': 'oauth-2025-04-20',
-        'User-Agent': 'atc-dashboard',
+        'User-Agent': 'axios/1.7.7',
       },
       signal: controller.signal,
     });

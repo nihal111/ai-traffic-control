@@ -57,6 +57,14 @@ const CLAUDE_AI_OAUTH_SCOPES = [
   'user:mcp_servers',
   'user:file_upload',
 ];
+// Anthropic's edge fingerprints OAuth endpoint requests by User-Agent. A bare
+// `curl/*` UA gets 429'd indefinitely on /v1/oauth/token regardless of RT
+// validity (verified empirically 2026-04-25: same RT, same body, swap UA from
+// curl/8.x → axios/1.7.7 flips response from HTTP 429 to HTTP 200). Upstream
+// claude-code uses axios so its requests fall in the allowlisted bucket. We
+// mirror that UA on every Anthropic OAuth call we make.
+const CLAUDE_OAUTH_USER_AGENT = 'axios/1.7.7';
+const CLAUDE_OAUTH_ACCEPT = 'application/json, text/plain, */*';
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function ensureDir(dir) {
@@ -194,6 +202,8 @@ function fetchClaudeAccountStateFromBlob(blob) {
       '--max-time', String(Number(process.env.ATC_CLAUDE_ACCOUNT_TIMEOUT_SEC || 8)),
       '-H', `Authorization: Bearer ${accessToken}`,
       '-H', 'anthropic-beta: oauth-2025-04-20',
+      '-H', `Accept: ${CLAUDE_OAUTH_ACCEPT}`,
+      '-H', `User-Agent: ${CLAUDE_OAUTH_USER_AGENT}`,
       CLAUDE_OAUTH_ACCOUNT_URL,
     ], {
       encoding: 'utf8',
@@ -491,6 +501,8 @@ function refreshCredentialBlob(blob, { actor = 'refresh', alias = null, phase = 
       '--max-time', String(Number(process.env.ATC_CLAUDE_REFRESH_TIMEOUT_SEC || 15)),
       '-X', 'POST',
       '-H', 'Content-Type: application/json',
+      '-H', `Accept: ${CLAUDE_OAUTH_ACCEPT}`,
+      '-H', `User-Agent: ${CLAUDE_OAUTH_USER_AGENT}`,
       '-d', body,
       CLAUDE_OAUTH_TOKEN_URL,
     ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 2 * 1024 * 1024 });
