@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import readline from 'node:readline/promises';
 import { recordEvent, tailEvents, fingerprint, parseDuration, generateTraceId, filterEventsByTrace } from '../modules/credential-events.mjs';
-import { checkBudget, recordAttempt, forgetLineage, listCooldowns } from '../modules/refresh-budget.mjs';
+import { checkBudget, recordAttempt, forgetLineage, listCooldowns, aliasQuarantine, clearAliasQuarantine } from '../modules/refresh-budget.mjs';
 
 // Ensure the credential event log + refresh-budget state live in the same
 // dashboard/runtime directory whether this script is invoked standalone or
@@ -442,7 +442,7 @@ function refreshCredentialBlob(blob, { actor = 'refresh', alias = null, phase = 
   const rtFp = fingerprint(refreshToken);
 
   if (!bypassBudget) {
-    const budget = checkBudget(rtFp);
+    const budget = checkBudget(rtFp, { alias });
     if (!budget.allowed) {
       recordEvent({
         actor,
@@ -454,13 +454,19 @@ function refreshCredentialBlob(blob, { actor = 'refresh', alias = null, phase = 
         retry_at: budget.retryAt ? new Date(budget.retryAt).toISOString() : null,
         trace_id: traceId,
       });
-      const err = new Error(
-        budget.reason === 'cooldown'
-          ? `OAuth refresh blocked: lineage is in cooldown until ${new Date(budget.retryAt).toISOString()}${budget.error ? ` (last error: ${budget.error})` : ''}`
-          : `OAuth refresh deduplicated: last attempt was <${Math.ceil((budget.retryAt - Date.now()) / 1000)}s ago`,
-      );
-      err.oauthError = budget.reason === 'cooldown' ? 'rate_limit_error' : 'dedup';
-      err.httpStatus = budget.reason === 'cooldown' ? 429 : 0;
+      let msg;
+      if (budget.reason === 'alias-quarantine') {
+        msg = `OAuth refresh blocked: alias "${alias}" is quarantined until ${new Date(budget.retryAt).toISOString()}.\n${budget.error || ''}\nRecovery: wait for quarantine to lift, or run atc-profile rotate ${alias} for a fresh login.`;
+      } else if (budget.reason === 'alias-budget') {
+        msg = `OAuth refresh blocked: alias "${alias}" hit its self-imposed per-24h cap. Next attempt allowed at ${new Date(budget.retryAt).toISOString()}.`;
+      } else if (budget.reason === 'cooldown') {
+        msg = `OAuth refresh blocked: lineage is in cooldown until ${new Date(budget.retryAt).toISOString()}${budget.error ? ` (last error: ${budget.error})` : ''}`;
+      } else {
+        msg = `OAuth refresh deduplicated: last attempt was <${Math.ceil((budget.retryAt - Date.now()) / 1000)}s ago`;
+      }
+      const err = new Error(msg);
+      err.oauthError = (budget.reason === 'cooldown' || budget.reason === 'alias-quarantine') ? 'rate_limit_error' : (budget.reason === 'alias-budget' ? 'alias_budget_exceeded' : 'dedup');
+      err.httpStatus = (budget.reason === 'cooldown' || budget.reason === 'alias-quarantine') ? 429 : 0;
       err.budgetReason = budget.reason;
       err.retryAt = budget.retryAt;
       throw err;
@@ -2151,19 +2157,46 @@ function cmdDiagnose(traceId, { json = false, includeRotated = false } = {}) {
 function cmdCooldowns({ json = false } = {}) {
   const cooldowns = listCooldowns();
   if (cooldowns.length === 0) {
-    console.log('No active cooldowns. All RT lineages are free to refresh.');
+    console.log('No active cooldowns or quarantines. All aliases and RT lineages are free to refresh.');
     return;
   }
   if (json) {
     console.log(JSON.stringify(cooldowns, null, 2));
     return;
   }
-  console.log('Active refresh-endpoint cooldowns:');
-  for (const c of cooldowns) {
-    const remaining = Math.max(0, Math.round((Date.parse(c.cooldownUntil) - Date.now()) / 1000));
-    console.log(`  ${c.alias || '(unknown alias)'}: until ${c.cooldownUntil} (${remaining}s left)`);
-    if (c.error) console.log(`    last error: ${c.error}`);
-    console.log(`    recovery: atc-profile rotate ${c.alias || '<alias>'}`);
+  const aliasQuars = cooldowns.filter((c) => c.kind === 'alias-quarantine');
+  const lineageCooldowns = cooldowns.filter((c) => c.kind !== 'alias-quarantine');
+  if (aliasQuars.length > 0) {
+    console.log('Alias quarantines (account-level rate-limit suspected):');
+    for (const q of aliasQuars) {
+      const remaining = Math.max(0, Math.round((Date.parse(q.cooldownUntil) - Date.now()) / 3600));
+      console.log(`  ${q.alias}: quarantined until ${q.cooldownUntil} (~${Math.round(remaining / 60)}m remaining)`);
+      if (q.error) console.log(`    reason: ${q.error}`);
+      console.log(`    distinct lineages 429'd: ${q.rateLimitedLineages}, quarantineCount: ${q.quarantineCount}`);
+      console.log(`    override: atc-profile clear-quarantine ${q.alias}  (use with care — only if you KNOW Anthropic's cap has reset)`);
+    }
+  }
+  if (lineageCooldowns.length > 0) {
+    console.log('Active refresh-endpoint cooldowns (per-lineage):');
+    for (const c of lineageCooldowns) {
+      const remaining = Math.max(0, Math.round((Date.parse(c.cooldownUntil) - Date.now()) / 1000));
+      console.log(`  ${c.alias || '(unknown alias)'}: until ${c.cooldownUntil} (${remaining}s left)`);
+      if (c.error) console.log(`    last error: ${c.error}`);
+      console.log(`    recovery: atc-profile rotate ${c.alias || '<alias>'}`);
+    }
+  }
+}
+
+function cmdClearQuarantine(alias) {
+  if (!alias) die('Usage: atc-profile clear-quarantine <alias>');
+  const cleared = clearAliasQuarantine(alias);
+  if (cleared) {
+    recordEvent({ actor: 'atc-profile', action: 'alias-quarantine-cleared', alias, outcome: 'ok', reason: 'manual-override' });
+    console.log(`✓ Cleared quarantine for "${alias}".`);
+    console.log('  Next refresh attempt will proceed. If Anthropic still returns 429,');
+    console.log('  the quarantine will reset and extend (protects against thrashing).');
+  } else {
+    console.log(`(no active quarantine for "${alias}")`);
   }
 }
 
@@ -2230,6 +2263,7 @@ switch (command) {
   case 'sync-web': cmdSyncWeb(arg); break;
   case 'log':     cmdLog({ alias: aliasFlag || arg || null, sinceArg: since, limit: Number.isFinite(limit) && limit > 0 ? limit : 50, json }); break;
   case 'cooldowns': cmdCooldowns({ json }); break;
+  case 'clear-quarantine': cmdClearQuarantine(arg); break;
   case 'diagnose': cmdDiagnose(arg, { json, includeRotated: true }); break;
   default:
     console.error(`atc-profile — Claude account profile manager
@@ -2253,6 +2287,10 @@ Commands:
                   tail the credential event log for post-mortem debugging
   cooldowns [--json]
                   list active refresh-endpoint cooldowns per RT lineage
+                  AND per-alias quarantines (account-level rate-limit blocks)
+  clear-quarantine <alias>
+                  manually lift an alias quarantine (use when you know
+                  Anthropic's account-level cap has reset)
   diagnose <trace-id> [--json]
                   print the full chronological story of one operation.
                   Matches trace_id / switch_id / rotate_id / add_id fields.
