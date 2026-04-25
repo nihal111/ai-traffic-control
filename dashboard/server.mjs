@@ -4166,6 +4166,49 @@ function renderCalendarPage() {
     }
     .tl-event.past { opacity: 0.5; }
     .tl-event.routine { opacity: 0.7; }
+    /* Zoom-in-place: click a card to expand it without a modal */
+    .tl-event.expanded {
+      z-index: 40 !important;
+      display: block !important;
+      height: auto !important;
+      min-height: 72px;
+      min-width: 200px;
+      left: 2px !important;
+      width: calc(100% - 4px) !important;
+      overflow: visible !important;
+      opacity: 1 !important;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.55);
+      padding: 6px 8px !important;
+    }
+    .tl-event.expanded .tl-event-title {
+      font-size: 12px;
+      font-weight: 700;
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+      display: block;
+      -webkit-line-clamp: unset;
+      line-height: 1.3;
+      margin-bottom: 3px;
+    }
+    .tl-event.expanded .tl-event-time {
+      font-size: 11px;
+      white-space: normal;
+      overflow: visible;
+      opacity: 1;
+    }
+    .tl-event.expanded .tl-event-time-stack {
+      display: block !important;
+      font-size: 11px;
+      opacity: 1;
+      line-height: 1.3;
+      margin-top: 2px;
+    }
+    .tl-event.expanded .tl-event-time-stack div {
+      white-space: nowrap;
+      overflow: visible;
+      text-overflow: clip;
+    }
     .tl-now-line {
       position: absolute;
       left: -6px;
@@ -4396,6 +4439,12 @@ function renderCalendarPage() {
       letter-spacing: 0.1px;
     }
     .action-btn:hover { background: #665c54; border-color: #928374; }
+    .action-btn.slot { color: #fabd2f; border-color: rgba(250, 189, 47, 0.45); }
+    .action-btn.slot:hover { background: rgba(250, 189, 47, 0.12); border-color: #fabd2f; color: #fabd2f; }
+    .action-btn.done { color: #a7c080; border-color: rgba(167, 192, 128, 0.45); }
+    .action-btn.done:hover { background: rgba(167, 192, 128, 0.12); border-color: #a7c080; color: #a7c080; }
+    .action-btn.drop { color: #e5799a; border-color: rgba(229, 121, 154, 0.4); }
+    .action-btn.drop:hover { background: rgba(229, 121, 154, 0.12); border-color: #e5799a; color: #e5799a; }
     .backlog-add-btn {
       width: 100%;
       padding: 10px;
@@ -4539,6 +4588,35 @@ function renderCalendarPage() {
       cursor: not-allowed;
       border-left-color: #7e8e91;
     }
+    .confirm-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 8px;
+    }
+    .confirm-btn {
+      padding: 8px 16px;
+      border-radius: 6px;
+      border: 1px solid #7c6f64;
+      background: #504945;
+      color: #ebdbb2;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 12px;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      font-family: inherit;
+    }
+    .confirm-btn.cancel:hover { background: #665c54; border-color: #928374; }
+    .confirm-btn.primary {
+      background: linear-gradient(180deg, #a7c080, #86a356);
+      color: #1b1d1e;
+      border: none;
+    }
+    .confirm-btn.primary.danger {
+      background: linear-gradient(180deg, #e5799a, #cc4a76);
+      color: #1b1d1e;
+    }
     .slot-day-header {
       font-size: 11px;
       font-weight: 700;
@@ -4655,6 +4733,22 @@ function renderCalendarPage() {
         <button class="modal-close" onclick="closeSlotModal()">✕</button>
       </div>
       <div id="slotModalBody"></div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="confirmModal" onclick="if(event.target.id==='confirmModal') closeConfirmModal()">
+    <div class="modal" style="max-width: 400px;">
+      <div class="modal-header">
+        <div>
+          <div class="modal-title" id="confirmModalTitle">Confirm</div>
+          <div class="modal-subtitle" id="confirmModalSubtitle"></div>
+        </div>
+        <button class="modal-close" onclick="closeConfirmModal()">✕</button>
+      </div>
+      <div class="confirm-actions">
+        <button class="confirm-btn cancel" onclick="closeConfirmModal()">Cancel</button>
+        <button class="confirm-btn primary" id="confirmModalOk">Confirm</button>
+      </div>
     </div>
   </div>
 
@@ -5131,9 +5225,9 @@ function renderCalendarPage() {
             <div class="backlog-badges">\${badges}</div>
           </div>
           <div class="backlog-actions">
-            <button class="action-btn" title="Slot it" onclick="openSlotModal('\${item.id}')">⏰</button>
-            <button class="action-btn" title="Done" onclick="markDone('\${item.id}')">✓</button>
-            <button class="action-btn" title="Drop" onclick="markDropped('\${item.id}')">✗</button>
+            <button class="action-btn slot" title="Schedule: pick a time slot" aria-label="Schedule" onclick="openSlotModal('\${item.id}')">⏰</button>
+            <button class="action-btn done" title="Mark as done (completed)" aria-label="Mark as done" onclick="markDone('\${item.id}')">✓</button>
+            <button class="action-btn drop" title="Drop (won't do)" aria-label="Drop" onclick="markDropped('\${item.id}')">✗</button>
           </div>
         </div>\`;
       }
@@ -5241,7 +5335,12 @@ function renderCalendarPage() {
           document.getElementById('bfEnergy').value = 'any';
           document.getElementById('bfEstimate').value = '30';
           toggleBacklogForm();
-          await loadDashboard(true);
+          // Optimistic insert so the new item is visible before the state refresh returns
+          if (lastState && result.item) {
+            lastState.backlog = [result.item, ...(lastState.backlog || [])];
+            renderBacklog(lastState);
+          }
+          loadDashboard(true);
         } else {
           alert('Add failed: ' + (result.error || 'unknown'));
         }
@@ -5307,20 +5406,26 @@ function renderCalendarPage() {
 
     async function confirmSlot(slotStartIso, btn) {
       if (!slotModalItem) return;
+      const slottedId = slotModalItem.id;
       const start = new Date(slotStartIso);
       const end = new Date(start.getTime() + slotModalItem.estimate_minutes * 60000);
       btn.style.pointerEvents = 'none';
       btn.style.opacity = '0.5';
       try {
-        const resp = await fetch('/api/calendar/backlog/' + slotModalItem.id + '/slot', {
+        const resp = await fetch('/api/calendar/backlog/' + slottedId + '/slot', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ start: start.toISOString(), end: end.toISOString() }),
         });
         const result = await resp.json();
         if (result.ok) {
+          // Optimistic: remove scheduled item from backlog before the state refresh returns
+          if (lastState && lastState.backlog) {
+            lastState.backlog = lastState.backlog.filter(i => i.id !== slottedId);
+            renderBacklog(lastState);
+          }
           closeSlotModal();
-          await loadDashboard(true);
+          loadDashboard(true);
         } else {
           alert('Slot failed: ' + (result.error || 'unknown'));
           btn.style.pointerEvents = '';
@@ -5333,30 +5438,75 @@ function renderCalendarPage() {
       }
     }
 
-    async function markDone(itemId) {
+    async function applyBacklogAction(itemId, action, failLabel) {
+      if (lastState && lastState.backlog) {
+        lastState.backlog = lastState.backlog.filter(i => i.id !== itemId);
+        renderBacklog(lastState);
+      }
       try {
-        await fetch('/api/calendar/backlog/' + itemId, {
+        const resp = await fetch('/api/calendar/backlog/' + itemId, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'done' })
+          body: JSON.stringify({ action }),
         });
-        loadDashboard();
+        const result = await resp.json().catch(() => ({}));
+        if (!resp.ok || result.error) {
+          alert(failLabel + ' failed: ' + (result.error || 'unknown'));
+          loadDashboard(true);
+          return;
+        }
+        loadDashboard(true);
       } catch (error) {
-        console.error('Mark done failed:', error);
+        alert(failLabel + ' failed: ' + error.message);
+        loadDashboard(true);
       }
     }
 
-    async function markDropped(itemId) {
-      try {
-        await fetch('/api/calendar/backlog/' + itemId, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'drop' })
-        });
-        loadDashboard();
-      } catch (error) {
-        console.error('Mark dropped failed:', error);
-      }
+    function openConfirmModal(opts) {
+      document.getElementById('confirmModalTitle').textContent = opts.title;
+      document.getElementById('confirmModalSubtitle').textContent = opts.message || '';
+      const okBtn = document.getElementById('confirmModalOk');
+      okBtn.textContent = opts.confirmText || 'Confirm';
+      okBtn.classList.toggle('danger', !!opts.danger);
+      okBtn.onclick = () => {
+        closeConfirmModal();
+        if (opts.onConfirm) opts.onConfirm();
+      };
+      document.getElementById('confirmModal').classList.add('open');
+    }
+
+    function closeConfirmModal() {
+      document.getElementById('confirmModal').classList.remove('open');
+      const okBtn = document.getElementById('confirmModalOk');
+      okBtn.onclick = null;
+      okBtn.classList.remove('danger');
+    }
+
+    function findBacklogItem(itemId) {
+      return lastState && (lastState.backlog || []).find(i => i.id === itemId);
+    }
+
+    function markDone(itemId) {
+      const item = findBacklogItem(itemId);
+      const title = item ? item.title : 'this item';
+      openConfirmModal({
+        title: 'Mark as done?',
+        message: '"' + title + '" will be archived as completed.',
+        confirmText: 'Mark Done',
+        onConfirm: () => applyBacklogAction(itemId, 'done', 'Mark done'),
+      });
+    }
+
+    function markDropped(itemId) {
+      const item = findBacklogItem(itemId);
+      const title = item ? item.title : 'this item';
+      openConfirmModal({
+        title: 'Drop this item?',
+        message: '"' + title + '" will be dropped (won\\'t do).',
+        confirmText: 'Drop',
+        danger: true,
+        onConfirm: () => applyBacklogAction(itemId, 'drop', 'Drop'),
+      });
     }
 
     // Paint cached state instantly, then fetch fresh in background
@@ -5368,6 +5518,19 @@ function renderCalendarPage() {
     // Re-fetch when tab regains focus
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) loadDashboard();
+    });
+
+    // Zoom-in-place: clicking an event card expands it so the full title and
+    // time range are readable; clicking again (or anywhere else) collapses it.
+    document.addEventListener('click', (ev) => {
+      const card = ev.target.closest('.tl-event');
+      const current = document.querySelector('.tl-event.expanded');
+      if (card) {
+        if (current && current !== card) current.classList.remove('expanded');
+        card.classList.toggle('expanded');
+      } else if (current) {
+        current.classList.remove('expanded');
+      }
     });
 
     // Update now-line every minute for today view
