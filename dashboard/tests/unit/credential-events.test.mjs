@@ -13,7 +13,7 @@ process.on('exit', () => {
   try { fs.rmSync(TEST_RUNTIME, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-const { recordEvent, tailEvents, fingerprint, parseDuration, logFile } = await import('../../modules/credential-events.mjs');
+const { recordEvent, tailEvents, fingerprint, parseDuration, logFile, generateTraceId, filterEventsByTrace } = await import('../../modules/credential-events.mjs');
 
 test('fingerprint masks long tokens to ...LAST6', () => {
   assert.equal(fingerprint('sk-ant-ort01-abcdef'), '...abcdef');
@@ -67,4 +67,63 @@ test('parseDuration handles s/m/h/d suffixes', () => {
   assert.equal(parseDuration('12345'), 12345);
   assert.equal(parseDuration(''), null);
   assert.equal(parseDuration(null), null);
+});
+
+test('generateTraceId returns a valid UUID v4', () => {
+  const id = generateTraceId();
+  assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  // Collision resistance sanity (not a cryptographic test, just "distinct"):
+  const second = generateTraceId();
+  assert.notEqual(id, second);
+});
+
+test('recordEvent auto-promotes switch_id to trace_id when trace_id missing', () => {
+  const switchId = generateTraceId();
+  const written = recordEvent({ actor: 'switch', action: 'switch-start', switch_id: switchId, outcome: 'started' });
+  assert.equal(written.trace_id, switchId, 'switch_id should become trace_id');
+});
+
+test('recordEvent auto-promotes rotate_id to trace_id when trace_id missing', () => {
+  const rotateId = generateTraceId();
+  const written = recordEvent({ actor: 'rotate', action: 'rotate-start', rotate_id: rotateId, outcome: 'started' });
+  assert.equal(written.trace_id, rotateId);
+});
+
+test('recordEvent: explicit trace_id takes precedence over switch_id/rotate_id', () => {
+  const explicitTrace = generateTraceId();
+  const switchId = generateTraceId();
+  const written = recordEvent({
+    actor: 'switch',
+    action: 'nested-op',
+    trace_id: explicitTrace,
+    switch_id: switchId,
+    outcome: 'ok',
+  });
+  assert.equal(written.trace_id, explicitTrace, 'explicit trace_id must win');
+});
+
+test('recordEvent: preserves null trace_id when no correlation id present', () => {
+  const written = recordEvent({ actor: 'sync-daemon', action: 'sync-check', outcome: 'unchanged' });
+  assert.equal(written.trace_id, null);
+});
+
+test('filterEventsByTrace matches events across any correlation field', () => {
+  const traceId = generateTraceId();
+  const events = [
+    { action: 'a', trace_id: traceId, outcome: 'x' },
+    { action: 'b', switch_id: traceId, outcome: 'x' },
+    { action: 'c', rotate_id: traceId, outcome: 'x' },
+    { action: 'd', add_id: traceId, outcome: 'x' },
+    { action: 'unrelated', trace_id: 'other', outcome: 'x' },
+    { action: 'no-ids', outcome: 'x' },
+  ];
+  const filtered = filterEventsByTrace(events, traceId);
+  assert.equal(filtered.length, 4);
+  assert.deepEqual(filtered.map(e => e.action), ['a', 'b', 'c', 'd']);
+});
+
+test('filterEventsByTrace returns [] for empty/null id', () => {
+  assert.deepEqual(filterEventsByTrace([{ trace_id: 'x' }], null), []);
+  assert.deepEqual(filterEventsByTrace([{ trace_id: 'x' }], ''), []);
+  assert.deepEqual(filterEventsByTrace([{ trace_id: 'x' }], '   '), []);
 });

@@ -20,7 +20,7 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import readline from 'node:readline/promises';
-import { recordEvent, tailEvents, fingerprint, parseDuration } from '../modules/credential-events.mjs';
+import { recordEvent, tailEvents, fingerprint, parseDuration, generateTraceId, filterEventsByTrace } from '../modules/credential-events.mjs';
 import { checkBudget, recordAttempt, forgetLineage, listCooldowns } from '../modules/refresh-budget.mjs';
 
 // Ensure the credential event log + refresh-budget state live in the same
@@ -430,11 +430,11 @@ export function pickRateLimitHeaders(headers) {
 // Callers can opt out of budget enforcement with { bypassBudget: true } for
 // the rare cases (rotate's final re-register) where we know we hold a fresh
 // lineage that hasn't been seen before.
-function refreshCredentialBlob(blob, { actor = 'refresh', alias = null, phase = 'proactive', bypassBudget = false } = {}) {
+function refreshCredentialBlob(blob, { actor = 'refresh', alias = null, phase = 'proactive', bypassBudget = false, traceId = null } = {}) {
   const parsed = parseCredentialBlob(blob);
   const refreshToken = String(parsed?.claudeAiOauth?.refreshToken || '').trim();
   if (!refreshToken) {
-    recordEvent({ actor, action: 'refresh-skip', alias, phase, outcome: 'error:missing-refresh-token' });
+    recordEvent({ actor, action: 'refresh-skip', alias, phase, outcome: 'error:missing-refresh-token', trace_id: traceId });
     const err = new Error('saved credential is missing Claude OAuth refreshToken');
     err.oauthError = 'missing_refresh_token';
     throw err;
@@ -452,6 +452,7 @@ function refreshCredentialBlob(blob, { actor = 'refresh', alias = null, phase = 
         rt_fp: rtFp,
         outcome: `skipped:${budget.reason}`,
         retry_at: budget.retryAt ? new Date(budget.retryAt).toISOString() : null,
+        trace_id: traceId,
       });
       const err = new Error(
         budget.reason === 'cooldown'
@@ -466,7 +467,7 @@ function refreshCredentialBlob(blob, { actor = 'refresh', alias = null, phase = 
     }
   }
 
-  recordEvent({ actor, action: 'refresh-request', alias, phase, rt_fp: rtFp, outcome: 'sent' });
+  recordEvent({ actor, action: 'refresh-request', alias, phase, rt_fp: rtFp, outcome: 'sent', trace_id: traceId });
 
   const body = JSON.stringify({
     grant_type: 'refresh_token',
@@ -491,7 +492,7 @@ function refreshCredentialBlob(blob, { actor = 'refresh', alias = null, phase = 
     const detail = typeof error?.stderr === 'string' && error.stderr.trim()
       ? error.stderr.trim()
       : error.message || 'unknown refresh failure';
-    recordEvent({ actor, action: 'refresh-response', alias, phase, rt_fp: rtFp, outcome: `error:network`, detail });
+    recordEvent({ actor, action: 'refresh-response', alias, phase, rt_fp: rtFp, outcome: `error:network`, detail, trace_id: traceId });
     recordAttempt(rtFp, { outcome: 'network_error', error: detail, alias });
     const err = new Error(`OAuth refresh request failed: ${detail}`);
     err.oauthError = 'network_error';
@@ -513,6 +514,7 @@ function refreshCredentialBlob(blob, { actor = 'refresh', alias = null, phase = 
       oauth_error: code,
       detail: desc,
       outcome: `error:${code}`,
+      trace_id: traceId,
       ...rateLimitHeaders,
     });
     if (httpStatus === 429 || code === 'rate_limit_error') {
@@ -544,6 +546,7 @@ function refreshCredentialBlob(blob, { actor = 'refresh', alias = null, phase = 
     expires_at: next?.claudeAiOauth?.expiresAt ? new Date(next.claudeAiOauth.expiresAt).toISOString() : null,
     http_status: httpStatus,
     outcome: 'ok',
+    trace_id: traceId,
     ...rateLimitHeaders,
   });
   // Dedicated lineage-chain event — one line per RT hop, easy to grep & join.
@@ -556,6 +559,7 @@ function refreshCredentialBlob(blob, { actor = 'refresh', alias = null, phase = 
     new_rt_fp: newRtFp,
     rotated,
     outcome: rotated ? 'rotated' : 'reused',
+    trace_id: traceId,
   });
   recordAttempt(rtFp, { outcome: 'ok', alias });
   // The old RT is dead server-side now; forget its budget state.
@@ -771,7 +775,7 @@ function keychainExport() {
   }
 }
 
-function keychainDelete({ actor = 'atc-profile', reason = null } = {}) {
+function keychainDelete({ actor = 'atc-profile', reason = null, traceId = null } = {}) {
   let existed = true;
   try {
     execFileSync('security', [
@@ -786,10 +790,11 @@ function keychainDelete({ actor = 'atc-profile', reason = null } = {}) {
     action: 'keychain-delete',
     outcome: existed ? 'ok' : 'skipped:not-present',
     reason,
+    trace_id: traceId,
   });
 }
 
-function keychainImport(blob, { actor = 'atc-profile', alias = null, reason = null } = {}) {
+function keychainImport(blob, { actor = 'atc-profile', alias = null, reason = null, traceId = null } = {}) {
   const parsed = parseCredentialBlob(blob);
   execFileSync('security', [
     'add-generic-password',
@@ -807,6 +812,7 @@ function keychainImport(blob, { actor = 'atc-profile', alias = null, reason = nu
     expires_at: parsed?.claudeAiOauth?.expiresAt ? new Date(parsed.claudeAiOauth.expiresAt).toISOString() : null,
     outcome: 'ok',
     reason,
+    trace_id: traceId,
   });
 }
 
@@ -816,7 +822,7 @@ function credPath(alias) {
   return path.join(PROFILES_DIR, `${alias}.cred`);
 }
 
-function saveCredential(alias, blob, { actor = 'atc-profile', reason = null, source = null } = {}) {
+function saveCredential(alias, blob, { actor = 'atc-profile', reason = null, source = null, traceId = null } = {}) {
   ensureDir(PROFILES_DIR);
   const parsed = parseCredentialBlob(blob);
   const p = credPath(alias);
@@ -853,13 +859,14 @@ function saveCredential(alias, blob, { actor = 'atc-profile', reason = null, sou
     outcome: 'ok',
     reason,
     source,
+    trace_id: traceId,
   });
 }
 
-function loadCredential(alias, { actor = 'atc-profile', reason = null } = {}) {
+function loadCredential(alias, { actor = 'atc-profile', reason = null, traceId = null } = {}) {
   const p = credPath(alias);
   if (!fs.existsSync(p)) {
-    recordEvent({ actor, action: 'disk-read', alias, outcome: 'missing', reason });
+    recordEvent({ actor, action: 'disk-read', alias, outcome: 'missing', reason, trace_id: traceId });
     throw new Error(`No saved credential for profile "${alias}" at ${p}`);
   }
   const blob = fs.readFileSync(p, 'utf8').trim();
@@ -889,11 +896,12 @@ function loadCredential(alias, { actor = 'atc-profile', reason = null } = {}) {
     size: Buffer.byteLength(blob, 'utf8'),
     outcome: 'ok',
     reason,
+    trace_id: traceId,
   });
   return blob;
 }
 
-function backupCurrent(blob, { actor = 'atc-profile', alias = null } = {}) {
+function backupCurrent(blob, { actor = 'atc-profile', alias = null, traceId = null } = {}) {
   ensureDir(BACKUP_DIR);
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const file = path.join(BACKUP_DIR, `${ts}.cred`);
@@ -906,6 +914,7 @@ function backupCurrent(blob, { actor = 'atc-profile', alias = null } = {}) {
     rt_fp: fingerprint(parsed?.claudeAiOauth?.refreshToken),
     outcome: 'ok',
     file: path.basename(file),
+    trace_id: traceId,
   });
 }
 
@@ -916,8 +925,17 @@ async function cmdAdd(alias) {
     die('Usage: atc-profile add <alias>');
   }
 
+  const traceId = generateTraceId();
   const catalog = loadCatalog();
   const existingProfile = catalog.profiles[alias] || null;
+  recordEvent({
+    actor: 'add',
+    action: 'add-start',
+    alias,
+    trace_id: traceId,
+    existing: !!existingProfile,
+    outcome: 'started',
+  });
 
   const blob = keychainExport();
   const authState = fetchClaudeAccountStateFromBlob(blob);
@@ -983,7 +1001,7 @@ async function cmdAdd(alias) {
     }
   }
 
-  saveCredential(alias, blob, { actor: 'add', reason: existingProfile ? 'refresh-alias' : 'register', source: 'keychain-export' });
+  saveCredential(alias, blob, { actor: 'add', reason: existingProfile ? 'refresh-alias' : 'register', source: 'keychain-export', traceId });
   const codexbarAccountLabel = syncCodexbarTokenAccount(alias, codexbarToken, { setActive: true, webAuth });
 
   catalog.profiles[alias] = {
@@ -1007,6 +1025,17 @@ async function cmdAdd(alias) {
   catalog.active = alias;
   applyClaudeGlobalAuthState(authState);
   saveCatalog(catalog);
+
+  recordEvent({
+    actor: 'add',
+    action: 'add-complete',
+    alias,
+    trace_id: traceId,
+    observed_email: normalizedEmail,
+    outcome: 'ok',
+    set_active: true,
+    existing: !!existingProfile,
+  });
 
   const verb = existingProfile ? 'updated' : 'registered';
   console.log(`✓ Profile "${alias}" ${verb}.${catalog.active === alias ? ' (set as active)' : ''}`);
@@ -1889,6 +1918,44 @@ function cmdLog({ alias = null, sinceArg = null, limit = 50, json = false } = {}
   }
 }
 
+// diagnose <trace-id> — print every event that belongs to a single operation,
+// matched by trace_id / switch_id / rotate_id / add_id. The event log already
+// keeps enough detail that one grep by trace_id reconstructs the full story;
+// this command just does the grep + pretty-prints.
+function cmdDiagnose(traceId, { json = false, includeRotated = false } = {}) {
+  const id = String(traceId || '').trim();
+  if (!id) die('Usage: atc-profile diagnose <trace-id>');
+  // Pull a wide window — diagnose is a post-mortem tool, accept some slowness.
+  const events = tailEvents({ limit: 100_000, includeRotated });
+  const matches = filterEventsByTrace(events, id);
+  if (matches.length === 0) {
+    console.log(`No events found for trace "${id}".`);
+    console.log('Try: atc-profile log --limit 200 | grep <id-fragment>  to discover available IDs.');
+    return;
+  }
+  if (json) {
+    for (const e of matches) console.log(JSON.stringify(e));
+    return;
+  }
+  console.log(`Trace ${id} — ${matches.length} events:\n`);
+  const firstTs = Date.parse(matches[0].ts);
+  for (const e of matches) {
+    const deltaMs = Date.parse(e.ts) - firstTs;
+    const parts = [`+${String(deltaMs).padStart(5)}ms`, `[${e.actor}]`, e.action];
+    if (e.alias) parts.push(`alias=${e.alias}`);
+    if (e.phase) parts.push(`phase=${e.phase}`);
+    if (e.http_status) parts.push(`http=${e.http_status}`);
+    if (e.oauth_error) parts.push(`oauth_error=${e.oauth_error}`);
+    if (e.rt_fp) parts.push(`rt=${e.rt_fp}`);
+    if (e.observed_email) parts.push(`email=${e.observed_email}`);
+    if (e.expected_email && e.observed_email !== e.expected_email) parts.push(`expected=${e.expected_email}`);
+    if (e.trigger) parts.push(`trigger=${e.trigger}`);
+    parts.push(`outcome=${e.outcome}`);
+    if (e.detail) parts.push(`(${String(e.detail).slice(0, 120)})`);
+    console.log(parts.join(' '));
+  }
+}
+
 function cmdCooldowns({ json = false } = {}) {
   const cooldowns = listCooldowns();
   if (cooldowns.length === 0) {
@@ -1971,6 +2038,7 @@ switch (command) {
   case 'sync-web': cmdSyncWeb(arg); break;
   case 'log':     cmdLog({ alias: aliasFlag || arg || null, sinceArg: since, limit: Number.isFinite(limit) && limit > 0 ? limit : 50, json }); break;
   case 'cooldowns': cmdCooldowns({ json }); break;
+  case 'diagnose': cmdDiagnose(arg, { json, includeRotated: true }); break;
   default:
     console.error(`atc-profile — Claude account profile manager
 
@@ -1993,6 +2061,9 @@ Commands:
                   tail the credential event log for post-mortem debugging
   cooldowns [--json]
                   list active refresh-endpoint cooldowns per RT lineage
+  diagnose <trace-id> [--json]
+                  print the full chronological story of one operation.
+                  Matches trace_id / switch_id / rotate_id / add_id fields.
 `);
     process.exit(command ? 1 : 0);
 }

@@ -11,6 +11,7 @@
 import fsSync from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 
 // Resolve the log file at call time, not module load, so server.mjs setting
 // ATC_DASHBOARD_RUNTIME_DIR after import (or tests overriding it) picks up
@@ -71,6 +72,13 @@ function recordEvent(event) {
     action: String(event.action || 'unknown'),
     ...event,
   };
+  // Trace correlation: promote any operation-specific ID to `trace_id` so a
+  // single grep by trace_id surfaces the full timeline regardless of which
+  // flow originated the event. `trace_id` wins if explicitly set; otherwise
+  // we pick the first present ID from (switch_id, rotate_id, add_id).
+  if (!payload.trace_id || payload.trace_id === null) {
+    payload.trace_id = payload.switch_id || payload.rotate_id || payload.add_id || null;
+  }
   // Replace secret-ish fields with fingerprints if the caller forgot.
   if (payload.refreshToken) {
     payload.rt_fp = fingerprint(payload.refreshToken);
@@ -136,10 +144,31 @@ function parseDuration(str) {
   return n * mult;
 }
 
+// Generate a trace ID used to correlate every event in one logical operation
+// (one `rotate`, one `switch`, one `add`, one sync-daemon cycle). Callers
+// generate once at the entry point and thread the same value down through
+// every event they emit. The `diagnose` CLI greps by this.
+function generateTraceId() {
+  return randomUUID();
+}
+
+// Filter a tailed event list to events that share any of the supplied
+// correlation IDs (trace_id, switch_id, rotate_id, add_id). Useful for
+// `atc-profile diagnose --trace <id>`: the id the user has in hand may have
+// come from any of those fields, so we accept all and match any.
+function filterEventsByTrace(events, id) {
+  const needle = String(id || '').trim();
+  if (!needle) return [];
+  const fields = ['trace_id', 'switch_id', 'rotate_id', 'add_id'];
+  return events.filter((ev) => fields.some((f) => ev && ev[f] === needle));
+}
+
 export {
   recordEvent,
   tailEvents,
   fingerprint,
   parseDuration,
   logFile,
+  generateTraceId,
+  filterEventsByTrace,
 };
