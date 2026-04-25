@@ -19,7 +19,6 @@ import {
   PROFILES_DIR,
   PROFILES_JSON,
 } from './modules/profile-catalog.mjs';
-import { listCooldowns } from './modules/refresh-budget.mjs';
 import { tailEvents as tailCredentialEvents } from './modules/credential-events.mjs';
 import {
   buildClaudeRefreshMeta,
@@ -48,8 +47,8 @@ const STATE_FILE = process.env.SESSIONS_STATE_FILE || path.join(__dirname, 'stat
 const USAGE_RATE_CACHE_FILE = process.env.USAGE_RATE_CACHE_FILE || path.join(__dirname, 'state', 'usage-rate-cache.json');
 const RUN_DIR = process.env.SESSIONS_RUN_DIR || path.join(__dirname, 'run');
 const RUNTIME_DIR = process.env.SESSIONS_RUNTIME_DIR || path.join(__dirname, 'runtime');
-// Pin the credential event log + refresh-budget state to the dashboard's
-// runtime dir so server and CLI agree on a single location.
+// Pin the credential event log to the dashboard's runtime dir so server and
+// CLI agree on a single location.
 if (!process.env.ATC_DASHBOARD_RUNTIME_DIR) {
   process.env.ATC_DASHBOARD_RUNTIME_DIR = RUNTIME_DIR;
 }
@@ -2422,26 +2421,15 @@ function renderPage() {
       return '<div class="profile-staleness critical">⚠ last active ' + esc(age) + ' ago — re-login likely needed</div>';
     }
 
-    function recoveryBadge(profile) {
-      if (!profile || !profile.needsRecovery) return '';
-      const cooldown = profile.refreshCooldown;
-      const msg = cooldown && cooldown.remainingMs > 0
-        ? 'rate-limited — rotate needed (' + formatShortAge(cooldown.remainingMs) + ' cooldown)'
-        : 'refresh failed — rotate needed';
-      return '<div class="profile-staleness critical">⚠ ' + esc(msg) + '</div>';
-    }
-
     function profileUsageCard(profile, activeAlias) {
       const usage = profile && profile.usageCache && typeof profile.usageCache === 'object' ? profile.usageCache : {};
       const alias = String(profile?.alias || '').trim();
       const isActive = alias && alias === activeAlias;
       const isSwitchingTo = !!claudeSwitchingAlias && alias === claudeSwitchingAlias;
       const cachedEmail = String(usage.accountEmail || profile?.email || '').trim();
-      const needsRecovery = !!profile?.needsRecovery;
-      const statusLabel = isSwitchingTo ? 'Switching…' : (needsRecovery ? 'Recover' : (isActive ? 'Active' : 'Switch'));
-      return '<button type="button" class="profile-switch-card ' + (isActive ? 'active' : '') + (needsRecovery ? ' needs-recovery' : '') + '" data-profile-alias="' + esc(alias) + '" ' +
+      const statusLabel = isSwitchingTo ? 'Switching…' : (isActive ? 'Active' : 'Switch');
+      return '<button type="button" class="profile-switch-card ' + (isActive ? 'active' : '') + '" data-profile-alias="' + esc(alias) + '" ' +
         (isSwitchingTo ? 'disabled' : '') +
-        (needsRecovery && profile?.recoveryCommand ? ' title="' + esc('Run: ' + profile.recoveryCommand) + '"' : '') +
         '>' +
         '<div class="profile-switch-head">' +
           '<div class="profile-switch-name">' + esc(profile?.displayName || alias || 'Profile') + '</div>' +
@@ -2452,7 +2440,6 @@ function renderPage() {
           miniWindow(usage.primary || null) +
           miniWindow(usage.secondary || null) +
         '</div>' +
-        recoveryBadge(profile) +
         stalenessBadge(profile?.credStaleness, isActive) +
       '</button>';
     }
@@ -5732,11 +5719,6 @@ const server = http.createServer(async (req, res) => {
     try {
       const catalog = readProfilesJson();
       const now = Date.now();
-      const cooldowns = listCooldowns({ nowMs: now });
-      const cooldownByAlias = new Map();
-      for (const c of cooldowns) {
-        if (c.alias) cooldownByAlias.set(c.alias, c);
-      }
       const profiles = Object.entries(catalog.profiles || {}).map(([alias, meta]) => {
         const rawCache =
           meta?.usageCache && typeof meta.usageCache === 'object'
@@ -5746,10 +5728,6 @@ const server = http.createServer(async (req, res) => {
         if (meta?.email) rawCache.accountEmail = meta.email;
         const isActive = catalog.active === alias;
         const staleness = computeProfileStaleness(alias, { now, isActive });
-        const cooldown = cooldownByAlias.get(alias) || null;
-        // Needs-recovery = this alias has a cooldown OR its last stored
-        // refresh attempt ended fatally. UI can badge these as "Recover".
-        const needsRecovery = !!cooldown;
         return {
           alias,
           displayName: meta.displayName || alias,
@@ -5758,15 +5736,6 @@ const server = http.createServer(async (req, res) => {
           createdAt: meta.createdAt || null,
           usageCache: decorateUsageWindows(rawCache, ['5-hour', 'weekly']),
           credStaleness: staleness,
-          refreshCooldown: cooldown
-            ? {
-                until: cooldown.cooldownUntil,
-                remainingMs: Math.max(0, Date.parse(cooldown.cooldownUntil) - now),
-                lastError: cooldown.error || null,
-              }
-            : null,
-          needsRecovery,
-          recoveryCommand: needsRecovery ? `atc-profile rotate ${alias}` : null,
         };
       });
       json(res, 200, { active: catalog.active, profiles });

@@ -21,11 +21,10 @@ import { randomUUID } from 'node:crypto';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import readline from 'node:readline/promises';
 import { recordEvent, tailEvents, fingerprint, parseDuration, generateTraceId, filterEventsByTrace } from '../modules/credential-events.mjs';
-import { checkBudget, recordAttempt, forgetLineage, listCooldowns, aliasQuarantine, clearAliasQuarantine } from '../modules/refresh-budget.mjs';
 
-// Ensure the credential event log + refresh-budget state live in the same
-// dashboard/runtime directory whether this script is invoked standalone or
-// from the dashboard server. Skip if the caller has already pinned a dir.
+// Ensure the credential event log lives in the same dashboard/runtime
+// directory whether this script is invoked standalone or from the dashboard
+// server. Skip if the caller has already pinned a dir.
 if (!process.env.ATC_DASHBOARD_RUNTIME_DIR) {
   const __thisFile = fileURLToPath(import.meta.url);
   process.env.ATC_DASHBOARD_RUNTIME_DIR = path.resolve(path.dirname(__thisFile), '..', 'runtime');
@@ -38,31 +37,17 @@ const BACKUP_DIR = path.join(PROFILES_DIR, '.backup');
 const CODEXBAR_CONFIG = path.join(os.homedir(), '.codexbar', 'config.json');
 const CLAUDE_GLOBAL_STATE = path.join(os.homedir(), '.claude.json');
 const CLAUDE_OAUTH_ACCOUNT_URL = 'https://api.anthropic.com/api/oauth/account';
-// Upstream claude-code (constants/oauth.ts) migrated the prod TOKEN_URL from
-// console.anthropic.com to platform.claude.com. Both still resolve, but we
-// follow upstream so we don't get caught by a future deprecation.
-const CLAUDE_OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
-const CLAUDE_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
-// Match upstream isOAuthTokenExpired buffer (5 min): ensures we refresh in the
-// same window Claude CLI would, so we never race validating a token that's
-// about to expire under the CLI's feet.
-const REFRESH_SKEW_MS = 5 * 60 * 1000;
-// Matches upstream CLAUDE_AI_OAUTH_SCOPES. Sent on refresh so the server can
-// transparently expand scopes when Anthropic adds new ones (e.g. user:file_upload
-// was added this way) without requiring a re-login.
-const CLAUDE_AI_OAUTH_SCOPES = [
-  'user:profile',
-  'user:inference',
-  'user:sessions:claude_code',
-  'user:mcp_servers',
-  'user:file_upload',
-];
-// Anthropic's edge fingerprints OAuth endpoint requests by User-Agent. A bare
-// `curl/*` UA gets 429'd indefinitely on /v1/oauth/token regardless of RT
-// validity (verified empirically 2026-04-25: same RT, same body, swap UA from
-// curl/8.x → axios/1.7.7 flips response from HTTP 429 to HTTP 200). Upstream
-// claude-code uses axios so its requests fall in the allowlisted bucket. We
-// mirror that UA on every Anthropic OAuth call we make.
+// Anthropic's edge fingerprints OAuth requests by client. Bare curl/* UAs get
+// 429'd on /v1/oauth/token regardless of token validity. Spoofing axios got
+// the refresh endpoint to return 200 — but the resulting tokens were minted
+// into a degraded attribution bucket (verified empirically 2026-04-26: a
+// switch immediately after our refresh showed usage=100% in Claude Code; a
+// fresh login through Claude Code itself reset usage to 0%). Conclusion: we
+// cannot safely mint tokens outside Claude Code. The fix is structural — we
+// no longer call /v1/oauth/token at all. Claude Code refreshes through its
+// own allowlisted path; we only ever read identity from /api/oauth/account
+// using whatever AT is currently in the keychain. Headers below stay matched
+// to upstream because the identity endpoint shares the same edge fingerprint.
 const CLAUDE_OAUTH_USER_AGENT = 'axios/1.7.7';
 const CLAUDE_OAUTH_ACCEPT = 'application/json, text/plain, */*';
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -285,304 +270,6 @@ export function blobExpiresAtMs(blob) {
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return null;
   // Tolerate both seconds-since-epoch and ms-since-epoch storage.
   return raw < 1e12 ? raw * 1000 : raw;
-}
-
-export function blobNeedsRefresh(blob, skewMs = REFRESH_SKEW_MS) {
-  const exp = blobExpiresAtMs(blob);
-  if (exp == null) return true;
-  return Date.now() + skewMs >= exp;
-}
-
-// Normalize the error shape returned by console.anthropic.com/v1/oauth/token.
-// The endpoint can return OAuth-standard {error:"invalid_grant", error_description}
-// OR Anthropic-standard {error:{type:"rate_limit_error", message}}. Handle both.
-export function classifyRefreshError(httpStatus, payload, responseBody) {
-  const err = payload && typeof payload === 'object' ? payload.error : null;
-  const code = typeof err === 'string'
-    ? err
-    : (err && typeof err === 'object' ? String(err.type || err.code || '') : '') || `http_${httpStatus || 'unknown'}`;
-  const desc = (typeof err === 'object' && err ? err.message : null)
-    || (payload && typeof payload === 'object' ? payload.error_description : null)
-    || (payload && typeof payload === 'object' ? payload.message : null)
-    || String(responseBody || '').slice(0, 200);
-  return { code, desc };
-}
-
-// OAuth refresh-token errors that mean "this refresh token is dead, re-login
-// is the only recovery." Network/rate-limit/5xx errors are non-fatal and should
-// let the caller fall back to the unrefreshed blob.
-export function isFatalRefreshError(code, httpStatus) {
-  if (code === 'invalid_grant') return true;
-  if (code === 'invalid_request') return true;
-  if (code === 'invalid_client') return true;
-  if (code === 'unauthorized_client') return true;
-  if (code === 'missing_refresh_token') return true;
-  if (httpStatus === 401) return true;
-  // 400 is ambiguous: OAuth errors use 400 for invalid_grant, but so does
-  // malformed input. The code check above catches the real invalid_grant case.
-  return false;
-}
-
-// Pure: turn the HTTP response from /v1/oauth/token into a refreshed cred blob,
-// preserving all non-token fields (scopes, subscriptionType, etc.) from the
-// previous blob. Returns the same shape that Keychain expects.
-export function buildRefreshedBlob(prevParsed, payload, nowMs = Date.now()) {
-  const prevOauth = (prevParsed && typeof prevParsed === 'object' && prevParsed.claudeAiOauth)
-    ? prevParsed.claudeAiOauth
-    : {};
-  const access = String(payload?.access_token || '').trim();
-  const refresh = String(payload?.refresh_token || '').trim() || String(prevOauth.refreshToken || '').trim();
-  const expiresInSec = Number(payload?.expires_in);
-  if (!access) {
-    const err = new Error('OAuth refresh response missing access_token');
-    err.oauthError = 'malformed_response';
-    throw err;
-  }
-  if (!Number.isFinite(expiresInSec) || expiresInSec <= 0) {
-    const err = new Error('OAuth refresh response missing or invalid expires_in');
-    err.oauthError = 'malformed_response';
-    throw err;
-  }
-  if (!refresh) {
-    const err = new Error('OAuth refresh response has no refresh_token and none was saved locally');
-    err.oauthError = 'malformed_response';
-    throw err;
-  }
-  return {
-    ...(prevParsed && typeof prevParsed === 'object' ? prevParsed : {}),
-    claudeAiOauth: {
-      ...prevOauth,
-      accessToken: access,
-      refreshToken: refresh,
-      expiresAt: nowMs + expiresInSec * 1000,
-    },
-  };
-}
-
-// Pure: parse the `curl -w '\n%{http_code}'` output produced by the refresh call.
-export function parseRefreshResponse(raw) {
-  const str = String(raw || '').trim();
-  const lastNewline = str.lastIndexOf('\n');
-  const httpStatus = lastNewline >= 0 ? Number(str.slice(lastNewline + 1).trim()) : 0;
-  const responseBody = lastNewline >= 0 ? str.slice(0, lastNewline) : str;
-  let payload = null;
-  try {
-    payload = responseBody ? JSON.parse(responseBody) : null;
-  } catch {
-    // non-JSON response; caller treats as error
-  }
-  return { httpStatus, responseBody, payload };
-}
-
-// Pure: parse `curl -i -w '\n%{http_code}'` output.
-// Format: <status_line>\r\n<header_lines>\r\n\r\n<body>\n<http_code>
-// Returns httpStatus, responseBody, payload, and a lower-cased headers map so
-// callers can surface Retry-After / x-ratelimit-* / request-id in events —
-// critical signal for distinguishing transient vs lineage-cap rate limits.
-export function parseRefreshResponseWithHeaders(raw) {
-  const str = String(raw || '');
-  const lastNewline = str.lastIndexOf('\n');
-  const httpStatus = lastNewline >= 0 ? Number(str.slice(lastNewline + 1).trim()) : 0;
-  const rest = lastNewline >= 0 ? str.slice(0, lastNewline) : str;
-
-  let sepIdx = rest.indexOf('\r\n\r\n');
-  let sepLen = 4;
-  if (sepIdx < 0) {
-    sepIdx = rest.indexOf('\n\n');
-    sepLen = 2;
-  }
-  let headersRaw = '';
-  let responseBody = rest;
-  if (sepIdx >= 0) {
-    headersRaw = rest.slice(0, sepIdx);
-    responseBody = rest.slice(sepIdx + sepLen);
-  }
-  responseBody = responseBody.trim();
-
-  const headers = {};
-  if (headersRaw) {
-    for (const line of headersRaw.split(/\r?\n/)) {
-      if (!line || /^HTTP\//i.test(line)) continue;
-      const colonIdx = line.indexOf(':');
-      if (colonIdx < 0) continue;
-      const key = line.slice(0, colonIdx).trim().toLowerCase();
-      const val = line.slice(colonIdx + 1).trim();
-      if (key) headers[key] = val;
-    }
-  }
-
-  let payload = null;
-  try {
-    payload = responseBody ? JSON.parse(responseBody) : null;
-  } catch {
-    // non-JSON; caller treats as error
-  }
-  return { httpStatus, responseBody, payload, headers };
-}
-
-// Pick just the rate-limit / correlation headers from a raw header map.
-// Null out empty fields so the event-log JSON stays compact.
-export function pickRateLimitHeaders(headers) {
-  if (!headers || typeof headers !== 'object') return {};
-  const out = {};
-  for (const [k, v] of Object.entries(headers)) {
-    if (!v) continue;
-    if (/^retry-after$/i.test(k)) out.retry_after = v;
-    else if (/ratelimit/i.test(k)) out[k.replace(/-/g, '_')] = v;
-    else if (/^(x-)?request-id$/i.test(k) || /^anthropic-request-id$/i.test(k)) out.request_id = v;
-    else if (/^anthropic-/i.test(k)) out[k.replace(/-/g, '_')] = v;
-  }
-  return out;
-}
-
-// Wrap refreshCredentialBlob with: pre-check against the refresh budget
-// (rate-limit cooldown + dedup), logging, and post-call budget accounting.
-// Callers can opt out of budget enforcement with { bypassBudget: true } for
-// the rare cases (rotate's final re-register) where we know we hold a fresh
-// lineage that hasn't been seen before.
-function refreshCredentialBlob(blob, { actor = 'refresh', alias = null, phase = 'proactive', bypassBudget = false, traceId = null } = {}) {
-  const parsed = parseCredentialBlob(blob);
-  const refreshToken = String(parsed?.claudeAiOauth?.refreshToken || '').trim();
-  if (!refreshToken) {
-    recordEvent({ actor, action: 'refresh-skip', alias, phase, outcome: 'error:missing-refresh-token', trace_id: traceId });
-    const err = new Error('saved credential is missing Claude OAuth refreshToken');
-    err.oauthError = 'missing_refresh_token';
-    throw err;
-  }
-  const rtFp = fingerprint(refreshToken);
-
-  if (!bypassBudget) {
-    const budget = checkBudget(rtFp, { alias });
-    if (!budget.allowed) {
-      recordEvent({
-        actor,
-        action: 'refresh-skip',
-        alias,
-        phase,
-        rt_fp: rtFp,
-        outcome: `skipped:${budget.reason}`,
-        retry_at: budget.retryAt ? new Date(budget.retryAt).toISOString() : null,
-        trace_id: traceId,
-      });
-      let msg;
-      if (budget.reason === 'alias-quarantine') {
-        msg = `OAuth refresh blocked: alias "${alias}" is quarantined until ${new Date(budget.retryAt).toISOString()}.\n${budget.error || ''}\nRecovery: wait for quarantine to lift, or run atc-profile rotate ${alias} for a fresh login.`;
-      } else if (budget.reason === 'alias-budget') {
-        msg = `OAuth refresh blocked: alias "${alias}" hit its self-imposed per-24h cap. Next attempt allowed at ${new Date(budget.retryAt).toISOString()}.`;
-      } else if (budget.reason === 'cooldown') {
-        msg = `OAuth refresh blocked: lineage is in cooldown until ${new Date(budget.retryAt).toISOString()}${budget.error ? ` (last error: ${budget.error})` : ''}`;
-      } else {
-        msg = `OAuth refresh deduplicated: last attempt was <${Math.ceil((budget.retryAt - Date.now()) / 1000)}s ago`;
-      }
-      const err = new Error(msg);
-      err.oauthError = (budget.reason === 'cooldown' || budget.reason === 'alias-quarantine') ? 'rate_limit_error' : (budget.reason === 'alias-budget' ? 'alias_budget_exceeded' : 'dedup');
-      err.httpStatus = (budget.reason === 'cooldown' || budget.reason === 'alias-quarantine') ? 429 : 0;
-      err.budgetReason = budget.reason;
-      err.retryAt = budget.retryAt;
-      throw err;
-    }
-  }
-
-  recordEvent({ actor, action: 'refresh-request', alias, phase, rt_fp: rtFp, outcome: 'sent', trace_id: traceId });
-
-  const body = JSON.stringify({
-    grant_type: 'refresh_token',
-    refresh_token: refreshToken,
-    client_id: CLAUDE_OAUTH_CLIENT_ID,
-    scope: CLAUDE_AI_OAUTH_SCOPES.join(' '),
-  });
-
-  let raw;
-  try {
-    raw = execFileSync('curl', [
-      '-sS',
-      '-i',
-      '-w', '\n%{http_code}',
-      '--max-time', String(Number(process.env.ATC_CLAUDE_REFRESH_TIMEOUT_SEC || 15)),
-      '-X', 'POST',
-      '-H', 'Content-Type: application/json',
-      '-H', `Accept: ${CLAUDE_OAUTH_ACCEPT}`,
-      '-H', `User-Agent: ${CLAUDE_OAUTH_USER_AGENT}`,
-      '-d', body,
-      CLAUDE_OAUTH_TOKEN_URL,
-    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 2 * 1024 * 1024 });
-  } catch (error) {
-    const detail = typeof error?.stderr === 'string' && error.stderr.trim()
-      ? error.stderr.trim()
-      : error.message || 'unknown refresh failure';
-    recordEvent({ actor, action: 'refresh-response', alias, phase, rt_fp: rtFp, outcome: `error:network`, detail, trace_id: traceId });
-    recordAttempt(rtFp, { outcome: 'network_error', error: detail, alias });
-    const err = new Error(`OAuth refresh request failed: ${detail}`);
-    err.oauthError = 'network_error';
-    throw err;
-  }
-
-  const { httpStatus, responseBody, payload, headers } = parseRefreshResponseWithHeaders(raw);
-  const rateLimitHeaders = pickRateLimitHeaders(headers);
-
-  if (!Number.isFinite(httpStatus) || httpStatus < 200 || httpStatus >= 300) {
-    const { code, desc } = classifyRefreshError(httpStatus, payload, responseBody);
-    recordEvent({
-      actor,
-      action: 'refresh-response',
-      alias,
-      phase,
-      rt_fp: rtFp,
-      http_status: httpStatus,
-      oauth_error: code,
-      detail: desc,
-      outcome: `error:${code}`,
-      trace_id: traceId,
-      ...rateLimitHeaders,
-    });
-    if (httpStatus === 429 || code === 'rate_limit_error') {
-      recordAttempt(rtFp, { outcome: 'rate_limited', error: `${code}: ${desc}`, alias });
-    } else if (isFatalRefreshError(code, httpStatus)) {
-      recordAttempt(rtFp, { outcome: 'fatal', error: `${code}: ${desc}`, alias });
-    } else {
-      recordAttempt(rtFp, { outcome: 'network_error', error: `${code}: ${desc}`, alias });
-    }
-    const err = new Error(`OAuth refresh rejected (${code}): ${desc}`);
-    err.oauthError = code;
-    err.httpStatus = httpStatus;
-    throw err;
-  }
-
-  const next = buildRefreshedBlob(parsed, payload);
-  const newRtFp = fingerprint(next?.claudeAiOauth?.refreshToken);
-  const newAtFp = fingerprint(next?.claudeAiOauth?.accessToken);
-  const rotated = Boolean(newRtFp && newRtFp !== rtFp);
-  recordEvent({
-    actor,
-    action: 'refresh-response',
-    alias,
-    phase,
-    rt_fp: rtFp,
-    new_rt_fp: newRtFp,
-    new_at_fp: newAtFp,
-    rt_rotated: rotated,
-    expires_at: next?.claudeAiOauth?.expiresAt ? new Date(next.claudeAiOauth.expiresAt).toISOString() : null,
-    http_status: httpStatus,
-    outcome: 'ok',
-    trace_id: traceId,
-    ...rateLimitHeaders,
-  });
-  // Dedicated lineage-chain event — one line per RT hop, easy to grep & join.
-  recordEvent({
-    actor,
-    action: 'rt-rotation',
-    alias,
-    phase,
-    prev_rt_fp: rtFp,
-    new_rt_fp: newRtFp,
-    rotated,
-    outcome: rotated ? 'rotated' : 'reused',
-    trace_id: traceId,
-  });
-  recordAttempt(rtFp, { outcome: 'ok', alias });
-  // The old RT is dead server-side now; forget its budget state.
-  if (rotated) forgetLineage(rtFp);
-  return JSON.stringify(next);
 }
 
 function classifyClaudeCodexbarToken(token) {
@@ -1132,30 +819,6 @@ function cmdCurrent() {
   }
 }
 
-// Phase 4: skip-if-fresh guard.
-//
-// Before firing a proactive refresh on a near-expiry blob, check whether we
-// actually *need* to. If the target's access token still has runway AND we
-// verified its identity recently, skip the refresh entirely and let the
-// reactive path handle only the case where the server actually rejects us.
-// This cuts refresh-endpoint traffic to the minimum and reduces rate-limit
-// exposure for healthy profiles.
-function canSkipProactiveRefresh(blob, profile, nowMs = Date.now()) {
-  const exp = blobExpiresAtMs(blob);
-  if (exp == null) return false;
-  const tokenRunwayMs = exp - nowMs;
-  const minRunway = Number(process.env.ATC_SKIP_REFRESH_MIN_RUNWAY_MS || 5 * 60 * 1000);
-  if (tokenRunwayMs < minRunway) return false;
-
-  const capturedAtIso = profile?.authState?.capturedAt;
-  if (!capturedAtIso) return false;
-  const capturedAt = Date.parse(capturedAtIso);
-  if (!Number.isFinite(capturedAt)) return false;
-  const identityAgeMs = nowMs - capturedAt;
-  const maxIdentityAge = Number(process.env.ATC_SKIP_REFRESH_MAX_IDENTITY_AGE_MS || 10 * 60 * 1000);
-  return identityAgeMs < maxIdentityAge;
-}
-
 export function validateAliasIdentity(expectedEmail, observedEmail) {
   const expected = typeof expectedEmail === 'string' ? expectedEmail.trim().toLowerCase() : '';
   const observed = typeof observedEmail === 'string' ? observedEmail.trim().toLowerCase() : '';
@@ -1210,61 +873,22 @@ function switchProfile(alias, options = {}) {
   // as close as possible to the swap — narrowing the window in which another
   // Claude process could rotate the RT between capture and swap.
 
-  // 1. Load the target credential. Refresh tokens are single-use and rotate,
-  //    so .cred snapshots can drift: the access token may be dead well before
-  //    its stored expiresAt (another claude process rotated it away). We handle
-  //    both signals — near-expiry proactively, and live 401 reactively.
+  // 1. Load the target credential. Snapshots can drift if Claude Code rotated
+  //    the RT after our last sync; if so, the AT in the blob may already be
+  //    dead. We do NOT refresh ourselves — that path mints tokens with a
+  //    degraded usage attribution at Anthropic's edge (see CLAUDE_OAUTH_USER_AGENT
+  //    header comment). Instead: install whatever the blob contains and let
+  //    Claude Code refresh through its own allowlisted path on first call.
   let targetBlob = loadCredential(alias, { actor: 'switch', reason: 'load-target' });
-  let refreshed = false;
-
-  const attemptRefresh = (phase) => {
-    const next = refreshCredentialBlob(targetBlob, { actor: 'switch', alias, phase });
-    saveCredential(alias, next, { actor: 'switch', reason: `${phase}-refresh`, source: 'refresh' });
-    targetBlob = next;
-    refreshed = true;
-  };
-
-  const fatalRefreshMessage = (error) =>
-    `Profile "${alias}" has a dead refresh token (${error?.oauthError || 'unauthorized'}).\n` +
-    `This refresh-token lineage has been revoked server-side. A passive\n` +
-    `refresh cannot recover this — a fresh OAuth login is required.\n` +
-    `\n` +
-    `Recover with (single safe path):\n` +
-    `  atc-profile rotate ${alias}\n` +
-    `\n` +
-    `This will:\n` +
-    `  • freeze any running session's tokens first\n` +
-    `  • guide you through claude /login as the ${alias} account\n` +
-    `  • rebind "${alias}" to the fresh lineage\n` +
-    `Original error: ${error.message}`;
-
-  const rateLimitRecoveryMessage = (targetAlias, error) => {
-    const retryAtIso = error?.retryAt ? new Date(error.retryAt).toISOString() : null;
-    const waitMsg = retryAtIso
-      ? `Cooldown lifts at ${retryAtIso}.`
-      : 'Cooldown is ~10 minutes from the last rate-limit response.';
-    return (
-      `Profile "${targetAlias}" refresh-token lineage is rate-limited.\n` +
-      `${waitMsg}\n` +
-      `\n` +
-      `Retrying will not help and may extend the lockout. Options:\n` +
-      `  1) wait for the cooldown to lift, then: atc-profile use ${targetAlias}\n` +
-      `  2) skip the refresh endpoint entirely with a fresh login:\n` +
-      `     atc-profile rotate ${targetAlias}\n` +
-      `Original error: ${error?.message || 'rate_limit_error'}`
-    );
-  };
 
   const targetProfile = catalog.profiles[alias];
   const targetExpectedEmail = typeof targetProfile?.email === 'string'
     ? targetProfile.email.trim().toLowerCase()
     : '';
 
-  // Pre-refresh identity guard: if the blob's embedded email disagrees with
-  // the alias's expected email, the file on disk is corrupted. Refreshing it
-  // would burn the wrong lineage's quota and persist fresh-but-wrong tokens
-  // back to disk. Abort immediately; the downstream live identity check is a
-  // second layer but runs after a network call we don't want to make.
+  // Byte-level identity guard: if the blob's embedded email disagrees with
+  // the alias's expected email, the file on disk is corrupted. Abort before
+  // any keychain or disk write.
   if (targetExpectedEmail) {
     const targetBlobEmail = readCredentialBlobEmail(targetBlob);
     if (targetBlobEmail && targetBlobEmail !== targetExpectedEmail) {
@@ -1275,7 +899,7 @@ function switchProfile(alias, options = {}) {
         switch_id: switchId,
         expected_email: targetExpectedEmail,
         observed_email: targetBlobEmail,
-        outcome: 'pre-refresh-identity-mismatch',
+        outcome: 'blob-identity-mismatch',
       });
       die(
         `Refusing switch: ${alias}.cred is bound to ${targetExpectedEmail}, but the blob on disk holds credentials for ${targetBlobEmail}.\n` +
@@ -1285,109 +909,62 @@ function switchProfile(alias, options = {}) {
     }
   }
 
-  if (blobNeedsRefresh(targetBlob) && !canSkipProactiveRefresh(targetBlob, targetProfile)) {
-    try {
-      attemptRefresh('proactive');
-    } catch (error) {
-      const code = error?.oauthError || '';
-      if (isFatalRefreshError(code, error?.httpStatus)) {
-        recordEvent({ actor: 'switch', action: 'switch-abort', alias, switch_id: switchId, outcome: `fatal:${code}` });
-        die(fatalRefreshMessage(error));
-      }
-      if (code === 'rate_limit_error' || error?.httpStatus === 429 || error?.budgetReason === 'cooldown') {
-        console.warn(`  Warning: proactive refresh for "${alias}" rate-limited.`);
-        if (error?.retryAt) {
-          console.warn(`  Cooldown until ${new Date(error.retryAt).toISOString()}. Falling through to live validation.`);
-        }
-      } else {
-        console.warn(`  Warning: proactive refresh for "${alias}" failed: ${error.message}`);
-      }
-      // Non-fatal (network / rate-limit / dedup): let validation below decide.
-      // If the access token is still valid, the swap succeeds.
-    }
-  } else if (blobNeedsRefresh(targetBlob)) {
-    recordEvent({
-      actor: 'switch',
-      action: 'refresh-skip',
-      alias,
-      phase: 'proactive',
-      switch_id: switchId,
-      outcome: 'skipped:fresh-identity',
-    });
-  }
-
-  // 2. Live validation with reactive refresh on 401/403. This is the key
-  //    self-healing path: expiresAt lies when another claude process rotated
-  //    our access token behind our back, so we can't trust it as a refresh
-  //    trigger — we have to ask the server.
-  let authState;
+  // 2. Best-effort live identity check using the AT in the blob. If the AT
+  //    is fresh enough to round-trip, we get a live email + UUID and can do
+  //    the strong UUID-pin gate. If the AT is stale (401/403), we skip the
+  //    live check and trust the byte-level email guard above + the cached
+  //    UUID pin. Claude Code will refresh after the swap.
+  let authState = null;
+  let liveIdentityVerified = false;
   try {
     authState = fetchClaudeAccountStateFromBlob(targetBlob);
+    liveIdentityVerified = true;
   } catch (error) {
     const unauthorized = error?.httpStatus === 401 || error?.httpStatus === 403;
-    if (!unauthorized) throw error;
-
-    if (refreshed) {
-      // We already refreshed and the new access token still got 401 — something
-      // is wrong beyond snapshot drift (revoked grant, account disabled, etc.).
+    if (!unauthorized) {
+      recordEvent({
+        actor: 'switch',
+        action: 'identity-check',
+        alias,
+        switch_id: switchId,
+        http_status: error?.httpStatus || null,
+        outcome: `error:${error?.httpStatus || 'network'}`,
+        detail: error?.message || null,
+      });
       die(
-        `Profile "${alias}" access token is invalid even after refresh.\n` +
-        `The refresh endpoint returned new tokens but the account endpoint\n` +
-        `still rejects them. The OAuth grant may have been revoked.\n` +
-        `Recover with: claude /logout && claude /login && atc-profile add ${alias}\n` +
-        `Original error: ${error.message}`
-      );
-    }
-
-    // Reactive refresh: access token was dead despite expiresAt looking fine.
-    console.warn(`  Access token rejected — attempting reactive refresh...`);
-    recordEvent({ actor: 'switch', action: 'reactive-refresh-start', alias, switch_id: switchId, outcome: 'started' });
-    try {
-      attemptRefresh('reactive');
-    } catch (refreshErr) {
-      const code = refreshErr?.oauthError || '';
-      if (isFatalRefreshError(code, refreshErr?.httpStatus)) {
-        recordEvent({ actor: 'switch', action: 'switch-abort', alias, switch_id: switchId, outcome: `fatal:${code}` });
-        die(fatalRefreshMessage(refreshErr));
-      }
-      if (code === 'rate_limit_error' || refreshErr?.httpStatus === 429 || refreshErr?.budgetReason === 'cooldown') {
-        recordEvent({ actor: 'switch', action: 'switch-abort', alias, switch_id: switchId, outcome: 'rate_limited' });
-        die(rateLimitRecoveryMessage(alias, refreshErr));
-      }
-      recordEvent({ actor: 'switch', action: 'switch-abort', alias, switch_id: switchId, outcome: `reactive-refresh-error:${code}` });
-      die(
-        `Profile "${alias}" access token is invalid and reactive refresh failed: ${refreshErr.message}\n` +
+        `Could not verify identity for "${alias}": ${error.message}\n` +
         `Recovery:\n` +
         `  1) check network connectivity\n` +
-        `  2) re-login: atc-profile rotate ${alias}`,
+        `  2) re-login: atc-profile rotate ${alias}`
       );
     }
-
-    try {
-      authState = fetchClaudeAccountStateFromBlob(targetBlob);
-    } catch (retryError) {
-      recordEvent({ actor: 'switch', action: 'switch-abort', alias, switch_id: switchId, outcome: `retry-identity-error:${retryError?.httpStatus || '?'}` });
-      die(
-        `Profile "${alias}" still rejected after reactive refresh (${retryError?.httpStatus || '?'}).\n` +
-        `Recover with: atc-profile rotate ${alias}\n` +
-        `Original error: ${retryError.message}`,
-      );
-    }
+    recordEvent({
+      actor: 'switch',
+      action: 'identity-check',
+      alias,
+      switch_id: switchId,
+      http_status: error?.httpStatus || null,
+      outcome: 'stale-at-fallthrough',
+      detail: 'AT stale; relying on byte-level identity + cached UUID pin',
+    });
+    console.warn(`  Note: stale access token for "${alias}". Skipping live identity check; trusting blob email and pinned UUID. Claude Code will refresh on next call.`);
   }
-  const targetObservedEmail = String(authState?.authStatus?.email || '').trim().toLowerCase();
-  const targetObservedUuid = typeof authState?.oauthAccount?.accountUuid === 'string'
+
+  const targetObservedEmail = liveIdentityVerified
+    ? String(authState?.authStatus?.email || '').trim().toLowerCase()
+    : '';
+  const targetObservedUuid = liveIdentityVerified && typeof authState?.oauthAccount?.accountUuid === 'string'
     ? authState.oauthAccount.accountUuid.trim()
     : '';
   const targetPinnedUuid = typeof targetProfile?.accountUuid === 'string'
     ? targetProfile.accountUuid.trim()
     : '';
 
-  // UUID check is the HARD identity gate: accounts never share UUIDs, so a
-  // mismatch is proof of contamination. When the target has a pinned UUID we
-  // must match it exactly or abort — never fall back to email if UUIDs
-  // disagree. If the pin doesn't exist yet (profile predates UUID pinning),
-  // fall through to the email check and opportunistically set the pin below.
-  if (targetPinnedUuid) {
+  // UUID check is the HARD identity gate when we have a live response. A
+  // mismatch is proof of contamination. With a stale AT we can't observe a
+  // UUID, so we trust the cached pin (set at registration via a successful
+  // live check; only invalidated by re-login through `add`/`rotate`).
+  if (liveIdentityVerified && targetPinnedUuid) {
     if (!targetObservedUuid) {
       recordEvent({
         actor: 'switch',
@@ -1407,22 +984,13 @@ function switchProfile(alias, options = {}) {
     if (targetObservedUuid !== targetPinnedUuid) {
       recordEvent({
         actor: 'switch',
-        action: 'identity-pin-broken',
+        action: 'switch-abort',
         alias,
         switch_id: switchId,
         pinned_uuid: targetPinnedUuid,
         observed_uuid: targetObservedUuid,
         observed_email: targetObservedEmail,
         expected_email: targetExpectedEmail,
-        outcome: 'switch-abort',
-      });
-      recordEvent({
-        actor: 'switch',
-        action: 'switch-abort',
-        alias,
-        switch_id: switchId,
-        pinned_uuid: targetPinnedUuid,
-        observed_uuid: targetObservedUuid,
         outcome: 'target-uuid-mismatch',
       });
       die(
@@ -1432,48 +1000,50 @@ function switchProfile(alias, options = {}) {
       );
     }
   }
-  const targetIdentity = validateAliasIdentity(targetExpectedEmail, targetObservedEmail);
-  if (!targetIdentity.ok && targetIdentity.reason === 'mismatch') {
-    recordEvent({
-      actor: 'switch',
-      action: 'switch-abort',
-      alias,
-      switch_id: switchId,
-      expected_email: targetExpectedEmail,
-      observed_email: targetObservedEmail,
-      outcome: 'target-identity-mismatch',
-    });
-    die(
-      `Refusing switch: profile "${alias}" is bound to ${targetExpectedEmail}, but loaded credential is ${targetObservedEmail}.\n` +
-      `No keychain or catalog changes were applied.\n` +
-      `Recovery: atc-profile rotate ${alias}`
-    );
+
+  if (liveIdentityVerified) {
+    const targetIdentity = validateAliasIdentity(targetExpectedEmail, targetObservedEmail);
+    if (!targetIdentity.ok && targetIdentity.reason === 'mismatch') {
+      recordEvent({
+        actor: 'switch',
+        action: 'switch-abort',
+        alias,
+        switch_id: switchId,
+        expected_email: targetExpectedEmail,
+        observed_email: targetObservedEmail,
+        outcome: 'target-identity-mismatch',
+      });
+      die(
+        `Refusing switch: profile "${alias}" is bound to ${targetExpectedEmail}, but loaded credential is ${targetObservedEmail}.\n` +
+        `No keychain or catalog changes were applied.\n` +
+        `Recovery: atc-profile rotate ${alias}`
+      );
+    }
+    if (!targetIdentity.ok && targetIdentity.reason === 'unverified') {
+      recordEvent({
+        actor: 'switch',
+        action: 'switch-abort',
+        alias,
+        switch_id: switchId,
+        expected_email: targetExpectedEmail,
+        observed_email: null,
+        outcome: 'target-identity-unverified',
+      });
+      die(
+        `Refusing switch: could not verify identity for profile "${alias}" before swap.\n` +
+        `No keychain or catalog changes were applied.\n` +
+        `Recovery: atc-profile rotate ${alias}`
+      );
+    }
   }
-  if (!targetIdentity.ok && targetIdentity.reason === 'unverified') {
-    recordEvent({
-      actor: 'switch',
-      action: 'switch-abort',
-      alias,
-      switch_id: switchId,
-      expected_email: targetExpectedEmail,
-      observed_email: null,
-      outcome: 'target-identity-unverified',
-    });
-    die(
-      `Refusing switch: could not verify identity for profile "${alias}" before swap.\n` +
-      `No keychain or catalog changes were applied.\n` +
-      `Recovery: atc-profile rotate ${alias}`
-    );
-  }
+
   const profile = catalog.profiles[alias];
-  if (profile) {
+  if (profile && liveIdentityVerified) {
     profile.authState = authState;
     if (!profile.email && authState?.authStatus?.email) {
       profile.email = authState.authStatus.email;
     }
-    // Opportunistic backfill for profiles that predate UUID pinning: now
-    // that we've just verified email identity and have a live UUID in hand,
-    // pin it so future switches use the stronger UUID check.
+    // Opportunistic UUID pin backfill for profiles that predate UUID pinning.
     if (!profile.accountUuid && targetObservedUuid) {
       profile.accountUuid = targetObservedUuid;
       profile.accountUuidPinnedAt = new Date().toISOString();
@@ -1509,19 +1079,6 @@ function switchProfile(alias, options = {}) {
       const expectedEmail = typeof activeProfile?.email === 'string'
         ? activeProfile.email.trim().toLowerCase()
         : '';
-
-      // If keychain AT is expired, refresh in place first. This rotates the RT,
-      // so the fresh one must be written back to keychain AND saved to .cred —
-      // losing the freshly-rotated RT is exactly the bug this code prevents.
-      if (blobNeedsRefresh(currentBlob)) {
-        try {
-          const refreshedBlob = refreshCredentialBlob(currentBlob, { actor: 'switch', alias: catalog.active, phase: 'sync-active' });
-          keychainImport(refreshedBlob, { actor: 'switch', alias: catalog.active, reason: 'sync-active-refresh' });
-          currentBlob = refreshedBlob;
-        } catch (error) {
-          console.warn(`  Warning: sync-active refresh for "${catalog.active}" failed: ${error.message}`);
-        }
-      }
 
       if (expectedEmail) {
         let observedEmail = null;
@@ -1623,11 +1180,11 @@ function switchProfile(alias, options = {}) {
     alias,
     from_alias: fromAlias,
     switch_id: switchId,
-    refreshed,
+    live_identity_verified: liveIdentityVerified,
     observed_email: authState?.authStatus?.email || null,
     outcome: 'ok',
   });
-  console.log(`✓ Switched to profile "${alias}".${refreshed ? ' (refreshed OAuth token)' : ''}`);
+  console.log(`✓ Switched to profile "${alias}".${liveIdentityVerified ? '' : ' (live identity check skipped — AT stale; Claude Code will refresh on first call)'}`);
   console.log('  Any running claude sessions will use this account on their next API call.');
   return { authState };
 }
@@ -1670,44 +1227,14 @@ function freezeActiveKeychain(catalog, { allowLegacy = true } = {}) {
     pre_expires_at: preParsed?.claudeAiOauth?.expiresAt
       ? new Date(preParsed.claudeAiOauth.expiresAt).toISOString()
       : null,
-    pre_needs_refresh: blobNeedsRefresh(blob),
     outcome: 'started',
   });
 
-  if (blobNeedsRefresh(blob)) {
-    try {
-      const refreshedBlob = refreshCredentialBlob(blob, { actor: 'rotate', alias: activeAlias, phase: 'freeze' });
-      keychainImport(refreshedBlob, { actor: 'rotate', alias: activeAlias, reason: 'freeze-refresh' });
-      blob = refreshedBlob;
-    } catch (error) {
-      // Dead RT → the blob we still hold has a dead AT+RT. Saving it puts a
-      // zombie on disk. Abort freeze-save rather than persisting a poisoned RT.
-      const code = error?.oauthError || '';
-      const isRateLimited = code === 'rate_limit_error' || error?.httpStatus === 429 || error?.budgetReason === 'cooldown';
-      const isFatal = isFatalRefreshError(code, error?.httpStatus);
-      recordEvent({
-        actor: 'rotate',
-        action: 'freeze-refresh-failed',
-        alias: activeAlias,
-        oauth_error: code,
-        http_status: error?.httpStatus || null,
-        rate_limited: isRateLimited,
-        fatal: isFatal,
-        retry_at: error?.retryAt ? new Date(error.retryAt).toISOString() : null,
-        outcome: isFatal || isRateLimited ? 'abort-save' : 'continue-unrefreshed',
-        detail: error?.message || null,
-      });
-      console.warn(`  Warning: could not refresh "${activeAlias}" before freeze: ${error.message}`);
-      if (isFatal || isRateLimited) {
-        console.warn(`  Refusing to freeze-save: on-disk RT would be poisoned. Leaving ${activeAlias}.cred untouched.`);
-        return null;
-      }
-    }
-  }
-
-  // Always run identity check before save — even in the "legacy no-expected-email"
-  // branch — so we have forensic evidence of what Anthropic thought of this blob
-  // at freeze-save time.
+  // Best-effort live identity check. If the AT in the keychain is stale we
+  // cannot refresh ourselves (see CLAUDE_OAUTH_USER_AGENT comment). Fall back
+  // to the byte-level email embedded in the blob — the strong identity guard
+  // happens at registration time via UUID pin; this is a freeze-time sanity
+  // check to avoid clobbering with the wrong account's credentials.
   let authState = null;
   let observedEmail = null;
   let subscriptionType = null;
@@ -1721,6 +1248,8 @@ function freezeActiveKeychain(catalog, { allowLegacy = true } = {}) {
     identityHttpStatus = error?.httpStatus || null;
     identityError = error?.message || String(error);
   }
+  const blobEmail = readCredentialBlobEmail(blob);
+  const effectiveEmail = observedEmail || blobEmail || null;
   const identityOutcome = identityError
     ? `error:${identityHttpStatus || 'unknown'}`
     : (expectedEmail && observedEmail && observedEmail !== expectedEmail ? 'mismatch' : (observedEmail ? 'match' : 'unverified'));
@@ -1730,6 +1259,7 @@ function freezeActiveKeychain(catalog, { allowLegacy = true } = {}) {
     alias: activeAlias,
     expected_email: expectedEmail || null,
     observed_email: observedEmail || null,
+    blob_email: blobEmail || null,
     subscription_type: subscriptionType,
     http_status: identityHttpStatus,
     phase: 'pre-freeze-save',
@@ -1737,18 +1267,14 @@ function freezeActiveKeychain(catalog, { allowLegacy = true } = {}) {
     detail: identityError,
   });
 
-  if (identityError && (identityHttpStatus === 401 || identityHttpStatus === 403)) {
-    console.warn(`  Refusing to freeze-save: identity check rejected (${identityHttpStatus}). ${activeAlias}.cred left untouched.`);
-    return null;
-  }
-  if (expectedEmail && observedEmail && observedEmail !== expectedEmail) {
-    console.error(`✗ Keychain holds ${observedEmail}, not the expected ${expectedEmail} for active profile "${activeAlias}".`);
+  if (expectedEmail && effectiveEmail && effectiveEmail !== expectedEmail) {
+    console.error(`✗ Keychain holds ${effectiveEmail}, not the expected ${expectedEmail} for active profile "${activeAlias}".`);
     console.error(`  Aborting to avoid clobbering ${activeAlias}.cred with the wrong account's credentials.`);
     console.error(`  To register the current login, run: atc-profile add <alias>`);
     process.exit(1);
   }
-  if (expectedEmail && !observedEmail) {
-    console.warn(`  Warning: could not verify keychain identity; skipping cred save for "${activeAlias}".`);
+  if (expectedEmail && !effectiveEmail) {
+    console.warn(`  Warning: could not verify keychain identity (live: ${identityHttpStatus || 'error'}, blob: missing); skipping cred save for "${activeAlias}".`);
     return null;
   }
 
@@ -2166,52 +1692,6 @@ function cmdDiagnose(traceId, { json = false, includeRotated = false } = {}) {
   }
 }
 
-function cmdCooldowns({ json = false } = {}) {
-  const cooldowns = listCooldowns();
-  if (cooldowns.length === 0) {
-    console.log('No active cooldowns or quarantines. All aliases and RT lineages are free to refresh.');
-    return;
-  }
-  if (json) {
-    console.log(JSON.stringify(cooldowns, null, 2));
-    return;
-  }
-  const aliasQuars = cooldowns.filter((c) => c.kind === 'alias-quarantine');
-  const lineageCooldowns = cooldowns.filter((c) => c.kind !== 'alias-quarantine');
-  if (aliasQuars.length > 0) {
-    console.log('Alias quarantines (account-level rate-limit suspected):');
-    for (const q of aliasQuars) {
-      const remaining = Math.max(0, Math.round((Date.parse(q.cooldownUntil) - Date.now()) / 3600));
-      console.log(`  ${q.alias}: quarantined until ${q.cooldownUntil} (~${Math.round(remaining / 60)}m remaining)`);
-      if (q.error) console.log(`    reason: ${q.error}`);
-      console.log(`    distinct lineages 429'd: ${q.rateLimitedLineages}, quarantineCount: ${q.quarantineCount}`);
-      console.log(`    override: atc-profile clear-quarantine ${q.alias}  (use with care — only if you KNOW Anthropic's cap has reset)`);
-    }
-  }
-  if (lineageCooldowns.length > 0) {
-    console.log('Active refresh-endpoint cooldowns (per-lineage):');
-    for (const c of lineageCooldowns) {
-      const remaining = Math.max(0, Math.round((Date.parse(c.cooldownUntil) - Date.now()) / 1000));
-      console.log(`  ${c.alias || '(unknown alias)'}: until ${c.cooldownUntil} (${remaining}s left)`);
-      if (c.error) console.log(`    last error: ${c.error}`);
-      console.log(`    recovery: atc-profile rotate ${c.alias || '<alias>'}`);
-    }
-  }
-}
-
-function cmdClearQuarantine(alias) {
-  if (!alias) die('Usage: atc-profile clear-quarantine <alias>');
-  const cleared = clearAliasQuarantine(alias);
-  if (cleared) {
-    recordEvent({ actor: 'atc-profile', action: 'alias-quarantine-cleared', alias, outcome: 'ok', reason: 'manual-override' });
-    console.log(`✓ Cleared quarantine for "${alias}".`);
-    console.log('  Next refresh attempt will proceed. If Anthropic still returns 429,');
-    console.log('  the quarantine will reset and extend (protects against thrashing).');
-  } else {
-    console.log(`(no active quarantine for "${alias}")`);
-  }
-}
-
 // ── main ─────────────────────────────────────────────────────────────────────
 
 function die(msg) {
@@ -2274,8 +1754,6 @@ switch (command) {
   case 'probe-web': cmdProbeWeb(); break;
   case 'sync-web': cmdSyncWeb(arg); break;
   case 'log':     cmdLog({ alias: aliasFlag || arg || null, sinceArg: since, limit: Number.isFinite(limit) && limit > 0 ? limit : 50, json }); break;
-  case 'cooldowns': cmdCooldowns({ json }); break;
-  case 'clear-quarantine': cmdClearQuarantine(arg); break;
   case 'diagnose': cmdDiagnose(arg, { json, includeRotated: true }); break;
   default:
     console.error(`atc-profile — Claude account profile manager
@@ -2288,21 +1766,16 @@ Commands:
                   Answer 'n' at the prompt to roll back to the previous profile.
   list            show all profiles (* = active)
   current         print the active profile alias
-  use <alias> [--no-sync-active] switch; refreshes OAuth if stale and validates
-                  against api/oauth/account (live). --no-sync-active skips
-                  backing up the currently-active profile's rotated token.
+  use <alias> [--no-sync-active] switch; best-effort live identity check
+                  against api/oauth/account, falls back to byte-level email +
+                  pinned UUID when the AT is stale. --no-sync-active skips
+                  capturing the outgoing profile's keychain state to disk.
   remove <alias>  delete a profile (cannot remove the active profile)
   wipe --yes      delete Claude Keychain cred + all saved atc-profile creds/catalog
   probe-web       print detected Claude web sessionKey from Firefox cookies
   sync-web <alias> capture current Firefox Claude sessionKey into an existing profile
   log [--alias X] [--since 1h] [--limit N] [--json]
                   tail the credential event log for post-mortem debugging
-  cooldowns [--json]
-                  list active refresh-endpoint cooldowns per RT lineage
-                  AND per-alias quarantines (account-level rate-limit blocks)
-  clear-quarantine <alias>
-                  manually lift an alias quarantine (use when you know
-                  Anthropic's account-level cap has reset)
   diagnose <trace-id> [--json]
                   print the full chronological story of one operation.
                   Matches trace_id / switch_id / rotate_id / add_id fields.

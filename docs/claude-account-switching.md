@@ -25,23 +25,22 @@ Claude uses the standard OAuth 2.0 **authorization-code flow with PKCE**, with o
 
 The pieces:
 - `access_token`: bearer token, ~1h lifetime, sent as `Authorization: Bearer …` on every API request.
-- `refresh_token`: opaque, long-lived, exchanged at the token endpoint for a new pair when the access token is near expiry. Single-use — using it invalidates it.
-- `expiresAt`: absolute ms timestamp when the CLI will proactively refresh. Upstream uses a 5-minute skew (refresh if `Date.now() + 5min > expiresAt`), and so do we.
-- `scopes`: space-separated list of capabilities. The CLI requests `user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload`, and we pass the same string back on refresh so the new access token inherits them.
+- `refresh_token`: opaque, long-lived. Single-use — using it invalidates it. Claude Code's runtime owns the refresh; this tool never calls the token endpoint.
+- `expiresAt`: absolute ms timestamp when Claude Code will proactively refresh.
+- `scopes`: space-separated list of capabilities the CLI requests at login.
 
 ### Endpoints this tool talks to
 
 | Purpose | Method | URL | Notes |
 |---|---|---|---|
-| Refresh access/refresh token pair | `POST` | `https://platform.claude.com/v1/oauth/token` | Body: `grant_type=refresh_token`, `refresh_token`, `client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e`, `scope`. Matches upstream constants in [`src/constants/oauth.ts`](https://github.com/yasasbanukaofficial/claude-code/blob/main/src/constants/oauth.ts). |
-| Validate identity behind a token | `GET` | `https://api.anthropic.com/api/oauth/account` | Returns `{ email, organizations[] }`. Used by `use` (and the dashboard sync path) to catch the "token is revoked but `expiresAt` still looks fine" case — `claude /status` reads `~/.claude.json` which can be stale. |
+| Validate identity behind a token | `GET` | `https://api.anthropic.com/api/oauth/account` | Returns `{ email, organizations[] }`. Used by `use` and the sync-daemon to confirm the keychain blob still belongs to the alias we think it does. |
 | Read rolling usage windows | `GET` | `https://api.anthropic.com/api/oauth/usage` | Returns five-hour + seven-day utilization with `resets_at`. The dashboard reads this via codexbar's `--source oauth` path. |
+
+This tool deliberately does **not** call `https://platform.claude.com/v1/oauth/token`. Anthropic's edge fingerprints token-endpoint requests by client; tokens minted from anything other than Claude Code's own allowlisted fingerprint land in a degraded attribution bucket and surface as immediate rate-limit errors. Claude Code is the only client allowed to refresh; we just keep `<active>.cred` in lockstep with whatever Claude Code rotates into the keychain.
 
 ### Throttling constraints to be aware of
 
-- **Refresh endpoint rate limit**: Repeated calls against the same refresh-token lineage can return `429 rate_limit_error`. There's no `Retry-After` header; community reports converge on **~15 minute recovery**. If `use` fails with `invalid_grant` *and* you've been refresh-storming (e.g., many claude processes starting simultaneously after a reboot), the fix is to wait 15 minutes and re-login, not retry harder.
 - **Dashboard per-provider throttle**: `fetchClaudeUsageRateLimited` in `modules/provider-usage.mjs` enforces `ATC_CLAUDE_USAGE_MIN_INTERVAL_MS` (default 120s) between live fetches; within that window it returns the last cached value with `throttled: true`. After a profile switch we bypass this with `{ force: true }` so the card doesn't render the outgoing account's cached windows.
-- **Cache-drift failure mode**: If two independent `claude` processes are alive against the same Keychain entry, they race on refresh. The first to rotate wins; the second finds its in-memory refresh token revoked. This is the usual cause of mid-session `invalid_grant` errors — see "Recovering from invalid credentials" below.
 
 ### Why `codexbar --source oauth` beats `claude --source cli` for dashboard usage
 
@@ -74,7 +73,7 @@ When switching, it updates:
 |---|---|
 | `add <alias>` | Register the currently-logged-in Claude account under `<alias>` and set it active. Refreshes the alias in place if it already exists with the same email. Warns before clobbering the previous active profile's unsaved rotated tokens. |
 | `rotate <alias>` | Safest way to add or re-register an alias when you still need to preserve the currently-active one: freezes the active profile's keychain state, clears the keychain, guides you through `claude /login`, then registers the new login. Reversible — answering "n" restores the old state. |
-| `use <alias>` | Swap to a registered alias. Syncs the outgoing profile's latest keychain tokens back to its `.cred` (identity-verified), proactively refreshes the target if expired, reactively refreshes on 401/403, then swaps the Keychain entry. |
+| `use <alias>` | Swap to a registered alias. Syncs the outgoing profile's latest keychain tokens back to its `.cred` (identity-verified), then swaps the Keychain entry. If the target's access token is stale, Claude Code refreshes on its first call. |
 | `list` / `current` | Show registered profiles / active profile. |
 | `remove <alias>` | Delete an alias and its saved credential. |
 | `sync-web <alias>` | Re-capture just the Firefox `sessionKey` for the alias without swapping. |
@@ -127,7 +126,7 @@ node dashboard/scripts/atc-profile.mjs rotate secondary
 ```
 
 Flow:
-1. **Freeze** — reads the live Keychain, refreshes it if expired, verifies the account identity matches the active profile, and writes the fresh blob to `<active>.cred`. Backs up to `.backup/` first.
+1. **Freeze** — reads the live Keychain, verifies the account identity matches the active profile, and writes the blob to `<active>.cred`. Backs up to `.backup/` first.
 2. **Clear** — deletes the Keychain entry so no running `claude` process can rotate the saved refresh token out from under us.
 3. **Guide** — prints instructions to close other claude processes and run `claude /login` as the target account, then prompts for confirmation.
 4. **Register** — on `y`: reads the new Keychain blob, validates identity via `api/oauth/account`, ensures the email isn't already bound to a different alias, saves `<alias>.cred`, updates `profiles.json`, and syncs codexbar.
@@ -141,14 +140,12 @@ Flow:
 node dashboard/scripts/atc-profile.mjs use <alias>
 ```
 
-`use` does five things in order:
+`use` does four things in order:
 
-1. **Sync-active (identity-verified)** — export the live Keychain blob, call `api/oauth/account` to confirm the email matches the currently-active profile's recorded email, and only then write the blob to `<active>.cred`. Opt out with `--no-sync-active` if Keychain password prompts become a problem. If the live access token is expired, `use` refreshes it in place first and writes the rotated pair back to both Keychain and `.cred`.
-    - Identity verification is deliberate: email match, not refresh-token equality. Background RT rotations are normal and must not skip the save. An email mismatch means something external swapped the Keychain out from under us, and clobbering the saved cred with the wrong account's tokens would silently destroy the real alias.
-2. **Proactive refresh** — if the target blob's `expiresAt` is within 5 minutes, refresh it against `platform.claude.com/v1/oauth/token` and persist the rotated pair back to `<alias>.cred` **before** importing into Keychain. Avoids the stale-snapshot failure where the saved `refreshToken` has already been rotated away by another claude process.
-3. **Live validation** — `GET api/oauth/account` with the restored access token, compare returned email against the saved alias email. Catches "token revoked, but `expiresAt` says OK" because `~/.claude.json` is not proof of validity.
-4. **Reactive refresh on 401/403** — if the live call rejects the access token (another claude process rotated it away), run one reactive refresh and retry validation. Main self-healing path keeping `use` one-click across snapshot drift.
-5. **Swap** — delete Keychain entry, import target blob, update `~/.claude.json` authState, update codexbar active account, bump `catalog.active`.
+1. **Byte-level identity guard** — read `<alias>.cred`, extract the embedded `emailAddress`, and refuse the swap if it disagrees with the alias's bound email. Catches contamination before any network or keychain I/O.
+2. **Best-effort live identity check** — call `api/oauth/account` with the AT in the blob. On success, compare the returned `accountUuid` against the alias's pinned UUID (hard gate) and the email against the alias's bound email (soft gate). On 401/403 the AT is simply stale; we skip the live gate, trust the byte-level guard plus the cached UUID pin, and let Claude Code refresh on its first post-swap call.
+3. **Sync-active (identity-verified)** — export the live Keychain blob, run the same identity checks against the *outgoing* alias, and only then write the blob to `<active>.cred`. Opt out with `--no-sync-active` if Keychain password prompts become a problem. Identity verification is deliberate: UUID match (when available), then email match — never refresh-token equality. Background RT rotations are normal and must not skip the save.
+4. **Swap** — delete Keychain entry, import target blob, update `~/.claude.json` authState, update codexbar active account, bump `catalog.active`.
 
 ### Quick status checks
 
@@ -225,40 +222,29 @@ curl -sS 'http://127.0.0.1:1111/api/usage?provider=claude&force=1' | jq
 The `.cred` snapshot for an alias can go stale because Claude OAuth refresh tokens are **single-use and rotate**. If another claude process (MCP server, IDE extension, another tmux pane) refreshes while that alias is active in Keychain, the stored refresh token in `<alias>.cred` is revoked server-side. With the current setup, the only realistic failure modes are:
 
 1. The dashboard isn't running while you churn profiles manually via `claude /logout` + `claude /login`. Fix: use `rotate` instead, which owns the logout/login step and never leaves a rotated RT unsaved.
-2. A stray `claude` process (e.g. a forgotten tmux pane) is holding the Keychain entry hostage during a switch and rotates the RT between your sync-active and Keychain-swap. Fix: close long-running `claude` processes before `use`, or rely on reactive refresh to self-heal.
-3. The saved RT has simply aged out because you haven't used that alias in ~7 days. Fix: `rotate <alias>` and re-login.
+2. The saved RT has simply aged out because you haven't used that alias in ~7 days. Fix: `rotate <alias>` and re-login.
 
-Avoiding stale-snapshot pain amounts to: let the dashboard run (it auto-syncs), prefer `rotate` over raw `claude /logout && /login`, and avoid multiple concurrent `claude` processes racing on the same alias.
+Avoiding stale-snapshot pain amounts to: let the dashboard run (it auto-syncs), and prefer `rotate` over raw `claude /logout && /login`.
 
 ## Recovering from "invalid credentials" after a switch
 
-If `use` fails with a dead-refresh-token message (`invalid_grant`, `invalid_request`, HTTP 400/401), the saved refresh token for that alias has been invalidated server-side. Recovery:
+If a swap completes but Claude Code then reports `invalid_grant` or
+`invalid_request`, the saved refresh token for that alias has aged out
+server-side. Recovery:
 
 ```bash
-# 1. Log the CLI out and kill any other running claude processes so they
-#    don't race on the new token.
 claude /logout
-
-# 2. Make sure the CLI itself is current — Keychain ACLs can break across
-#    auto-updates and produce the same symptom.
-claude update
-
-# 3. Restart your shell so in-memory token caches are cleared, then re-auth.
-exec $SHELL -l
 claude /login
-
-# 4. Re-register the alias with the freshly rotated pair.
-node dashboard/scripts/atc-profile.mjs add <alias>
-# or (if you still need the currently-active profile preserved):
 node dashboard/scripts/atc-profile.mjs rotate <alias>
 ```
+
+`rotate` freezes the new login under the alias and updates the catalog in one shot.
 
 ## Environment knobs
 
 | Variable | Default | Applies to |
 |---|---|---|
 | `ATC_CLAUDE_ACCOUNT_TIMEOUT_SEC` | `8` | `curl --max-time` on the live `api/oauth/account` identity check. |
-| `ATC_CLAUDE_REFRESH_TIMEOUT_SEC` | `15` | `curl --max-time` on `platform.claude.com/v1/oauth/token` refresh calls. |
 | `ATC_CLAUDE_USAGE_MIN_INTERVAL_MS` | `120000` | Dashboard per-profile throttle between live Claude usage fetches. |
 | `ATC_CLAUDE_CODEXBAR_TIMEOUT_MS` | `25000` | Dashboard timeout when shelling out to `codexbar usage --provider claude`. |
 | `ATC_CLAUDE_STATUS_TIMEOUT_MS` | `25000` | Dashboard timeout when calling `claude status` for the CLI-fallback parser. |
