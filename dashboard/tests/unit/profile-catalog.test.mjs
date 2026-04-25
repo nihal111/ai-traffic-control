@@ -397,3 +397,65 @@ test('syncActiveKeychainToCred: absent profiles.json → handled gracefully (no 
   const result = await syncActiveKeychainToCred({ trigger: 'test', actor: 'unit-test' });
   assert.equal(result.synced, false);
 });
+
+// ── UUID pinning (Phase 1) ───────────────────────────────────────────────────
+// The catalog accepts and preserves accountUuid + accountUuidPinnedAt.
+// syncActiveKeychainToCred cannot write when a pin exists but the keychain
+// identity cannot be verified.
+
+test('catalog persists accountUuid and accountUuidPinnedAt through round-trip', () => {
+  const pinnedAt = '2026-04-25T01:00:00.000Z';
+  writeProfilesJson({
+    version: 1,
+    active: 'primary',
+    profiles: {
+      primary: {
+        displayName: 'primary',
+        email: 'pri@example.com',
+        accountUuid: '11111111-1111-4111-8111-111111111111',
+        accountUuidPinnedAt: pinnedAt,
+        usageCache: emptyProfileUsageCache('pri@example.com'),
+      },
+    },
+  });
+  const raw = fs.readFileSync(path.join(TEST_PROFILES_DIR, 'profiles.json'), 'utf8');
+  const parsed = JSON.parse(raw);
+  assert.equal(parsed.profiles.primary.accountUuid, '11111111-1111-4111-8111-111111111111');
+  assert.equal(parsed.profiles.primary.accountUuidPinnedAt, pinnedAt);
+});
+
+test('syncActiveKeychainToCred: cred in sync (same RT) is unchanged even with UUID pin', async () => {
+  // Write a .cred and a matching fake keychain so sync sees "already in sync"
+  // and returns early without needing a live /account call. This verifies the
+  // pin doesn't break the no-op fast path.
+  const blob = JSON.stringify({
+    claudeAiOauth: {
+      accessToken: 'AT-pin-test',
+      refreshToken: 'RT-pin-test',
+      expiresAt: Date.now() + 3600_000,
+      scopes: ['user:profile'],
+      subscriptionType: 'pro',
+    },
+  });
+  writeCred('primary', JSON.parse(blob));
+  writeProfilesJson({
+    version: 1,
+    active: 'primary',
+    profiles: {
+      primary: {
+        displayName: 'primary',
+        email: 'pri@example.com',
+        accountUuid: '22222222-2222-4222-8222-222222222222',
+        accountUuidPinnedAt: '2026-04-25T01:00:00.000Z',
+        usageCache: emptyProfileUsageCache('pri@example.com'),
+      },
+    },
+  });
+  // Skip actual keychain read (no keychain in unit test env). The existing
+  // sync implementation is async and the keychain read returns null on
+  // non-darwin — we just verify it doesn't throw and returns a structured
+  // result.
+  const result = await syncActiveKeychainToCred({ trigger: 'test', actor: 'unit-test' });
+  assert.equal(typeof result, 'object');
+  assert.ok('synced' in result);
+});

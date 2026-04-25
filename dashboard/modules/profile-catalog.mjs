@@ -68,7 +68,7 @@ function fetchOAuthAccountEmailFromBlob(blob) {
   const parsed = parseCredBlob(blob);
   const accessToken = String(parsed?.claudeAiOauth?.accessToken || '').trim();
   if (!accessToken) {
-    return Promise.resolve({ email: null, httpStatus: null, error: 'missing_access_token' });
+    return Promise.resolve({ email: null, accountUuid: null, httpStatus: null, error: 'missing_access_token' });
   }
   return new Promise((resolve) => {
     execFile(
@@ -84,7 +84,7 @@ function fetchOAuthAccountEmailFromBlob(blob) {
       { timeout: 10_000, encoding: 'utf8' },
       (err, stdout) => {
         if (err) {
-          resolve({ email: null, httpStatus: null, error: err.message || 'curl_failed' });
+          resolve({ email: null, accountUuid: null, httpStatus: null, error: err.message || 'curl_failed' });
           return;
         }
         const raw = String(stdout || '');
@@ -94,11 +94,14 @@ function fetchOAuthAccountEmailFromBlob(blob) {
         let payload = null;
         try { payload = body ? JSON.parse(body) : null; } catch { /* ignore */ }
         const email = normalizeEmail(payload?.email_address || payload?.email || null);
+        const accountUuid = typeof payload?.uuid === 'string' && payload.uuid.trim()
+          ? payload.uuid.trim()
+          : null;
         if (!Number.isFinite(status) || status < 200 || status >= 300) {
-          resolve({ email, httpStatus: status || null, error: payload?.error?.type || `http_${status || 'unknown'}` });
+          resolve({ email, accountUuid, httpStatus: status || null, error: payload?.error?.type || `http_${status || 'unknown'}` });
           return;
         }
-        resolve({ email, httpStatus: status, error: null });
+        resolve({ email, accountUuid, httpStatus: status, error: null });
       },
     );
   });
@@ -169,6 +172,10 @@ async function syncActiveKeychainToCred({ trigger = 'poll', actor = 'sync-daemon
       typeof catalog.profiles?.[alias]?.email === 'string'
         ? catalog.profiles[alias].email.trim().toLowerCase()
         : '';
+    const pinnedAccountUuid =
+      typeof catalog.profiles?.[alias]?.accountUuid === 'string'
+        ? catalog.profiles[alias].accountUuid.trim()
+        : '';
 
     const keychainBlob = await readKeychainBlob();
     if (!keychainBlob) {
@@ -206,44 +213,100 @@ async function syncActiveKeychainToCred({ trigger = 'poll', actor = 'sync-daemon
       return { synced: false, reason: 'already in sync', alias };
     }
 
-    if (expectedEmail) {
+    // Identity verification: UUID is the hard gate (accounts can't share
+    // UUIDs), email is a soft fallback for profiles that predate UUID
+    // pinning. If a UUID pin exists, we MUST fetch the live /account response
+    // and match UUID exactly — the blob's embedded email alone is insufficient.
+    if (expectedEmail || pinnedAccountUuid) {
       let observedEmail = readBlobEmail(keychainBlob);
+      let observedUuid = null;
       let observedVia = observedEmail ? 'blob' : null;
       let observedStatus = null;
-      if (!observedEmail || observedEmail !== expectedEmail) {
+      // Always fetch live if we have a UUID pin — blob has no UUID field, so
+      // we can't verify the pin without a live call.
+      const mustFetchLive = pinnedAccountUuid || !observedEmail || observedEmail !== expectedEmail;
+      if (mustFetchLive) {
         const identity = await fetchOAuthAccountEmailFromBlob(keychainBlob);
         observedStatus = identity.httpStatus || null;
         if (identity.email) {
           observedEmail = identity.email;
           observedVia = 'oauth-account';
         }
+        if (identity.accountUuid) {
+          observedUuid = identity.accountUuid;
+        }
       }
-      if (!observedEmail) {
-        recordEvent({
-          actor,
-          action: 'sync-skip',
-          alias,
-          alias_email: expectedEmail,
-          observed_email: null,
-          http_status: observedStatus,
-          outcome: 'skipped:identity-unverified',
-          trigger,
-        });
-        return { synced: false, reason: 'identity could not be verified', alias };
-      }
-      if (observedEmail !== expectedEmail) {
-        recordEvent({
-          actor,
-          action: 'sync-skip',
-          alias,
-          alias_email: expectedEmail,
-          observed_email: observedEmail,
-          observed_via: observedVia,
-          http_status: observedStatus,
-          outcome: 'skipped:identity-mismatch',
-          trigger,
-        });
-        return { synced: false, reason: 'identity mismatch', alias };
+      // UUID check (hard) — if a pin exists and we can't verify it, abort.
+      if (pinnedAccountUuid) {
+        if (!observedUuid) {
+          recordEvent({
+            actor,
+            action: 'sync-skip',
+            alias,
+            alias_email: expectedEmail,
+            pinned_uuid: pinnedAccountUuid,
+            observed_uuid: null,
+            http_status: observedStatus,
+            outcome: 'skipped:uuid-unverified',
+            trigger,
+          });
+          return { synced: false, reason: 'uuid could not be verified', alias };
+        }
+        if (observedUuid !== pinnedAccountUuid) {
+          recordEvent({
+            actor,
+            action: 'identity-pin-broken',
+            alias,
+            alias_email: expectedEmail,
+            pinned_uuid: pinnedAccountUuid,
+            observed_uuid: observedUuid,
+            observed_email: observedEmail,
+            outcome: 'sync-aborted',
+            trigger,
+          });
+          recordEvent({
+            actor,
+            action: 'sync-skip',
+            alias,
+            alias_email: expectedEmail,
+            pinned_uuid: pinnedAccountUuid,
+            observed_uuid: observedUuid,
+            observed_email: observedEmail,
+            outcome: 'skipped:uuid-mismatch',
+            trigger,
+          });
+          return { synced: false, reason: 'uuid mismatch', alias };
+        }
+        // UUID matched — trust and continue. No email check needed.
+      } else {
+        // No UUID pin yet — fall back to email check.
+        if (!observedEmail) {
+          recordEvent({
+            actor,
+            action: 'sync-skip',
+            alias,
+            alias_email: expectedEmail,
+            observed_email: null,
+            http_status: observedStatus,
+            outcome: 'skipped:identity-unverified',
+            trigger,
+          });
+          return { synced: false, reason: 'identity could not be verified', alias };
+        }
+        if (observedEmail !== expectedEmail) {
+          recordEvent({
+            actor,
+            action: 'sync-skip',
+            alias,
+            alias_email: expectedEmail,
+            observed_email: observedEmail,
+            observed_via: observedVia,
+            http_status: observedStatus,
+            outcome: 'skipped:identity-mismatch',
+            trigger,
+          });
+          return { synced: false, reason: 'identity mismatch', alias };
+        }
       }
     }
 

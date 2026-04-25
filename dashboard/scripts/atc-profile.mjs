@@ -989,11 +989,36 @@ async function cmdAdd(alias) {
     }
   }
 
+  // Account UUID is a stable, server-assigned identifier. Emails can be
+  // reused across accounts (rare but possible) — UUIDs cannot. Pinning here
+  // turns our identity guarantee from a soft "string match" into a hard
+  // "server-issued GUID match" every future read can verify against.
+  const observedAccountUuid = typeof authState?.oauthAccount?.accountUuid === 'string' && authState.oauthAccount.accountUuid.trim()
+    ? authState.oauthAccount.accountUuid.trim()
+    : null;
+
   // Existing alias can be refreshed in-place, but do not silently rebind to a
-  // different account email.
+  // different account. Check UUID first (hard), fall back to email (soft) for
+  // existing profiles from before UUID pinning was introduced.
   if (existingProfile) {
+    const pinnedUuid = typeof existingProfile.accountUuid === 'string' ? existingProfile.accountUuid.trim() : '';
     const existingEmail = String(existingProfile.email || '').trim().toLowerCase();
-    if (existingEmail && existingEmail !== normalizedEmail) {
+    if (pinnedUuid && observedAccountUuid && pinnedUuid !== observedAccountUuid) {
+      recordEvent({
+        actor: 'add',
+        action: 'identity-pin-broken',
+        alias,
+        trace_id: traceId,
+        pinned_uuid: pinnedUuid,
+        observed_uuid: observedAccountUuid,
+        outcome: 'add-rejected',
+      });
+      die(
+        `Profile "${alias}" is pinned to account UUID ${pinnedUuid}, but current login is UUID ${observedAccountUuid}.\n` +
+        `Use a different alias, or remove "${alias}" first to rebind it.`
+      );
+    }
+    if (!pinnedUuid && existingEmail && existingEmail !== normalizedEmail) {
       die(
         `Profile "${alias}" is bound to ${existingEmail}, but current login is ${normalizedEmail}.\n` +
         `Use a different alias, or remove "${alias}" first to rebind it.`
@@ -1008,6 +1033,12 @@ async function cmdAdd(alias) {
     ...(existingProfile && typeof existingProfile === 'object' ? existingProfile : {}),
     displayName: alias,
     ...(normalizedEmail ? { email: normalizedEmail } : {}),
+    ...(observedAccountUuid ? {
+      accountUuid: observedAccountUuid,
+      accountUuidPinnedAt: existingProfile?.accountUuid === observedAccountUuid
+        ? (existingProfile.accountUuidPinnedAt || new Date().toISOString())
+        : new Date().toISOString(),
+    } : {}),
     authState,
     webAuth,
     codexbarToken: {
@@ -1020,6 +1051,18 @@ async function cmdAdd(alias) {
     createdAt: existingProfile?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+  if (observedAccountUuid && (!existingProfile?.accountUuid || existingProfile.accountUuid !== observedAccountUuid)) {
+    recordEvent({
+      actor: 'add',
+      action: 'identity-pin-set',
+      alias,
+      trace_id: traceId,
+      account_uuid: observedAccountUuid,
+      observed_email: normalizedEmail,
+      previous_uuid: existingProfile?.accountUuid || null,
+      outcome: 'ok',
+    });
+  }
   // `add` represents "register what I am currently logged into right now".
   // Make the newly added profile active immediately to match CLI + web state.
   catalog.active = alias;
@@ -1314,6 +1357,63 @@ function switchProfile(alias, options = {}) {
     }
   }
   const targetObservedEmail = String(authState?.authStatus?.email || '').trim().toLowerCase();
+  const targetObservedUuid = typeof authState?.oauthAccount?.accountUuid === 'string'
+    ? authState.oauthAccount.accountUuid.trim()
+    : '';
+  const targetPinnedUuid = typeof targetProfile?.accountUuid === 'string'
+    ? targetProfile.accountUuid.trim()
+    : '';
+
+  // UUID check is the HARD identity gate: accounts never share UUIDs, so a
+  // mismatch is proof of contamination. When the target has a pinned UUID we
+  // must match it exactly or abort — never fall back to email if UUIDs
+  // disagree. If the pin doesn't exist yet (profile predates UUID pinning),
+  // fall through to the email check and opportunistically set the pin below.
+  if (targetPinnedUuid) {
+    if (!targetObservedUuid) {
+      recordEvent({
+        actor: 'switch',
+        action: 'switch-abort',
+        alias,
+        switch_id: switchId,
+        pinned_uuid: targetPinnedUuid,
+        observed_uuid: null,
+        outcome: 'target-uuid-unverified',
+      });
+      die(
+        `Refusing switch: profile "${alias}" is pinned to UUID ${targetPinnedUuid}, but /account did not return a UUID.\n` +
+        `No keychain or catalog changes were applied.\n` +
+        `Recovery: atc-profile rotate ${alias}`
+      );
+    }
+    if (targetObservedUuid !== targetPinnedUuid) {
+      recordEvent({
+        actor: 'switch',
+        action: 'identity-pin-broken',
+        alias,
+        switch_id: switchId,
+        pinned_uuid: targetPinnedUuid,
+        observed_uuid: targetObservedUuid,
+        observed_email: targetObservedEmail,
+        expected_email: targetExpectedEmail,
+        outcome: 'switch-abort',
+      });
+      recordEvent({
+        actor: 'switch',
+        action: 'switch-abort',
+        alias,
+        switch_id: switchId,
+        pinned_uuid: targetPinnedUuid,
+        observed_uuid: targetObservedUuid,
+        outcome: 'target-uuid-mismatch',
+      });
+      die(
+        `Refusing switch: profile "${alias}" is pinned to UUID ${targetPinnedUuid}, but loaded credential is UUID ${targetObservedUuid}.\n` +
+        `This is proof of credential contamination. No keychain or catalog changes were applied.\n` +
+        `Recovery: atc-profile rotate ${alias}`
+      );
+    }
+  }
   const targetIdentity = validateAliasIdentity(targetExpectedEmail, targetObservedEmail);
   if (!targetIdentity.ok && targetIdentity.reason === 'mismatch') {
     recordEvent({
@@ -1353,6 +1453,23 @@ function switchProfile(alias, options = {}) {
     if (!profile.email && authState?.authStatus?.email) {
       profile.email = authState.authStatus.email;
     }
+    // Opportunistic backfill for profiles that predate UUID pinning: now
+    // that we've just verified email identity and have a live UUID in hand,
+    // pin it so future switches use the stronger UUID check.
+    if (!profile.accountUuid && targetObservedUuid) {
+      profile.accountUuid = targetObservedUuid;
+      profile.accountUuidPinnedAt = new Date().toISOString();
+      recordEvent({
+        actor: 'switch',
+        action: 'identity-pin-set',
+        alias,
+        switch_id: switchId,
+        account_uuid: targetObservedUuid,
+        observed_email: targetObservedEmail,
+        reason: 'backfill-on-switch',
+        outcome: 'ok',
+      });
+    }
   }
 
   // 2.5 Sync-active: freeze the live keychain back to <active>.cred before we
@@ -1390,28 +1507,62 @@ function switchProfile(alias, options = {}) {
 
       if (expectedEmail) {
         let observedEmail = null;
+        let observedUuid = null;
+        const pinnedUuid = typeof activeProfile?.accountUuid === 'string' ? activeProfile.accountUuid.trim() : '';
         try {
           const activeAuthState = fetchClaudeAccountStateFromBlob(currentBlob);
           observedEmail = String(activeAuthState?.authStatus?.email || '').trim().toLowerCase();
+          observedUuid = typeof activeAuthState?.oauthAccount?.accountUuid === 'string'
+            ? activeAuthState.oauthAccount.accountUuid.trim()
+            : null;
+          const uuidVerdict = pinnedUuid
+            ? (observedUuid === pinnedUuid ? 'uuid-match' : 'uuid-mismatch')
+            : null;
+          const emailVerdict = observedEmail === expectedEmail ? 'match' : 'mismatch';
           recordEvent({
             actor: 'switch',
             action: 'identity-check',
             alias: catalog.active,
+            switch_id: switchId,
             expected_email: expectedEmail,
             observed_email: observedEmail,
-            outcome: observedEmail === expectedEmail ? 'match' : 'mismatch',
+            pinned_uuid: pinnedUuid || null,
+            observed_uuid: observedUuid,
+            outcome: uuidVerdict || emailVerdict,
           });
+          if (uuidVerdict === 'uuid-mismatch') {
+            recordEvent({
+              actor: 'switch',
+              action: 'identity-pin-broken',
+              alias: catalog.active,
+              switch_id: switchId,
+              pinned_uuid: pinnedUuid,
+              observed_uuid: observedUuid,
+              outcome: 'sync-active-skipped',
+            });
+          }
         } catch (error) {
           recordEvent({ actor: 'switch', action: 'identity-check', alias: catalog.active, outcome: `error:${error?.httpStatus || 'unknown'}`, detail: error.message });
           console.warn(`  Warning: could not verify keychain identity for "${catalog.active}": ${error.message}`);
           console.warn(`  Skipping cred save to avoid drift risk.`);
         }
 
-        if (observedEmail && observedEmail === expectedEmail) {
-          saveCredential(catalog.active, currentBlob, { actor: 'switch', reason: 'sync-active-save', source: 'keychain-export' });
+        // Hard gate: if a pin exists, UUID must match. Email match alone is
+        // not enough — email can be re-used across accounts, UUID cannot.
+        const uuidGateOk = pinnedUuid ? (observedUuid && observedUuid === pinnedUuid) : true;
+        if (uuidGateOk && observedEmail && observedEmail === expectedEmail) {
+          saveCredential(catalog.active, currentBlob, { actor: 'switch', reason: 'sync-active-save', source: 'keychain-export', traceId: switchId });
           if (activeProfile) {
             activeProfile.updatedAt = new Date().toISOString();
+            // Opportunistic pin backfill on the outgoing side.
+            if (!activeProfile.accountUuid && observedUuid) {
+              activeProfile.accountUuid = observedUuid;
+              activeProfile.accountUuidPinnedAt = new Date().toISOString();
+            }
           }
+        } else if (!uuidGateOk) {
+          console.warn(`  Warning: Keychain UUID ${observedUuid} does not match pinned UUID ${pinnedUuid} for "${catalog.active}".`);
+          console.warn(`  Skipping cred save to avoid contamination.`);
         } else if (observedEmail && observedEmail !== expectedEmail) {
           console.warn(`  Warning: Keychain holds ${observedEmail}, but active profile "${catalog.active}" is bound to ${expectedEmail}.`);
           console.warn(`  Skipping cred save to avoid clobbering with wrong account's credentials.`);
@@ -1717,11 +1868,33 @@ async function cmdRotate(alias) {
     }
   }
 
-  // Guard: refuse if re-registering <alias> under a different email than its existing binding
+  const observedUuid = typeof newAuthState?.oauthAccount?.accountUuid === 'string'
+    ? newAuthState.oauthAccount.accountUuid.trim()
+    : null;
+
+  // Guard: refuse if re-registering <alias> under a different account than
+  // its existing pin. UUID takes precedence; email is a soft fallback for
+  // profiles that predate UUID pinning.
   const existingProfile = catalog.profiles?.[alias] || null;
   if (existingProfile) {
+    const pinnedUuid = typeof existingProfile.accountUuid === 'string' ? existingProfile.accountUuid.trim() : '';
     const existingEmail = String(existingProfile.email || '').trim().toLowerCase();
-    if (existingEmail && existingEmail !== observedEmail) {
+    if (pinnedUuid && observedUuid && pinnedUuid !== observedUuid) {
+      clearRotateLock(catalog, rotateId, 'alias-rebind-uuid-mismatch');
+      recordEvent({
+        actor: 'rotate',
+        action: 'identity-pin-broken',
+        alias,
+        rotate_id: rotateId,
+        pinned_uuid: pinnedUuid,
+        observed_uuid: observedUuid,
+        outcome: 'rotate-rejected',
+      });
+      console.error(`✗ Profile "${alias}" is pinned to UUID ${pinnedUuid}, but new login is UUID ${observedUuid}.`);
+      console.error(`  Use a different alias, or remove "${alias}" first to rebind it.`);
+      process.exit(1);
+    }
+    if (!pinnedUuid && existingEmail && existingEmail !== observedEmail) {
       clearRotateLock(catalog, rotateId, 'alias-rebind-mismatch');
       console.error(`✗ Profile "${alias}" is bound to ${existingEmail}, but new login is ${observedEmail}.`);
       console.error(`  Use a different alias, or remove "${alias}" first to rebind it.`);
@@ -1734,13 +1907,19 @@ async function cmdRotate(alias) {
   const oauthAccessToken = extractClaudeOauthAccessToken(newBlob);
   const codexbarToken = oauthAccessToken || webAuth.sessionKey;
 
-  saveCredential(alias, newBlob, { actor: 'rotate', reason: existingProfile ? 're-register' : 'register', source: 'keychain-export-post-login' });
+  saveCredential(alias, newBlob, { actor: 'rotate', reason: existingProfile ? 're-register' : 'register', source: 'keychain-export-post-login', traceId: rotateId });
   const codexbarAccountLabel = syncCodexbarTokenAccount(alias, codexbarToken, { setActive: true, webAuth });
 
   catalog.profiles[alias] = {
     ...(existingProfile && typeof existingProfile === 'object' ? existingProfile : {}),
     displayName: alias,
     email: observedEmail,
+    ...(observedUuid ? {
+      accountUuid: observedUuid,
+      accountUuidPinnedAt: existingProfile?.accountUuid === observedUuid
+        ? (existingProfile.accountUuidPinnedAt || new Date().toISOString())
+        : new Date().toISOString(),
+    } : {}),
     authState: newAuthState,
     webAuth,
     codexbarToken: {
@@ -1758,6 +1937,18 @@ async function cmdRotate(alias) {
   saveCatalog(catalog);
   clearRotateLock(catalog, rotateId, 'ok');
 
+  if (observedUuid && (!existingProfile?.accountUuid || existingProfile.accountUuid !== observedUuid)) {
+    recordEvent({
+      actor: 'rotate',
+      action: 'identity-pin-set',
+      alias,
+      rotate_id: rotateId,
+      account_uuid: observedUuid,
+      observed_email: observedEmail,
+      previous_uuid: existingProfile?.accountUuid || null,
+      outcome: 'ok',
+    });
+  }
   recordEvent({
     actor: 'rotate',
     action: 'rotate-complete',
@@ -1765,6 +1956,7 @@ async function cmdRotate(alias) {
     from_alias: activeAlias,
     rotate_id: rotateId,
     observed_email: observedEmail,
+    observed_uuid: observedUuid,
     re_registered: !!existingProfile,
     outcome: 'ok',
   });
