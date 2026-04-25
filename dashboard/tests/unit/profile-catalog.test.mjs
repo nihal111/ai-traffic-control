@@ -12,10 +12,18 @@ const ORIGINAL_HOME = process.env.HOME;
 process.env.HOME = TEST_HOME;
 const TEST_PROFILES_DIR = path.join(TEST_HOME, '.claude-profiles');
 fs.mkdirSync(TEST_PROFILES_DIR, { recursive: true });
+// Also pin ATC_DASHBOARD_RUNTIME_DIR to a temp path so credential events
+// emitted by the catalog (via recordEvent) don't fall back to the cwd-derived
+// default and create a stray dashboard/dashboard/runtime/logs/ on every run.
+const TEST_RUNTIME = fs.mkdtempSync(path.join(os.tmpdir(), 'atc-profile-catalog-runtime-'));
+const ORIGINAL_RUNTIME = process.env.ATC_DASHBOARD_RUNTIME_DIR;
+process.env.ATC_DASHBOARD_RUNTIME_DIR = TEST_RUNTIME;
 
 process.on('exit', () => {
   try { fs.rmSync(TEST_HOME, { recursive: true, force: true }); } catch { /* ignore */ }
+  try { fs.rmSync(TEST_RUNTIME, { recursive: true, force: true }); } catch { /* ignore */ }
   if (ORIGINAL_HOME !== undefined) process.env.HOME = ORIGINAL_HOME;
+  if (ORIGINAL_RUNTIME !== undefined) process.env.ATC_DASHBOARD_RUNTIME_DIR = ORIGINAL_RUNTIME;
 });
 
 const {
