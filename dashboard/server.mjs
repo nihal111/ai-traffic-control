@@ -66,7 +66,7 @@ const SHELL_HOOK_WRITER = process.env.SHELL_HOOK_WRITER || path.join(__dirname, 
 const CLIENT_PROFILE_POLLING_JS = loadClientModuleSource(path.join(__dirname, 'modules', 'profile-polling.mjs'));
 const ENABLE_SHELL_HOOKS = process.env.ENABLE_SHELL_HOOKS !== '0';
 const SOURCE_USER_ZSHRC = process.env.ATC_SOURCE_USER_ZSHRC !== '0';
-const ALLOW_SSH_DASHBOARD = process.env.ATC_ALLOW_SSH_DASHBOARD === '1';
+const STRICT_SSH_DASHBOARD = process.env.ATC_STRICT_SSH_DASHBOARD === '1';
 const USER_ZSHENV_PATH = process.env.ATC_USER_ZSHENV || path.join(process.env.HOME || '', '.zshenv');
 const USER_ZPROFILE_PATH = process.env.ATC_USER_ZPROFILE || path.join(process.env.HOME || '', '.zprofile');
 const USER_ZSHRC_PATH = process.env.ATC_USER_ZSHRC || path.join(process.env.HOME || '', '.zshrc');
@@ -103,12 +103,19 @@ function sshContextSummary() {
   return fields.map(([key, value]) => `${key}=${value}`).join(' ');
 }
 
-function assertDashboardAllowedEnvironment() {
-  if (ALLOW_SSH_DASHBOARD) return;
-  if (!sshContextSummary()) return;
-  throw new Error(
-    `dashboard refuses to start in an SSH environment by default because local cloud profile switching depends on a local login context. ` +
-      `Unset SSH startup or rerun with ATC_ALLOW_SSH_DASHBOARD=1 to override.`
+function logDashboardEnvironmentWarnings() {
+  const sshContext = sshContextSummary();
+  if (!sshContext) return;
+  if (STRICT_SSH_DASHBOARD) {
+    throw new Error(
+      `dashboard refuses to start in an SSH environment because ATC_STRICT_SSH_DASHBOARD=1 is set. ` +
+        `Local cloud profile switching may depend on a local login context.`
+    );
+  }
+  console.warn(
+    `warning: dashboard detected SSH environment (${sshContext}). ` +
+      `Cloud profile switching may not behave like a local login session. ` +
+      `Set ATC_STRICT_SSH_DASHBOARD=1 if you want this to fail closed.`
   );
 }
 const TEMPLATE_NEW_BRAINSTORM = 'new_brainstorm';
@@ -6029,7 +6036,7 @@ async function loadDashboardCss() {
 }
 
 async function startDashboardServer() {
-  assertDashboardAllowedEnvironment();
+  logDashboardEnvironmentWarnings();
   loadUsageRateCacheFromDisk();
   usageCache = { value: buildBootUsageSummaryFromCaches(), fetchedAt: 0, pending: null };
   await Promise.all([loadState(), loadDashboardCss()]);
