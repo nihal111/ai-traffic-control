@@ -1104,8 +1104,8 @@ function shSingle(str) {
 }
 
 function shellWithHookEnvCommand(shellConfig) {
-  if (!shellConfig?.zdotdir) return `${SHELL_BIN} -il`;
-  return `env ZDOTDIR=${shSingle(shellConfig.zdotdir)} ATC_ZDOTDIR=${shSingle(shellConfig.zdotdir)} ${shSingle(SHELL_BIN)} -il`;
+  if (!shellConfig?.zdotdir) return `env -u NO_COLOR ${shSingle(SHELL_BIN)} -il`;
+  return `env -u NO_COLOR ZDOTDIR=${shSingle(shellConfig.zdotdir)} ATC_ZDOTDIR=${shSingle(shellConfig.zdotdir)} ${shSingle(SHELL_BIN)} -il`;
 }
 
 async function tmuxWindowExists(sessionName, windowName) {
@@ -1600,6 +1600,14 @@ async function spawnSessionBackend(slot, sessionState, runtimeEnv, shellConfig) 
     : [SHELL_BIN, '-il'];
 
   const out = fsSync.openSync(logFileForBackend(slot.backendPort), 'a');
+  const childEnv = {
+    ...process.env,
+    ...runtimeEnv,
+    ...(ENABLE_SHELL_HOOKS && shellConfig?.zdotdir ? { ZDOTDIR: shellConfig.zdotdir, ATC_ZDOTDIR: shellConfig.zdotdir } : {}),
+    DASH_SLOT_NAME: slot.name,
+    ATC_TMUX_SESSION: tmuxSessionName,
+  };
+  delete childEnv.NO_COLOR;
   const child = spawn(
     TTYD_BIN,
     [
@@ -1621,13 +1629,7 @@ async function spawnSessionBackend(slot, sessionState, runtimeEnv, shellConfig) 
       cwd: slotWorkdir,
       detached: true,
       stdio: ['ignore', out, out],
-      env: {
-        ...process.env,
-        ...runtimeEnv,
-        ...(ENABLE_SHELL_HOOKS && shellConfig?.zdotdir ? { ZDOTDIR: shellConfig.zdotdir, ATC_ZDOTDIR: shellConfig.zdotdir } : {}),
-        DASH_SLOT_NAME: slot.name,
-        ATC_TMUX_SESSION: tmuxSessionName,
-      },
+      env: childEnv,
     }
   );
 
