@@ -501,24 +501,36 @@ function keychainDelete({ actor = 'atc-profile', reason = null, traceId = null }
 
 function keychainImport(blob, { actor = 'atc-profile', alias = null, reason = null, traceId = null } = {}) {
   const parsed = parseCredentialBlob(blob);
-  execFileSync('security', [
-    'add-generic-password',
-    '-s', KEYCHAIN_SERVICE,
-    '-a', os.userInfo().username,
-    '-w', blob,
-    '-U',           // update if already exists (safety net)
-  ], { stdio: 'ignore' });
-  recordEvent({
+  const eventBase = {
     actor,
     action: 'keychain-write',
     alias,
     rt_fp: fingerprint(parsed?.claudeAiOauth?.refreshToken),
     at_fp: fingerprint(parsed?.claudeAiOauth?.accessToken),
     expires_at: parsed?.claudeAiOauth?.expiresAt ? new Date(parsed.claudeAiOauth.expiresAt).toISOString() : null,
-    outcome: 'ok',
     reason,
     trace_id: traceId,
-  });
+  };
+  try {
+    execFileSync('security', [
+      'add-generic-password',
+      '-s', KEYCHAIN_SERVICE,
+      '-a', os.userInfo().username,
+      '-w', blob,
+      '-U',           // update if already exists (atomic replace; preserves prior credential on failure)
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  } catch (err) {
+    const stderr = (err.stderr ? err.stderr.toString() : '').trim();
+    const detail = stderr || err.message || 'security add-generic-password failed';
+    recordEvent({ ...eventBase, outcome: `error:${err.status ?? 'spawn'}`, detail });
+    const hint = /interaction is not allowed|user interaction is not allowed|errSecInteractionNotAllowed/i.test(detail)
+      ? '\nThe login keychain is locked. Unlock the Mac (or run `security unlock-keychain`) and retry.'
+      : '';
+    const e = new Error(`security add-generic-password failed: ${detail}${hint}`);
+    e.securityStderr = stderr;
+    throw e;
+  }
+  recordEvent({ ...eventBase, outcome: 'ok' });
 }
 
 // ── profile credential files ─────────────────────────────────────────────────
@@ -869,9 +881,10 @@ function switchProfile(alias, options = {}) {
   });
 
   // NOTE: sync-active used to run here, at the top of switchProfile. It has
-  // been moved down to just before keychainDelete so we capture the keychain
-  // as close as possible to the swap — narrowing the window in which another
-  // Claude process could rotate the RT between capture and swap.
+  // been moved down to just before the keychain swap so we capture the
+  // outgoing keychain as close as possible to the swap — narrowing the window
+  // in which another Claude process could rotate the RT between capture and
+  // swap.
 
   // 1. Load the target credential. Snapshots can drift if Claude Code rotated
   //    the RT after our last sync; if so, the AT in the blob may already be
@@ -1153,9 +1166,29 @@ function switchProfile(alias, options = {}) {
     }
   }
 
-  // 3. Swap Keychain entry.
-  keychainDelete({ actor: 'switch', reason: `pre-swap-to-${alias}` });
-  keychainImport(targetBlob, { actor: 'switch', alias, reason: 'final-swap' });
+  // 3. Swap Keychain entry. We write with -U (atomic update-in-place) instead
+  //    of delete-then-add, because the latter is non-atomic: if the add fails
+  //    after the delete (e.g. the login keychain is locked because the Mac is
+  //    asleep), the keychain is left empty and Claude Code will demand /login.
+  //    With -U, a failed write preserves the previous credential and the swap
+  //    is fully recoverable.
+  try {
+    keychainImport(targetBlob, { actor: 'switch', alias, reason: 'final-swap', traceId: switchId });
+  } catch (error) {
+    recordEvent({
+      actor: 'switch',
+      action: 'switch-abort',
+      alias,
+      switch_id: switchId,
+      outcome: 'keychain-write-failed',
+      detail: error.message,
+    });
+    die(
+      `Switch to "${alias}" aborted: could not write credential to keychain.\n` +
+      `${error.message}\n` +
+      `The previous credential is still in place; no Claude sessions were disturbed.`
+    );
+  }
   applyClaudeGlobalAuthState(authState);
   const token = resolveCodexbarTokenForProfile(catalog.profiles?.[alias], targetBlob);
   if (token) {
