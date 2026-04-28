@@ -9,6 +9,12 @@ dashboard/state/
 dashboard/runtime/
 dashboard/node_modules/
 dashboard/test-results/
+dashboard/.logs/
+# Stray runtime tree created when the dashboard launches with cwd=dashboard/
+# (credential-events.mjs resolves runtime via process.cwd()). Real fix is to
+# anchor the runtime path to the repo root; ignored here so it stops showing
+# up as untracked.
+dashboard/dashboard/
 data/
 .DS_Store
 **/.DS_Store
