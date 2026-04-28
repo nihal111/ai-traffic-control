@@ -5058,6 +5058,7 @@ function renderCalendarPage() {
       } else {
         renderWeekTimeline(data, container);
       }
+      container.classList.remove('loading');
       updateBriefDate();
     }
 
@@ -5265,6 +5266,7 @@ function renderCalendarPage() {
     }
 
     function renderSlots(data) {
+      const container = document.getElementById('slotsContent');
       const slotsToday = (data.slots_today || []).slice(0, 5);
       let slotsHtml = '';
       if (slotsToday.length > 0) {
@@ -5281,14 +5283,17 @@ function renderCalendarPage() {
       } else {
         slotsHtml = '<div class="empty-state">No open slots today</div>';
       }
-      document.getElementById('slotsContent').innerHTML = slotsHtml;
+      container.innerHTML = slotsHtml;
+      container.classList.remove('loading');
     }
 
     function renderBacklog(data) {
+      const container = document.getElementById('backlogContent');
       const items = (data.backlog || []).slice();
       const stale = new Set((data.stale || []).map(i => i.id));
       if (items.length === 0) {
-        document.getElementById('backlogContent').innerHTML = '<div class="empty-state">No backlog items</div>';
+        container.innerHTML = '<div class="empty-state">No backlog items</div>';
+        container.classList.remove('loading');
         return;
       }
       // Sort: high priority first, then oldest created first
@@ -5324,7 +5329,8 @@ function renderCalendarPage() {
         </div>\`;
       }
       html += '</div>';
-      document.getElementById('backlogContent').innerHTML = html;
+      container.innerHTML = html;
+      container.classList.remove('loading');
     }
 
     function renderAll(data) {

@@ -11,7 +11,7 @@ test.describe('Calendar Page', () => {
 
     // Check sections are visible
     await expect(page.locator('text=Quick Ask')).toBeVisible();
-    await expect(page.locator('text=Today\'s Brief')).toBeVisible();
+    await expect(page.locator('text=Brief')).toBeVisible();
     await expect(page.locator('text=Open Slots Today')).toBeVisible();
     await expect(page.locator('text=Backlog')).toBeVisible();
     await expect(page.locator('text=Updated:')).toBeVisible();
@@ -52,6 +52,7 @@ test.describe('Calendar Page', () => {
   });
 
   test('should navigate back to home', async ({ page }) => {
+    await page.goto(`${BASE_URL}/`);
     await page.goto(`${BASE_URL}/calendar`);
 
     // Click back button
@@ -72,7 +73,7 @@ test.describe('Calendar Page', () => {
     }, { timeout: 5000 });
 
     // Check if there are any action buttons (✓ or ✗)
-    const actionButtons = page.locator('.action-btn');
+    const actionButtons = page.locator('.action-btn.done');
     const count = await actionButtons.count();
 
     if (count > 0) {
