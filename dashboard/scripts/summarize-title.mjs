@@ -42,6 +42,16 @@ function log(msg) {
     fs.mkdirSync(LOG_DIR, { recursive: true });
     const ts = new Date().toISOString();
     fs.appendFileSync(LOG_FILE, `[${ts}] [${SLOT_NAME}] ${msg}\n`);
+
+    // Keep log file under ~5MB
+    const stats = fs.statSync(LOG_FILE);
+    if (stats.size > 5 * 1024 * 1024) {
+      const content = fs.readFileSync(LOG_FILE, 'utf8');
+      const lines = content.split('\n');
+      if (lines.length > 1000) {
+        fs.writeFileSync(LOG_FILE, lines.slice(-1000).join('\n') + '\n', 'utf8');
+      }
+    }
   } catch { /* best-effort */ }
 }
 
@@ -368,8 +378,14 @@ for (const model of attempts) {
   log(`gemini exited code=${result.code} stdout_len=${result.stdout.length} stderr_len=${result.stderr.length} first_line="${firstLine}" model=${model}`);
 
   if (String(result.stderr || '').trim()) {
-    const stderrPreview = String(result.stderr || '').trim().split('\n').slice(0, 5).join(' | ');
-    log(`gemini stderr: ${stderrPreview}`);
+    let stderrPreview = String(result.stderr || '').trim().split('\n').slice(0, 5).join(' | ');
+    // Filter out noisy keytar/keychain warnings
+    stderrPreview = stderrPreview
+      .replace(/Keychain initialization encountered an error:.*?Using FileKeychain fallback for secure storage\./g, '[keychain fallback active]')
+      .trim();
+    if (stderrPreview) {
+      log(`gemini stderr: ${stderrPreview}`);
+    }
   }
 
   if (result.code !== 0) {
