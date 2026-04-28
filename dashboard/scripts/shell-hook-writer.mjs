@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 
 // ── Summarizer trigger config ──────────────────────────────────
-const SUMMARY_TRIGGER_INTERVAL = Number(process.env.ATC_SUMMARY_TRIGGER_INTERVAL || 1);
+const SUMMARY_TRIGGER_INTERVAL = Number(process.env.ATC_SUMMARY_TRIGGER_INTERVAL || 5);
 const SUMMARIZER_SCRIPT = path.join(path.dirname(new URL(import.meta.url).pathname), 'summarize-title.mjs');
 const STATE_FILE = process.env.SESSIONS_STATE_FILE || path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'state', 'sessions-state.json');
 
