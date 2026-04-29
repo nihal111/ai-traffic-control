@@ -2,15 +2,8 @@ import { test, expect } from '@playwright/test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
-
-function slotSlug(name) {
-  return String(name || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
+import { spawn } from 'node:child_process';
+import { slotSlug, safeKillTmuxSession } from './harness.mjs';
 
 async function waitFor(fn, timeoutMs = 12000, stepMs = 200) {
   const start = Date.now();
@@ -28,7 +21,7 @@ async function waitFor(fn, timeoutMs = 12000, stepMs = 200) {
 }
 
 const DASHBOARD_PORT = 19118;
-const SESSION_NAMES = ['Alpha', 'Bravo', 'Charlie'];
+const SESSION_NAMES = ['e2e-VisAlpha', 'e2e-VisBravo', 'e2e-VisCharlie'];
 const SLOT_PORTS = [
   { publicPort: 17111, backendPort: 18111 },
   { publicPort: 17112, backendPort: 18112 },
@@ -76,7 +69,8 @@ test.beforeAll(async () => {
       ENABLE_TMUX_BACKEND: '1',
       ATC_AUTO_LAUNCH_PROVIDER: '0',
       ATC_DISABLE_CODEX_BAR: '1',
-      REFRESH_MS: '2000',
+      REFRESH_MS: '500',
+      SPAWN_GRACE_MS: '500',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -92,14 +86,7 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   for (const name of SESSION_NAMES) {
-    try {
-      execFileSync('tmux', ['kill-session', '-t', slotSlug(name)], {
-        stdio: 'ignore',
-        timeout: 3000,
-      });
-    } catch {
-      // ignore
-    }
+    safeKillTmuxSession(slotSlug(name));
   }
 
   if (dashboardProc && !dashboardProc.killed) {
@@ -115,27 +102,27 @@ test.afterAll(async () => {
 
 test('only target scientist card remounts while spawning', async ({ page }) => {
   await page.goto(`http://127.0.0.1:${DASHBOARD_PORT}`);
-  await page.waitForSelector('.session.tap[data-name="Alpha"]');
-  await page.waitForSelector('.session.tap[data-name="Bravo"]');
-  await page.waitForSelector('.session.tap[data-name="Charlie"]');
+  await page.waitForSelector('.session.tap[data-name="e2e-VisAlpha"]');
+  await page.waitForSelector('.session.tap[data-name="e2e-VisBravo"]');
+  await page.waitForSelector('.session.tap[data-name="e2e-VisCharlie"]');
 
   await page.evaluate(() => {
-    window.__atcAlphaNode = document.querySelector('.session.tap[data-name="Alpha"]');
-    window.__atcCharlieNode = document.querySelector('.session.tap[data-name="Charlie"]');
+    window.__atcAlphaNode = document.querySelector('.session.tap[data-name="e2e-VisAlpha"]');
+    window.__atcCharlieNode = document.querySelector('.session.tap[data-name="e2e-VisCharlie"]');
   });
 
-  await page.locator('.session.tap[data-name="Bravo"]').click();
+  await page.locator('.session.tap[data-name="e2e-VisBravo"]').click();
   await page.waitForSelector('#intent-modal.open');
   await page.click('#intent-confirm');
 
   await page.waitForFunction(() => {
-    const bravo = document.querySelector('.session.tap[data-name="Bravo"]');
+    const bravo = document.querySelector('.session.tap[data-name="e2e-VisBravo"]');
     return !!bravo && bravo.getAttribute('data-spawning') === '1';
   });
 
   const identity = await page.evaluate(() => {
-    const alphaNow = document.querySelector('.session.tap[data-name="Alpha"]');
-    const charlieNow = document.querySelector('.session.tap[data-name="Charlie"]');
+    const alphaNow = document.querySelector('.session.tap[data-name="e2e-VisAlpha"]');
+    const charlieNow = document.querySelector('.session.tap[data-name="e2e-VisCharlie"]');
     return {
       alphaSame: alphaNow === window.__atcAlphaNode,
       charlieSame: charlieNow === window.__atcCharlieNode,

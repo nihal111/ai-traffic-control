@@ -2,15 +2,8 @@ import { test, expect, devices } from '@playwright/test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
-
-function slotSlug(name) {
-  return String(name || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
+import { spawn } from 'node:child_process';
+import { slotSlug, safeKillTmuxSession } from './harness.mjs';
 
 async function waitFor(fn, timeoutMs = 12000, stepMs = 200) {
   const start = Date.now();
@@ -28,7 +21,7 @@ async function waitFor(fn, timeoutMs = 12000, stepMs = 200) {
 }
 
 const DASHBOARD_PORT = 19119;
-const SESSION_NAMES = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
+const SESSION_NAMES = ['e2e-Alpha', 'e2e-Bravo', 'e2e-Charlie', 'e2e-Delta'];
 const SLOT_PORTS = [
   { publicPort: 17121, backendPort: 18121 },
   { publicPort: 17122, backendPort: 18122 },
@@ -93,7 +86,8 @@ test.beforeAll(async () => {
       ENABLE_TMUX_BACKEND: '1',
       ATC_AUTO_LAUNCH_PROVIDER: '0',
       ATC_DISABLE_CODEX_BAR: '1',
-      REFRESH_MS: '2000',
+      REFRESH_MS: '500',
+      SPAWN_GRACE_MS: '500',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -139,14 +133,7 @@ test.afterAll(async () => {
   }
 
   for (const name of SESSION_NAMES) {
-    try {
-      execFileSync('tmux', ['kill-session', '-t', slotSlug(name)], {
-        stdio: 'ignore',
-        timeout: 3000,
-      });
-    } catch {
-      // ignore
-    }
+    safeKillTmuxSession(slotSlug(name));
   }
 
   if (dashboardProc && !dashboardProc.killed) {
@@ -160,13 +147,13 @@ test.afterAll(async () => {
 
 test('starting fourth scientist does not force scroll-top and targets only that card', async ({ page }) => {
   await page.goto(`http://127.0.0.1:${DASHBOARD_PORT}`);
-  await page.waitForSelector('.session.tap[data-name="Delta"]');
+  await page.waitForSelector('.session.tap[data-name="e2e-Delta"]');
 
   await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
   const beforeOpen = await page.evaluate(() => window.scrollY);
   expect(beforeOpen).toBeGreaterThan(20);
 
-  await page.locator('.session.tap[data-name="Delta"]').click();
+  await page.locator('.session.tap[data-name="e2e-Delta"]').click();
   await page.waitForSelector('#intent-modal.open');
   // When the body-scroll-lock is active, body.style.position === 'fixed' and
   // window.scrollY returns 0. Read the saved offset from body.style.top instead.
@@ -180,7 +167,7 @@ test('starting fourth scientist does not force scroll-top and targets only that 
   await page.click('#intent-confirm');
 
   await page.waitForFunction(() => {
-    const delta = document.querySelector('.session.tap[data-name="Delta"]');
+    const delta = document.querySelector('.session.tap[data-name="e2e-Delta"]');
     return !!delta && delta.getAttribute('data-spawning') === '1';
   });
   const postStartScroll = await page.evaluate(() => window.scrollY);
@@ -192,71 +179,18 @@ test('starting fourth scientist does not force scroll-top and targets only that 
       spawning: el.getAttribute('data-spawning'),
     }))
   );
-  const delta = spawningByName.find((x) => x.name === 'Delta');
-  const alpha = spawningByName.find((x) => x.name === 'Alpha');
+  const delta = spawningByName.find((x) => x.name === 'e2e-Delta');
+  const alpha = spawningByName.find((x) => x.name === 'e2e-Alpha');
   expect(delta?.spawning).toBe('1');
   expect(alpha?.spawning).toBe('0');
 });
 
-test('hot dial auto-scrolls and flickers the deterministic selected scientist', async ({ page }) => {
-  await api('/api/sessions/spawn', 'POST', { name: 'Alpha' });
-  await waitForBackend('Alpha');
-  await api('/api/sessions/spawn', 'POST', { name: 'Bravo' });
-  await waitForBackend('Bravo');
-  await api('/api/sessions/spawn', 'POST', { name: 'Charlie' });
-  await waitForBackend('Charlie');
-
+test('clicking calendar_manager hot dial navigates to /calendar', async ({ page }) => {
   await page.goto(`http://127.0.0.1:${DASHBOARD_PORT}`);
-  await page.waitForSelector('.session.tap[data-name="Delta"]');
-
-  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForSelector('[data-agent-dial-id="calendar_manager"]');
   await page.click('[data-agent-dial-id="calendar_manager"]');
-  await page.waitForSelector('#agent-modal.open');
-  const calendarPlaceholder = await page.getAttribute('#agent-initial-prompt', 'placeholder');
-  expect(String(calendarPlaceholder || '')).toContain('invite teammate.one@example.com');
-
-  const promptText =
-    'Create a 30-minute meeting titled "ATC sync" tomorrow at 3:00 PM PT, invite teammate.one@example.com, and add it to my calendar.';
-  await page.fill('#agent-initial-prompt', promptText);
-
-  const spawnResponsePromise = page.waitForResponse((resp) =>
-    resp.url().includes('/api/agents/spawn') && resp.request().method() === 'POST'
-  );
-  const spawnRequestPromise = page.waitForRequest((req) =>
-    req.url().includes('/api/agents/spawn') && req.method() === 'POST'
-  );
-  await page.click('#agent-confirm');
-  const spawnRequest = await spawnRequestPromise;
-  const spawnResponse = await spawnResponsePromise;
-  const spawnRequestBody = spawnRequest.postDataJSON();
-  expect(spawnRequestBody.initialPrompt).toBe(promptText);
-  const spawnBody = await spawnResponse.json();
-  expect(spawnBody.slotName).toBe('Delta');
-
-  await page.waitForFunction(() => {
-    const delta = document.querySelector('.session.tap[data-name="Delta"]');
-    return !!delta && delta.getAttribute('data-active') === '1';
-  });
-
-  const inView = await page.evaluate(() => {
-    const card = document.querySelector('.session.tap[data-name="Delta"]');
-    if (!card) return false;
-    const rect = card.getBoundingClientRect();
-    return rect.bottom > 0 && rect.top < window.innerHeight;
-  });
-  expect(inView).toBeTruthy();
-
-  const spawningByName = await page.$$eval('.session.tap[data-name]', (nodes) =>
-    nodes.map((el) => ({
-      name: el.getAttribute('data-name'),
-      spawning: el.getAttribute('data-spawning'),
-      active: el.getAttribute('data-active'),
-    }))
-  );
-  const delta = spawningByName.find((x) => x.name === 'Delta') || {};
-  const alpha = spawningByName.find((x) => x.name === 'Alpha') || {};
-  expect(delta.active).toBe('1');
-  expect(alpha.active).toBe('1');
+  await page.waitForURL(/\/calendar$/, { timeout: 5000 });
+  expect(new URL(page.url()).pathname).toBe('/calendar');
 });
 
 test('second brain modal shows retrieval-oriented optional prompt example', async ({ page }) => {

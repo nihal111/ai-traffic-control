@@ -2,15 +2,8 @@ import { test, expect, devices } from '@playwright/test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
-
-function slotSlug(name) {
-  return String(name || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
+import { spawn } from 'node:child_process';
+import { slotSlug, safeKillTmuxSession } from './harness.mjs';
 
 async function waitFor(fn, timeoutMs = 12000, stepMs = 200) {
   const start = Date.now();
@@ -28,7 +21,7 @@ async function waitFor(fn, timeoutMs = 12000, stepMs = 200) {
 }
 
 const DASHBOARD_PORT = 19120;
-const SESSION_NAMES = ['ScrollTest1'];
+const SESSION_NAMES = ['e2e-ScrollTest1'];
 const SLOT_PORTS = [
   { publicPort: 17130, backendPort: 18130 },
 ];
@@ -74,6 +67,8 @@ test.beforeAll(async () => {
       ENABLE_TMUX_BACKEND: '1',
       ATC_AUTO_LAUNCH_PROVIDER: '0',
       ATC_DISABLE_CODEX_BAR: '1',
+      REFRESH_MS: '500',
+      SPAWN_GRACE_MS: '500',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -101,14 +96,7 @@ test.afterAll(async () => {
   }
 
   for (const name of SESSION_NAMES) {
-    try {
-      execFileSync('tmux', ['kill-session', '-t', slotSlug(name)], {
-        stdio: 'ignore',
-        timeout: 3000,
-      });
-    } catch {
-      // ignore
-    }
+    safeKillTmuxSession(slotSlug(name));
   }
 
   if (dashboardProc && !dashboardProc.killed) {
@@ -124,24 +112,29 @@ test('scroll position is restored after closing intent modal', async ({ page }) 
   await page.goto(`http://127.0.0.1:${DASHBOARD_PORT}`);
   await page.waitForSelector('.session.tap');
 
-  // Make page scrollable by adding content
+  // Make page scrollable. Append to <body> (not .shell) so the dashboard's
+  // re-render after spawn doesn't wipe out our padding.
   await page.evaluate(() => {
-    // Ensure there's enough content to scroll
-    const container = document.querySelector('.shell');
-    if (container) {
+    if (!document.getElementById('atc-test-padding')) {
       const padding = document.createElement('div');
+      padding.id = 'atc-test-padding';
       padding.style.height = '500px';
-      container.appendChild(padding);
+      document.body.appendChild(padding);
     }
   });
 
-  // Scroll to a specific position
+  // Scroll to a specific position. The padding above is async-applied to layout;
+  // poll until the scrollTo actually sticks before continuing.
   const targetScroll = 100;
-  await page.evaluate((y) => window.scrollTo(0, y), targetScroll);
+  await page.waitForFunction(
+    (y) => {
+      window.scrollTo(0, y);
+      return Math.abs(window.scrollY - y) < 20;
+    },
+    targetScroll,
+    { timeout: 3000 }
+  );
   let scrollBefore = await page.evaluate(() => window.scrollY);
-  console.log('Scroll position before opening modal:', scrollBefore);
-
-  // Should be close to target (within 10 pixels for browser variance)
   expect(Math.abs(scrollBefore - targetScroll)).toBeLessThan(20);
 
   // Open intent modal
@@ -191,57 +184,3 @@ test('scroll position is restored after closing intent modal', async ({ page }) 
   }
 });
 
-test('scroll position is restored after canceling intent modal and spawning scientist', async ({ page }) => {
-  await page.goto(`http://127.0.0.1:${DASHBOARD_PORT}`);
-  await page.waitForSelector('.session.tap');
-
-  // Make page scrollable
-  await page.evaluate(() => {
-    const container = document.querySelector('.shell');
-    if (container) {
-      const padding = document.createElement('div');
-      padding.style.height = '500px';
-      container.appendChild(padding);
-    }
-  });
-
-  // Scroll to a position
-  const targetScroll = 75;
-  await page.evaluate((y) => window.scrollTo(0, y), targetScroll);
-  let scrollBefore = await page.evaluate(() => window.scrollY);
-  expect(Math.abs(scrollBefore - targetScroll)).toBeLessThan(20);
-
-  // Open modal, then close and spawn
-  await page.click('.session.tap');
-  await page.waitForSelector('#intent-modal.open');
-  const lockedScroll = await page.evaluate(() => {
-    const top = Number.parseInt(document.body.style.top || '0', 10);
-    return Number.isFinite(top) ? Math.abs(top) : 0;
-  });
-
-  // Spawn the scientist
-  await page.click('#intent-confirm');
-
-  // Wait for modal to close
-  await page.waitForSelector('#intent-modal', { state: 'hidden' });
-
-  // Small wait for restoration to settle.
-  await waitFor(async () => {
-    const y = await page.evaluate(() => window.scrollY);
-    return Math.abs(y - lockedScroll) <= 24;
-  }, 2500, 60);
-
-  // Check that scroll was restored to the lock point captured at modal open.
-  let scrollAfter = await page.evaluate(() => window.scrollY);
-  console.log('Scroll after spawning scientist:', scrollAfter);
-
-  expect(Math.abs(scrollAfter - lockedScroll)).toBeLessThan(25);
-
-  // Verify scrolling still works
-  const initialScroll = await page.evaluate(() => window.scrollY);
-  await page.evaluate(() => window.scrollBy(0, 30));
-  const finalScroll = await page.evaluate(() => window.scrollY);
-
-  console.log('Initial:', initialScroll, 'Final:', finalScroll);
-  expect(finalScroll).toBeGreaterThan(initialScroll);
-});

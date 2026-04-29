@@ -1,147 +1,106 @@
+/**
+ * Calendar page tests — exercise the dashboard's /calendar HTML/JS only.
+ *
+ * The calendar APIs (/api/calendar/state, /api/calendar/backlog) shell out to
+ * Python in ../CalendarAutomation. Those scripts are out of scope for the
+ * dashboard test suite, so we mock them at the network layer with page.route()
+ * and assert how the page renders/handles each response shape.
+ */
+
 import { test, expect } from '@playwright/test';
+import { DashboardHarness } from './harness.mjs';
 
-const BASE_URL = process.env.BASE_URL || 'http://localhost:1111';
+const DASHBOARD_PORT = 19124;
+const BACKEND_PORT = 18124;
+const PUBLIC_PORT = 17124;
 
-test.describe('Calendar Page', () => {
-  test('should load calendar page and display main sections', async ({ page }) => {
-    await page.goto(`${BASE_URL}/calendar`);
+const harness = new DashboardHarness({
+  dashboardPort: DASHBOARD_PORT,
+  backendPort: BACKEND_PORT,
+  publicPort: PUBLIC_PORT,
+});
 
-    // Check page title
-    await expect(page.locator('h1')).toContainText('Calendar');
+const FAKE_STATE = {
+  brief: { lines: ['Standup at 10am', 'Lunch at noon'] },
+  open_slots_today: [{ start: '2026-04-29T15:00:00-07:00', minutes: 30 }],
+  backlog: [],
+  updated_at: '2026-04-29T09:00:00-07:00',
+};
 
-    // Check sections are visible
-    await expect(page.locator('text=Quick Ask')).toBeVisible();
-    await expect(page.locator('text=Brief')).toBeVisible();
-    await expect(page.locator('text=Open Slots Today')).toBeVisible();
-    await expect(page.locator('text=Backlog')).toBeVisible();
-    await expect(page.locator('text=Updated:')).toBeVisible();
+const FAKE_BACKLOG = {
+  items: [
+    { id: 'bk_1', title: 'Test backlog item', status: 'pending', priority: 'normal' },
+  ],
+};
+
+test.beforeAll(async () => {
+  await harness.setup('CalendarPage');
+});
+
+test.afterAll(async () => {
+  await harness.teardown();
+});
+
+test.beforeEach(async ({ page }) => {
+  // Default: fulfill calendar APIs with deterministic JSON so the page can render.
+  await page.route(/\/api\/calendar\/state(\?.*)?$/, (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(FAKE_STATE) });
   });
-
-  test('should display dashboard data after load', async ({ page }) => {
-    await page.goto(`${BASE_URL}/calendar`);
-
-    // Wait for content to load (should not be skeleton anymore)
-    await page.waitForFunction(() => {
-      const skeletons = document.querySelectorAll('.skeleton');
-      return skeletons.length === 0;
-    }, { timeout: 5000 });
-
-    // Verify that brief content is displayed
-    const briefContent = page.locator('#briefContent');
-    await expect(briefContent).not.toHaveClass(/loading/);
-  });
-
-  test('should add a backlog item via quick ask', async ({ page }) => {
-    await page.goto(`${BASE_URL}/calendar`);
-
-    // Wait for page to load
-    await page.waitForLoadState('networkidle');
-
-    // Type a quick ask
-    const input = page.locator('#quickAskInput');
-    await input.fill('Review API documentation');
-
-    // Click send button
-    await page.locator('button:has-text("Ask")').click();
-
-    // Wait a moment for the agent to spawn
-    await page.waitForTimeout(1000);
-
-    // Input should be cleared
-    await expect(input).toHaveValue('');
-  });
-
-  test('should navigate back to home', async ({ page }) => {
-    await page.goto(`${BASE_URL}/`);
-    await page.goto(`${BASE_URL}/calendar`);
-
-    // Click back button
-    await page.locator('.back-btn').click();
-
-    // Should navigate back (check for home page elements)
-    await expect(page).toHaveURL(`${BASE_URL}/`);
-  });
-
-  test('should handle backlog item actions', async ({ page }) => {
-    // This test assumes there is at least one pending backlog item
-    await page.goto(`${BASE_URL}/calendar`);
-
-    // Wait for content to load
-    await page.waitForFunction(() => {
-      const backlog = document.getElementById('backlogContent');
-      return backlog && !backlog.classList.contains('loading');
-    }, { timeout: 5000 });
-
-    // Check if there are any action buttons (✓ or ✗)
-    const actionButtons = page.locator('.action-btn.done');
-    const count = await actionButtons.count();
-
-    if (count > 0) {
-      // Get the first action button
-      const firstButton = actionButtons.first();
-
-      // Click it
-      await firstButton.click();
-
-      // Wait for reload
-      await page.waitForTimeout(500);
-
-      // Verify the dashboard was refreshed
-      await expect(page.locator('#lastUpdated')).not.toHaveText('—');
+  await page.route(/\/api\/calendar\/backlog(\?.*)?$/, (route) => {
+    if (route.request().method() === 'GET') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(FAKE_BACKLOG) });
+    } else {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ok: true, item: { id: 'bk_new', title: 'new', status: 'pending' } }),
+      });
     }
   });
+});
 
-  test('should reload dashboard when page becomes visible', async ({ page, context }) => {
-    await page.goto(`${BASE_URL}/calendar`);
+test('renders main sections and dismisses skeleton once data arrives', async ({ page }) => {
+  await page.goto(`http://127.0.0.1:${DASHBOARD_PORT}/calendar`);
 
-    // Get initial update time
-    const initialTime = await page.locator('#lastUpdated').textContent();
+  await expect(page.locator('h1')).toContainText('Calendar');
+  // Section titles are in <div class="section-title">.
+  const titles = page.locator('.section-title');
+  await expect(titles).toHaveCount(4);
+  const titlesText = await titles.allTextContents();
+  expect(titlesText).toEqual(['Quick Ask', 'Brief', 'Open Slots Today', 'Backlog']);
 
-    // Simulate page visibility change
-    await page.evaluate(() => {
-      Object.defineProperty(document, 'hidden', {
-        writable: true,
-        value: true,
-      });
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
+  // Skeletons should clear once mocked data resolves.
+  await page.waitForFunction(() => document.querySelectorAll('.skeleton').length === 0, null, {
+    timeout: 5000,
+  });
+});
 
-    // Wait a moment
-    await page.waitForTimeout(500);
+test('back button navigates to home', async ({ page }) => {
+  // Navigate to home first so history.back() has somewhere to go.
+  await page.goto(`http://127.0.0.1:${DASHBOARD_PORT}/`);
+  await page.goto(`http://127.0.0.1:${DASHBOARD_PORT}/calendar`);
+  await page.locator('.back-btn').click();
+  await expect(page).toHaveURL(`http://127.0.0.1:${DASHBOARD_PORT}/`);
+});
 
-    // Make page visible again
-    await page.evaluate(() => {
-      Object.defineProperty(document, 'hidden', {
-        writable: true,
-        value: false,
-      });
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
-
-    // Wait for reload
-    await page.waitForFunction(() => {
-      const time = document.getElementById('lastUpdated').textContent;
-      return time !== initialTime;
-    }, { timeout: 5000 }).catch(() => {
-      // This may fail if data hasn't changed, which is ok
+test('shows error state when backend returns 5xx', async ({ page }) => {
+  // Override the default route with a 500.
+  await page.unroute(/\/api\/calendar\/state(\?.*)?$/);
+  await page.route(/\/api\/calendar\/state(\?.*)?$/, (route) => {
+    route.fulfill({
+      status: 500,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'simulated failure' }),
     });
   });
 
-  test('should display empty states when no data', async ({ page }) => {
-    // Mock the API to return empty data
-    await page.route(`${BASE_URL}/api/calendar/state`, (route) => {
-      route.abort();
-    });
+  await page.goto(`http://127.0.0.1:${DASHBOARD_PORT}/calendar`);
 
-    await page.goto(`${BASE_URL}/calendar`);
-
-    // Wait a moment for error handling
-    await page.waitForTimeout(1000);
-
-    // Check for error message or empty states
-    const briefContent = page.locator('#briefContent');
-    // Should contain either error or empty state
-    const text = await briefContent.textContent();
-    expect(text).toMatch(/Error|No events|Failed/i);
-  });
+  // The brief content should surface an error/empty/failure indicator.
+  await expect
+    .poll(async () => (await page.locator('#briefContent').textContent()) || '', {
+      timeout: 5000,
+      message: 'expected brief container to render error/empty state on 5xx',
+    })
+    .toMatch(/Error|Failed|No events/i);
 });

@@ -1,6 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { execFileSync } from 'node:child_process';
-import { DashboardHarness, waitFor } from './harness.mjs';
+import { DashboardHarness, waitFor, safeKillTmuxSession } from './harness.mjs';
 
 const DASHBOARD_PORT = 19142;
 const BACKEND_PORT = 18142;
@@ -27,9 +26,7 @@ test('dashboard reaps an orphaned tmux session instead of leaving it active', as
   expect(session).toBeTruthy();
   expect(session.backendActive).toBe(true);
 
-  execFileSync('tmux', ['kill-session', '-t', harness.tmuxSessionName()], {
-    timeout: 3000,
-  });
+  safeKillTmuxSession(harness.tmuxSessionName());
 
   await waitFor(async () => {
     const next = await harness.getSession();

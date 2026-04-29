@@ -72,7 +72,8 @@ const USER_ZPROFILE_PATH = process.env.ATC_USER_ZPROFILE || path.join(process.en
 const USER_ZSHRC_PATH = process.env.ATC_USER_ZSHRC || path.join(process.env.HOME || '', '.zshrc');
 const USER_ZLOGIN_PATH = process.env.ATC_USER_ZLOGIN || path.join(process.env.HOME || '', '.zlogin');
 const USER_HISTORY_FILE = process.env.ATC_USER_HISTORY_FILE || path.join(process.env.HOME || '', '.zsh_history');
-const REFRESH_MS = 8000;
+const REFRESH_MS = Number(process.env.REFRESH_MS || 8000);
+const SPAWN_GRACE_MS = Number(process.env.SPAWN_GRACE_MS || 8000);
 const USAGE_TTL_MS = 10000;
 const CLAUDE_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_CLAUDE_USAGE_MIN_INTERVAL_MS || 120000);
 const CODEX_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_CODEX_USAGE_MIN_INTERVAL_MS || 30000);
@@ -1690,7 +1691,7 @@ async function getMergedSessions() {
       const backendPortOpen = await checkPortOpen(slot.backendPort);
       const backendActive = backendPortOpen && tmuxAlive;
       const spawnedTs = st.spawnedAt ? new Date(st.spawnedAt).getTime() : 0;
-      const inSpawnGrace = spawnedTs > 0 && Date.now() - spawnedTs < 8000;
+      const inSpawnGrace = spawnedTs > 0 && Date.now() - spawnedTs < SPAWN_GRACE_MS;
 
       if (st.status === 'active' && !backendActive && !inSpawnGrace) {
         await killSessionBackend(slot, st).catch(() => {});

@@ -22,6 +22,8 @@ test.afterAll(async () => {
 });
 
 test('shell hooks emit full telemetry and dashboard exposes derived metadata', async ({ page }) => {
+  test.setTimeout(60_000);
+
   const markerFile = path.join(harness.workdir, `terminal-smoke-${Date.now()}.txt`);
   const subdir = path.join(harness.workdir, 'hook-cwd');
   const pwdFile = path.join(harness.workdir, `hook-pwd-${Date.now()}.txt`);

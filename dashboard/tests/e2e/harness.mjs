@@ -27,6 +27,32 @@ export function slotSlug(name) {
     .replace(/^-+|-+$/g, '');
 }
 
+// Safety prefix on every e2e-spawned slot/tmux name. The harness refuses to
+// kill any tmux session that doesn't start with this — protecting prod sessions
+// like `feynman`, `einstein`, etc. from being affected by the test suite.
+export const E2E_SLOT_PREFIX = 'e2e-';
+
+function assertSafeSlotSlug(slug) {
+  if (!String(slug || '').startsWith(E2E_SLOT_PREFIX)) {
+    throw new Error(
+      `e2e harness refused to operate on tmux session "${slug}" — name must start with "${E2E_SLOT_PREFIX}" to avoid touching prod sessions`
+    );
+  }
+}
+
+/** Safe tmux kill: refuses any session that isn't an e2e-prefixed one. */
+export function safeKillTmuxSession(sessionName) {
+  assertSafeSlotSlug(sessionName);
+  try {
+    execFileSync('tmux', ['kill-session', '-t', sessionName], {
+      stdio: 'ignore',
+      timeout: 3000,
+    });
+  } catch {
+    // Ignore — session already gone is fine.
+  }
+}
+
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -90,7 +116,9 @@ export class DashboardHarness {
   async setup(slotPrefix = 'Test') {
     // Resolve symlinks so paths match tmux's pane_current_path (macOS /var → /private/var).
     this.tmpRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'atc-e2e-')));
-    this.slotName = `${slotPrefix}-${Date.now().toString(36)}`;
+    // E2E_SLOT_PREFIX guarantees the resulting tmux session name (slotSlug)
+    // starts with `e2e-` and cannot collide with any prod session name.
+    this.slotName = `${E2E_SLOT_PREFIX}${slotPrefix}-${Date.now().toString(36)}`;
     this.workdir = path.join(this.tmpRoot, 'workdir');
     this.sessionsFile = path.join(this.tmpRoot, 'sessions.json');
     this.stateFile = path.join(this.tmpRoot, 'state', 'sessions-state.json');
@@ -132,6 +160,8 @@ export class DashboardHarness {
         ATC_AUTO_LAUNCH_PROVIDER: '0',
         ATC_DISABLE_CODEX_BAR: '1',
         TELEMETRY_INGEST_MS: String(this.telemetryIngestMs),
+        REFRESH_MS: '500',
+        SPAWN_GRACE_MS: '500',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -155,15 +185,8 @@ export class DashboardHarness {
       // Ignore.
     }
 
-    // Kill the underlying tmux session.
-    try {
-      execFileSync('tmux', ['kill-session', '-t', slotSlug(this.slotName)], {
-        stdio: 'ignore',
-        timeout: 3000,
-      });
-    } catch {
-      // Ignore.
-    }
+    // Kill the underlying tmux session — guarded to e2e-prefixed names only.
+    safeKillTmuxSession(slotSlug(this.slotName));
 
     // Terminate the dashboard process.
     if (this.dashboardProc && !this.dashboardProc.killed) {
