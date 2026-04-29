@@ -1,8 +1,15 @@
 import fsSync from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { emptyProfileUsageCache } from './profile-catalog.mjs';
 
-const USAGE_RATE_CACHE_FILE = process.env.USAGE_RATE_CACHE_FILE || path.join(process.cwd(), 'state', 'usage-rate-cache.json');
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const DASHBOARD_DIR = path.dirname(MODULE_DIR);
+
+// Anchor the cache path to this module's location instead of process.cwd()
+// so callers that import this module from a different cwd still hit the
+// same file the dashboard server uses.
+const USAGE_RATE_CACHE_FILE = process.env.USAGE_RATE_CACHE_FILE || path.join(DASHBOARD_DIR, 'state', 'usage-rate-cache.json');
 const CLAUDE_USAGE_MIN_INTERVAL_MS = Number(process.env.ATC_CLAUDE_USAGE_MIN_INTERVAL_MS || 120000);
 
 function buildClaudeRefreshMeta(lastAttemptMs, intervalMs = CLAUDE_USAGE_MIN_INTERVAL_MS) {

@@ -11,15 +11,22 @@
 import fsSync from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
-// Resolve the log file at call time, not module load, so server.mjs setting
-// ATC_DASHBOARD_RUNTIME_DIR after import (or tests overriding it) picks up
-// the intended path.
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const DASHBOARD_DIR = path.dirname(MODULE_DIR);
+
+// Resolve the log file at call time, not module load, so tests overriding
+// ATC_DASHBOARD_RUNTIME_DIR after import pick up the intended path. The
+// fallback is anchored to the module's own location so it stays correct
+// regardless of process.cwd() — relying on cwd produced doubled paths
+// like dashboard/dashboard/runtime/ when the dashboard launched with
+// cwd=dashboard/.
 function defaultLogDir() {
   return path.join(
     process.env.ATC_DASHBOARD_RUNTIME_DIR ||
-      path.join(process.cwd(), 'dashboard', 'runtime'),
+      path.join(DASHBOARD_DIR, 'runtime'),
     'logs',
   );
 }
