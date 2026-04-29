@@ -518,6 +518,14 @@ function keychainImport(blob, { actor = 'atc-profile', alias = null, reason = nu
       '-a', os.userInfo().username,
       '-w', blob,
       '-U',           // update if already exists (atomic replace; preserves prior credential on failure)
+      '-A',           // no per-app ACL gate. Without this the new entry trusts
+                      // only `security`, so the `claude` binary can't decrypt
+                      // it from a non-GUI context (ttyd-managed tmux sessions,
+                      // launchd-spawned children) — there's no UI to answer
+                      // the keychain prompt, the read fails, and claude shows
+                      // "not logged in" even though the entry exists. -A only
+                      // takes effect when the entry is freshly created; -U on
+                      // an existing entry preserves the old ACL.
     ], { stdio: ['ignore', 'ignore', 'pipe'] });
   } catch (err) {
     const stderr = (err.stderr ? err.stderr.toString() : '').trim();
