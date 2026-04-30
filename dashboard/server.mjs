@@ -403,9 +403,9 @@ function runCommand(cmd, args, timeoutMs = 12000) {
 
 function runCalendarPython(args, timeoutMs = 15000) {
   const calendarAutomationDir = path.join(HOME_DIRECTORY, 'Code', 'CalendarAutomation');
+  const venvPython = path.join(calendarAutomationDir, '.venv', 'bin', 'python3');
   const scriptPath = path.join(calendarAutomationDir, args[0]);
-  const cmdArgs = [scriptPath, ...args.slice(1)];
-  return runCommand('python3', cmdArgs, timeoutMs);
+  return runCommand(venvPython, [scriptPath, ...args.slice(1)], timeoutMs);
 }
 
 function formatCountdown(targetIso) {
