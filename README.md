@@ -135,41 +135,40 @@ Required tools on the host machine:
 - `jq` (for one health-check command)
 - `codexbar` (used for provider usage telemetry from Codex/Claude/Gemini)
 
-### 2) Start or reload session proxy without resetting live slots
+### 2) One-click start (recommended)
 
 ```bash
 cd ~/Code/AiTrafficControl
-./dashboard/scripts/start-ttyd-sessions.sh
+./dashboard/scripts/start-all.sh
 ```
 
 What this does:
-- Regenerates dashboard-managed nginx config (`700x -> 800x` port mapping).
-- Preserves live `800x` ttyd backends and existing `dashboard/state/sessions-state.json`.
-
-### 3) Destructively reset session backends and slot state
-
-```bash
-cd ~/Code/AiTrafficControl
-./dashboard/scripts/reset-ttyd-sessions.sh
-```
-
-What this does:
-- Regenerates dashboard-managed nginx config (`700x -> 800x` port mapping).
-- Kills live `800x` ttyd backends.
-- Resets slot runtime state in `dashboard/state/sessions-state.json` to idle defaults.
-
-### 4) Start the dashboard
-
-```bash
-cd ~/Code/AiTrafficControl
-./dashboard/scripts/start-dashboard.sh
-```
+- Starts the dashboard server on `:1111` in tmux session `dashboard-1111` (no-op if already running).
+- Regenerates+reloads the nginx session proxy (`700x -> 800x` port mapping).
+- Non-destructive: preserves live `800x` ttyd backends and existing `dashboard/state/sessions-state.json`.
 
 Open:
 - Dashboard: `http://127.0.0.1:1111`
 - Mobile/slot endpoints: `http://127.0.0.1:7001` ... `:7004` (from `dashboard/sessions.json`)
 
-### 5) Verify it is healthy
+Scientist `800x` ttyd backends are spawned on demand when you tap an idle scientist card in the dashboard UI; this script intentionally does not start them.
+
+### 3) Advanced: run the underlying scripts individually
+
+The one-click script is just a thin wrapper. Run the steps separately when you only need one of them:
+
+```bash
+# Dashboard server only (:1111)
+./dashboard/scripts/start-dashboard.sh
+
+# Nginx session proxy only (700x -> 800x), non-destructive
+./dashboard/scripts/start-ttyd-sessions.sh
+
+# Destructive: kill live 800x ttyd backends and reset slot state to idle
+./dashboard/scripts/reset-ttyd-sessions.sh
+```
+
+### 4) Verify it is healthy
 
 ```bash
 lsof -nP -iTCP -sTCP:LISTEN | rg ':(7001|7002|7003|7004|8001|8002|8003|8004|1111)\b'

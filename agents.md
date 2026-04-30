@@ -6,6 +6,26 @@ Privacy note: documentation must not include real names or real email addresses 
 
 ## 1) Dashboard app (`dashboard/`)
 
+### 1.0 Cold start the full stack (preferred one-click path)
+
+When you need both the dashboard process AND the session proxy up from a cold machine (or after a reboot), use the wrapper:
+
+1. `cd ~/Code/AiTrafficControl/dashboard`
+2. `./scripts/start-all.sh`
+
+What it does:
+- Runs `start-dashboard.sh` (no-op if `:1111` already serving).
+- Runs `start-ttyd-sessions.sh` (regenerates+reloads nginx, non-destructive).
+
+Verify both layers:
+- `lsof -nP -iTCP -sTCP:LISTEN | rg ':(7001|7002|7003|7004|8001|8002|8003|8004|1111)\b'`
+- `tmux ls | rg 'dashboard-1111'`
+
+When NOT to use `start-all.sh`:
+- After editing `dashboard/server.mjs` — you need the destructive restart in 1.1, not a no-op.
+- When you specifically want only one layer (use the underlying script in 1.1 or 1.2).
+- For destructive slot resets (use `reset-ttyd-sessions.sh`, see 1.2).
+
 ### 1.1 If `dashboard/server.mjs` changes
 
 Always restart the running dashboard process.

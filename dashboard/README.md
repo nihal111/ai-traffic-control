@@ -10,17 +10,29 @@ Runs a lightweight dashboard on port `1111` to show:
 ## Start
 
 ```bash
-# Start/reload nginx proxy (public 700x -> backend 800x) without touching live slot backends
-./dashboard/scripts/start-ttyd-sessions.sh
-
-# Destructively reset all slot backends to idle, then start/reload nginx proxy
-./dashboard/scripts/reset-ttyd-sessions.sh
-
-# Start dashboard in tmux on :1111
-./dashboard/scripts/start-dashboard.sh
+# One-click: dashboard on :1111 + nginx session proxy on :7001-:700N
+# Idempotent and non-destructive. Use this by default.
+./dashboard/scripts/start-all.sh
 ```
 
 Open: `http://<host>:1111`
+
+Scientist `800x` ttyd backends are spawned on demand when you tap an idle scientist card. `start-all.sh` does not pre-spawn them.
+
+### Advanced: underlying scripts
+
+`start-all.sh` is a thin wrapper around these. Run them directly when you only need one:
+
+```bash
+# Dashboard server only (:1111, tmux session dashboard-1111)
+./dashboard/scripts/start-dashboard.sh
+
+# Nginx session proxy only (700x -> 800x), non-destructive
+./dashboard/scripts/start-ttyd-sessions.sh
+
+# Destructive: kill live 800x ttyd backends and reset slot state to idle
+./dashboard/scripts/reset-ttyd-sessions.sh
+```
 
 ## Session mapping
 
