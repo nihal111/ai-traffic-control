@@ -2331,6 +2331,16 @@ function renderPage() {
     }
 
     function cardHead(providerKey, title, logo, planPill, aliasPill, extraActions, payload) {
+      let stalePill = '';
+      if (payload && payload.stale) {
+        const ageMs = payload.lastAttemptAt ? Date.now() - Date.parse(payload.lastAttemptAt) : NaN;
+        const ageLabel = Number.isFinite(ageMs) ? formatShortAge(ageMs) : '';
+        const tooltip = (payload.staleError ? 'Last live fetch failed: ' + payload.staleError : 'Showing cached usage') +
+          (ageLabel ? ' (last attempt ' + ageLabel + ' ago)' : '');
+        stalePill = '<div class="card-stale" title="' + esc(tooltip) + '" aria-label="' + esc(tooltip) + '">⚠ stale' +
+          (ageLabel ? ' · ' + esc(ageLabel) : '') +
+        '</div>';
+      }
       return '<div class="card-head">' +
         '<img class="card-logo" src="' + esc(logo) + '" alt="' + esc(title) + ' logo" loading="lazy" width="40" height="40" />' +
         '<div class="card-ident">' +
@@ -2338,6 +2348,7 @@ function renderPage() {
             '<div class="card-name">' + esc(title) + '</div>' +
             planPill +
             aliasPill +
+            stalePill +
           '</div>' +
         '</div>' +
         '<div class="card-actions">' +
@@ -2382,7 +2393,8 @@ function renderPage() {
       const plan = compactPlan(payload.plan || (providerKey === 'claude' ? (profileSubscription || 'Pro') : 'connected'));
       const planPill = '<div class="card-plan">' + esc(plan) + '</div>';
 
-      return '<article class="usage-row' + (isProfileSwitching ? ' switching' : '') + '" data-provider="' + esc(providerKey) + '">' +
+      const isStale = !!payload.stale;
+      return '<article class="usage-row' + (isProfileSwitching ? ' switching' : '') + (isStale ? ' stale' : '') + '" data-provider="' + esc(providerKey) + '">' +
         cardHead(providerKey, title, logo, planPill, aliasPill, switchBtn, payload) +
         (isProfileSwitching
           ? '<div class="usage-switching-note"><span class="usage-spinner" aria-hidden="true"></span><span>Switching to ' + esc(claudeSwitchingAlias) + '…</span></div>'

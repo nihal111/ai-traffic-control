@@ -557,6 +557,25 @@
       opacity: 0.5;
       transition: opacity 100ms ease-out;
     }
+    .card-stale {
+      color: #1b1d1e;
+      background: #d79921;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 999px;
+      line-height: 1;
+      cursor: help;
+    }
+    .usage-row.stale {
+      border-color: #d79921;
+      background: linear-gradient(150deg, #3f3829 0%, #34302a 100%);
+    }
+    .usage-row.stale .windows {
+      opacity: 0.55;
+    }
 
     .agent-dials {
       display: grid;
