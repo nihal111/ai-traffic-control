@@ -104,3 +104,82 @@ test('shows error state when backend returns 5xx', async ({ page }) => {
     })
     .toMatch(/Error|Failed|No events/i);
 });
+
+test('quick ask sends selected provider and opens returned scientist session', async ({ page }) => {
+  let seenProvider = '';
+
+  await page.addInitScript(() => {
+    window.__openCalls = [];
+    const realOpen = window.open.bind(window);
+    window.open = (...args) => {
+      if (args[0] === 'about:blank') {
+        const fakeTab = {
+          closed: false,
+          document: { title: '' },
+          location: {
+            replace(url) {
+              fakeTab.__lastUrl = url;
+            },
+          },
+          close() {
+            fakeTab.closed = true;
+          },
+          focus() {},
+        };
+        window.__openCalls.push({ kind: 'placeholder', args, tab: fakeTab });
+        return fakeTab;
+      }
+      window.__openCalls.push({ kind: 'direct', args });
+      return realOpen(...args);
+    };
+  });
+
+  await page.route(/\/api\/agents\/spawn$/, async (route) => {
+    const body = route.request().postDataJSON();
+    seenProvider = body.provider;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        slotName: 'CalendarPage',
+        publicPort: PUBLIC_PORT,
+      }),
+    });
+  });
+
+  await page.goto(`http://127.0.0.1:${DASHBOARD_PORT}/calendar`);
+  await page.click('#quickAskProviderNext');
+  await expect(page.locator('#quickAskProviderHost')).toContainText('Claude');
+
+  await page.fill('#quickAskInput', 'Schedule a planning session for tomorrow afternoon.');
+  await page.click('#quickAskButton');
+
+  await expect.poll(async () => {
+    return page.evaluate(() => {
+      const call = window.__openCalls[0];
+      return call && call.tab && call.tab.__lastUrl;
+    });
+  }, { timeout: 8000 }).toContain(`:${PUBLIC_PORT}`);
+
+  const result = await page.evaluate(() => ({
+    providerLabel: document.getElementById('quickAskProviderHost')?.textContent?.trim() || '',
+    openCalls: window.__openCalls.map((entry) => ({
+      kind: entry.kind,
+      args: entry.args,
+      lastUrl: entry.tab && entry.tab.__lastUrl ? entry.tab.__lastUrl : '',
+      title: entry.tab && entry.tab.document ? entry.tab.document.title : '',
+    })),
+  }));
+
+  expect(result.providerLabel).toContain('Claude');
+  expect(seenProvider).toBe('claude');
+  expect(result.openCalls[0]?.kind).toBe('placeholder');
+  expect(result.openCalls[0]?.title).toBe('Launching scientist session...');
+  expect(result.openCalls[0]?.lastUrl).toContain(`:${PUBLIC_PORT}`);
+  expect(result.openCalls[0]?.lastUrl).toContain('atc_connect=');
+});
+
+test('dummy test', async ({ page }) => {
+  expect(1).toBe(1);
+});

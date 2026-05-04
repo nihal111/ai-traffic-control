@@ -37,6 +37,7 @@ import {
 } from './modules/provider-usage.mjs';
 import { pollUsageUntilProfileActive } from './modules/profile-polling.mjs';
 import { loadClientModuleSource } from './modules/client-script-loader.mjs';
+import { listLogFiles, readLogTail } from './modules/mcp-logs.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -809,15 +810,26 @@ async function readSessionsConfig() {
     const text = await fs.readFile(SESSIONS_FILE, 'utf8');
     const parsed = JSON.parse(text);
     if (!Array.isArray(parsed)) return [];
-    return parsed
-      .map((s) => ({
-        name: String(s.name ?? '').trim(),
-        publicPort: Number(s.publicPort),
-        backendPort: Number(s.backendPort),
+    const uniqueSessions = [];
+    const seenNames = new Set();
+    for (const s of parsed) {
+      const name = String(s.name ?? '').trim();
+      if (!name || seenNames.has(name)) continue;
+      
+      const publicPort = Number(s.publicPort);
+      const backendPort = Number(s.backendPort);
+      if (!Number.isFinite(publicPort) || !Number.isFinite(backendPort)) continue;
+
+      seenNames.add(name);
+      uniqueSessions.push({
+        name,
+        publicPort,
+        backendPort,
         description: s.description ? String(s.description) : '',
         picturePath: String(s.picturePath || s.pictureUrl || '').trim(),
-      }))
-      .filter((s) => s.name && Number.isFinite(s.publicPort) && Number.isFinite(s.backendPort));
+      });
+    }
+    return uniqueSessions;
   } catch {
     return [];
   }
@@ -1858,7 +1870,7 @@ async function launchHotDialAgent(dialId, provider, initialPrompt = null) {
     initialPrompt: typeof initialPrompt === 'string' ? initialPrompt.trim() : null,
   });
 
-  return { slotName: selectedSlot.name, agentId: agent.id };
+  return { slotName: selectedSlot.name, publicPort: selectedSlot.publicPort, agentId: agent.id };
 }
 
 async function killSlotByName(name) {
@@ -1944,6 +1956,10 @@ function renderPage() {
   <body>
   <div class="shell">
     <section class="title-wrap">
+      <div class="status-badge">
+        <div class="status-dot"></div>
+        <div class="status-text">Online</div>
+      </div>
       <div class="title-kicker">Control Tower</div>
       <div class="title-head">
         <div class="title-mark" id="title-mark" aria-hidden="true">
@@ -1953,25 +1969,61 @@ function renderPage() {
       </div>
     </section>
 
-    <section class="panel panel-usage">
-      <div class="panel-head">
-        <h2 class="panel-title">Provider Budgets</h2>
-        <div class="panel-meta">Live rolling windows</div>
-      </div>
-      <div class="usage-stack" id="usage-grid"></div>
-    </section>
+    <nav class="dashboard-tabs">
+      <button type="button" class="tab-btn active" data-tab="tower">Tower</button>
+      <button type="button" class="tab-btn" data-tab="mcp">MCP</button>
+      <button type="button" class="tab-btn" data-tab="calendar" onclick="location.assign('/calendar')">Calendar</button>
+    </nav>
 
-    <section class="panel panel-dials">
-      <div class="panel-head">
-        <h2 class="panel-title">Quick Launch</h2>
-        <div class="panel-meta">Hot-dial agents</div>
-      </div>
-      <div class="agent-dials" id="agent-dials"></div>
-    </section>
+    <div id="tower-view" class="view-pane active">
+      <section class="panel panel-usage">
+        <div class="panel-head">
+          <h2 class="panel-title">Provider Budgets</h2>
+          <div class="panel-meta">Live rolling windows</div>
+        </div>
+        <div class="usage-stack" id="usage-grid"></div>
+      </section>
 
-    <section class="panel" style="margin-top:12px;">
-      <div class="sessions" id="sessions"></div>
-    </section>
+      <section class="panel panel-dials">
+        <div class="panel-head">
+          <h2 class="panel-title">Quick Launch</h2>
+          <div class="panel-meta">Hot-dial agents</div>
+        </div>
+        <div class="agent-dials" id="agent-dials"></div>
+      </section>
+
+      <section class="panel" style="margin-top:12px;">
+        <div class="sessions" id="sessions"></div>
+      </section>
+    </div>
+
+    <div id="mcp-view" class="view-pane">
+      <section class="panel mcp-panel">
+        <div class="panel-head">
+          <h2 class="panel-title">MCP Logs</h2>
+          <div class="panel-meta">data/mcp-logs/*.log</div>
+        </div>
+        <div class="mcp-container">
+          <aside class="mcp-sidebar">
+            <div class="mcp-sidebar-title">Servers</div>
+            <div id="mcp-log-list" class="mcp-log-list"></div>
+          </aside>
+          <main class="mcp-main">
+            <div class="mcp-toolbar">
+              <div id="mcp-current-file" class="mcp-current-file">Select a log</div>
+              <div class="mcp-toolbar-actions">
+                <label class="tail-toggle">
+                  <input type="checkbox" id="mcp-tail-check" checked>
+                  <span>Tail</span>
+                </label>
+                <button type="button" class="btn-secondary btn-sm" id="mcp-refresh-btn">Refresh</button>
+              </div>
+            </div>
+            <div id="mcp-log-content" class="mcp-log-content"></div>
+          </main>
+        </div>
+      </section>
+    </div>
   </div>
 
   <div class="modal-overlay" id="intent-modal">
@@ -2166,6 +2218,14 @@ function renderPage() {
       providerKey: 'codex',
       initialPrompt: '',
     };
+    const mcpState = {
+      logs: [],
+      currentFile: null,
+      content: '',
+      tail: true,
+      lastFetch: 0,
+    };
+    let currentTab = 'tower';
     let latestSessionsByName = new Map();
     let sessionInteractionsBound = false;
 
@@ -2394,7 +2454,20 @@ function renderPage() {
       const planPill = '<div class="card-plan">' + esc(plan) + '</div>';
 
       const isStale = !!payload.stale;
-      return '<article class="usage-row' + (isProfileSwitching ? ' switching' : '') + (isStale ? ' stale' : '') + '" data-provider="' + esc(providerKey) + '">' +
+      const renderKey = [
+        providerKey,
+        isProfileSwitching ? '1' : '0',
+        isStale ? '1' : '0',
+        plan,
+        shownActiveProfile || '',
+        String(payload.primary?.usedPercent || 0),
+        String(payload.secondary?.usedPercent || 0),
+        payload.primary?.resetIn || '',
+        payload.secondary?.resetIn || '',
+        payload.nextRefreshAt || '',
+      ].join('::');
+
+      return '<article class="usage-row' + (isProfileSwitching ? ' switching' : '') + (isStale ? ' stale' : '') + '" data-provider="' + esc(providerKey) + '" data-render-key="' + esc(renderKey) + '">' +
         cardHead(providerKey, title, logo, planPill, aliasPill, switchBtn, payload) +
         (isProfileSwitching
           ? '<div class="usage-switching-note"><span class="usage-spinner" aria-hidden="true"></span><span>Switching to ' + esc(claudeSwitchingAlias) + '…</span></div>'
@@ -2406,26 +2479,32 @@ function renderPage() {
       '</article>';
     }
 
+    let usageInteractionsBound = false;
     function bindUsageInteractions() {
-      const switchButtons = document.querySelectorAll('[data-open-profile-switch]');
-      for (const btn of switchButtons) {
-        btn.addEventListener('click', function (ev) {
+      if (usageInteractionsBound) return;
+      const grid = document.getElementById('usage-grid');
+      if (!grid) return;
+      usageInteractionsBound = true;
+
+      grid.addEventListener('click', function (ev) {
+        const switchBtn = ev.target.closest('[data-open-profile-switch]');
+        if (switchBtn) {
           ev.preventDefault();
           ev.stopPropagation();
           openProfileSwitchModal();
-        });
-      }
-      const refreshButtons = document.querySelectorAll('[data-refresh-provider]');
-      for (const btn of refreshButtons) {
-        btn.addEventListener('click', function (ev) {
+          return;
+        }
+
+        const refreshBtn = ev.target.closest('[data-refresh-provider]');
+        if (refreshBtn) {
           ev.preventDefault();
           ev.stopPropagation();
-          if (btn.disabled) return;
-          const provider = btn.getAttribute('data-refresh-provider');
-          if (!provider) return;
-          manualRefreshProvider(provider);
-        });
-      }
+          if (refreshBtn.disabled) return;
+          const provider = refreshBtn.getAttribute('data-refresh-provider');
+          if (provider) manualRefreshProvider(provider);
+          return;
+        }
+      });
     }
 
     let usageRefreshTicker = null;
@@ -3434,6 +3513,118 @@ function renderPage() {
       }
     }
 
+    function switchTab(tabId) {
+      if (tabId === 'calendar') return; // Handled by onclick=location.assign
+      currentTab = tabId;
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-tab') === tabId);
+      });
+      document.querySelectorAll('.view-pane').forEach(pane => {
+        pane.classList.toggle('active', pane.id === tabId + '-view');
+      });
+      if (tabId === 'mcp') {
+        loadMcpLogsList();
+      }
+    }
+
+    async function loadMcpLogsList() {
+      try {
+        const resp = await fetch('/api/mcp/logs');
+        const data = await resp.json();
+        if (data.logs) {
+          mcpState.logs = data.logs;
+          renderMcpSidebar();
+          if (!mcpState.currentFile && data.logs.length > 0) {
+            selectMcpLog(data.logs[0]);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load MCP logs list:', err);
+      }
+    }
+
+    function renderMcpSidebar() {
+      const listEl = document.getElementById('mcp-log-list');
+      if (!listEl) return;
+      listEl.innerHTML = mcpState.logs.map(log => {
+        const activeClass = log === mcpState.currentFile ? 'active' : '';
+        return '<div class="mcp-log-item ' + activeClass + '" data-log="' + esc(log) + '">' + esc(log.replace('.log', '')) + '</div>';
+      }).join('');
+    }
+
+    async function selectMcpLog(filename) {
+      mcpState.currentFile = filename;
+      document.getElementById('mcp-current-file').textContent = filename;
+      renderMcpSidebar();
+      await refreshMcpLog();
+    }
+
+    async function refreshMcpLog() {
+      if (!mcpState.currentFile) return;
+      const refreshBtn = document.getElementById('mcp-refresh-btn');
+      if (refreshBtn) refreshBtn.disabled = true;
+      try {
+        const resp = await fetch('/api/mcp/log?file=' + encodeURIComponent(mcpState.currentFile));
+        const data = await resp.json();
+        if (data.content !== undefined) {
+          const contentEl = document.getElementById('mcp-log-content');
+          const isAtBottom = contentEl.scrollHeight - contentEl.scrollTop <= contentEl.clientHeight + 50;
+          
+          mcpState.content = data.content;
+          contentEl.textContent = data.content;
+          
+          if (mcpState.tail && isAtBottom) {
+            contentEl.scrollTop = contentEl.scrollHeight;
+          }
+          mcpState.lastFetch = Date.now();
+        }
+      } catch (err) {
+        console.error('Failed to refresh MCP log:', err);
+      } finally {
+        if (refreshBtn) refreshBtn.disabled = false;
+      }
+    }
+
+    function bindMcpInteractions() {
+      const tabs = document.querySelectorAll('.dashboard-tabs .tab-btn');
+      tabs.forEach(btn => {
+        if (btn.dataset.bound === '1') return;
+        btn.dataset.bound = '1';
+        btn.addEventListener('click', function(ev) {
+          const tabId = btn.getAttribute('data-tab');
+          if (tabId !== 'calendar') {
+            ev.preventDefault();
+            switchTab(tabId);
+          }
+        });
+      });
+
+      const listEl = document.getElementById('mcp-log-list');
+      if (listEl && listEl.dataset.bound !== '1') {
+        listEl.dataset.bound = '1';
+        listEl.addEventListener('click', function(ev) {
+          const item = ev.target.closest('.mcp-log-item');
+          if (item) {
+            selectMcpLog(item.getAttribute('data-log'));
+          }
+        });
+      }
+
+      const refreshBtn = document.getElementById('mcp-refresh-btn');
+      if (refreshBtn && refreshBtn.dataset.bound !== '1') {
+        refreshBtn.dataset.bound = '1';
+        refreshBtn.addEventListener('click', refreshMcpLog);
+      }
+
+      const tailCheck = document.getElementById('mcp-tail-check');
+      if (tailCheck && tailCheck.dataset.bound !== '1') {
+        tailCheck.dataset.bound = '1';
+        tailCheck.addEventListener('change', function() {
+          mcpState.tail = tailCheck.checked;
+        });
+      }
+    }
+
     function bindStaticModalInteractions() {
       const intentClose = document.getElementById('intent-close');
       if (intentClose) intentClose.addEventListener('click', function (ev) { ev.preventDefault(); closeIntentModal(); });
@@ -3780,17 +3971,29 @@ function renderPage() {
       }
       latestUsage = nextUsage;
       const usageGrid = document.getElementById('usage-grid');
+      if (!usageGrid) return;
+
       const activeProfile = nextUsage?.activeProfile || null;
-      const rows = [
-        providerUsageRow('codex', 'Codex', nextUsage.codex, activeProfile, []),
-        providerUsageRow('claude', 'Claude', nextUsage.claude, activeProfile, latestProfiles),
-        providerUsageRow('gemini', 'Gemini', nextUsage.gemini, activeProfile, []),
+      const providers = [
+        { key: 'codex', title: 'Codex', payload: nextUsage.codex, profiles: [] },
+        { key: 'claude', title: 'Claude', payload: nextUsage.claude, profiles: latestProfiles },
+        { key: 'gemini', title: 'Gemini', payload: nextUsage.gemini, profiles: [] },
       ];
-      const nextUsageHtml = rows.join('');
-      if (usageGrid && usageGrid.innerHTML !== nextUsageHtml) {
-        usageGrid.innerHTML = nextUsageHtml;
-        bindUsageInteractions();
-      }
+
+      providers.forEach(function (p) {
+        const nextHtml = providerUsageRow(p.key, p.title, p.payload, activeProfile, p.profiles);
+        const nextNode = makeSessionCardNode(nextHtml);
+        const nextKey = nextNode ? nextNode.getAttribute('data-render-key') : '';
+        const existing = usageGrid.querySelector('.usage-row[data-provider="' + p.key + '"]');
+
+        if (!existing) {
+          usageGrid.appendChild(nextNode);
+        } else if (existing.getAttribute('data-render-key') !== nextKey) {
+          existing.replaceWith(nextNode);
+        }
+      });
+
+      bindUsageInteractions();
       bindUsageRefreshTicker();
       if (profileSwitchState.open) renderProfileSwitchModal();
     }
@@ -3817,6 +4020,7 @@ function renderPage() {
         existingCards.set(el.getAttribute('data-name'), el);
       }
 
+      const usedElements = new Set();
       sessions.forEach(function (s, index) {
         const nextNode = makeSessionCardNode(sessionCard(s));
         const nextKey = nextNode ? nextNode.getAttribute('data-render-key') : '';
@@ -3831,15 +4035,13 @@ function renderPage() {
 
         const anchoredAt = sessionsEl.children[index] || null;
         if (cardEl !== anchoredAt) sessionsEl.insertBefore(cardEl, anchoredAt);
+        usedElements.add(cardEl);
       });
 
-      const validNames = new Set(sessions.map(function (s) { return s.name; }));
       for (const el of Array.from(sessionsEl.children)) {
-        if (!el.matches || !el.matches('.session.tap[data-name]')) {
+        if (!usedElements.has(el)) {
           el.remove();
-          continue;
         }
-        if (!validNames.has(el.getAttribute('data-name'))) el.remove();
       }
     }
 
@@ -3876,9 +4078,13 @@ function renderPage() {
 
     bindStaticModalInteractions();
     bindSessionInteractions();
+    bindMcpInteractions();
     renderHotDials();
     refresh();
-    setInterval(function () { refresh({ usage: false }); }, ${REFRESH_MS});
+    setInterval(function () { 
+      if (currentTab === 'tower') refresh({ usage: false }); 
+      if (currentTab === 'mcp' && mcpState.tail) refreshMcpLog();
+    }, ${REFRESH_MS});
   </script>
 </body>
 </html>`;
@@ -4357,13 +4563,92 @@ function renderCalendarPage() {
       margin-bottom: 12px;
       box-shadow: 0 10px 28px #00000033;
     }
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
     .section-title {
       font-size: 13px;
       font-weight: 700;
       letter-spacing: 0.3px;
       text-transform: uppercase;
       color: #d5c4a1;
-      margin-bottom: 12px;
+      margin-bottom: 0;
+    }
+    .quick-ask-provider {
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr) 24px;
+      min-width: 152px;
+      border: 1px solid #665c54;
+      border-radius: 999px;
+      overflow: hidden;
+      background: #2a2624;
+      flex-shrink: 0;
+    }
+    .quick-ask-provider-host {
+      min-width: 0;
+    }
+    .quick-ask-provider-card {
+      min-height: 34px;
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr);
+      align-items: center;
+      gap: 8px;
+      padding: 0 10px;
+      background: linear-gradient(180deg, #3c3836, #32302f);
+      color: #ebdbb2;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+    }
+    .quick-ask-provider-card img {
+      width: 18px;
+      height: 18px;
+      object-fit: contain;
+      background: #fff;
+      border-radius: 5px;
+      border: 1px solid #d7e4ff;
+      box-sizing: border-box;
+      padding: 2px;
+    }
+    .quick-ask-provider-card span {
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .quick-ask-nav {
+      min-width: 0;
+      border: 0;
+      border-radius: 0;
+      background: #3c3836;
+      color: #d5c4a1;
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      padding: 0;
+    }
+    .quick-ask-nav:hover {
+      background: #504945;
+    }
+    .quick-ask-nav svg {
+      width: 10px;
+      height: 10px;
+      display: block;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .quick-ask-nav-left {
+      border-right: 1px solid #665c54;
+    }
+    .quick-ask-nav-right {
+      border-left: 1px solid #665c54;
     }
     .quick-ask {
       display: flex;
@@ -4396,7 +4681,23 @@ function renderCalendarPage() {
       font-size: 12px;
       letter-spacing: 0.1px;
     }
+    .quick-ask button[disabled] {
+      cursor: wait;
+      opacity: 0.72;
+    }
     .quick-ask button:hover { background: linear-gradient(180deg, #e8a82f, #e67e0a); }
+    .quick-ask-status {
+      min-height: 18px;
+      margin-top: 8px;
+      font-size: 12px;
+      color: #a89984;
+    }
+    .quick-ask-status.error {
+      color: #fb4934;
+    }
+    .quick-ask-status.success {
+      color: #a7c080;
+    }
     .skeleton {
       background: linear-gradient(90deg, #3c3836 25%, #504945 50%, #3c3836 75%);
       background-size: 200% 100%;
@@ -4762,11 +5063,23 @@ function renderCalendarPage() {
     </header>
 
     <div class="section">
-      <div class="section-title">Quick Ask</div>
-      <div class="quick-ask">
-        <input type="text" id="quickAskInput" placeholder="What's on your mind?" />
-        <button onclick="sendQuickAsk()">Ask</button>
+      <div class="section-head">
+        <div class="section-title">Quick Ask</div>
+        <div class="quick-ask-provider">
+          <button type="button" class="quick-ask-nav quick-ask-nav-left" id="quickAskProviderPrev" aria-label="Previous provider">
+            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3L5 8l5 5"/></svg>
+          </button>
+          <div class="quick-ask-provider-host" id="quickAskProviderHost"></div>
+          <button type="button" class="quick-ask-nav quick-ask-nav-right" id="quickAskProviderNext" aria-label="Next provider">
+            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3l5 5-5 5"/></svg>
+          </button>
+        </div>
       </div>
+      <form class="quick-ask" onsubmit="sendQuickAsk(event)">
+        <input type="text" id="quickAskInput" placeholder="What's on your mind?" />
+        <button type="submit" id="quickAskButton">Ask</button>
+      </form>
+      <div class="quick-ask-status" id="quickAskStatus" aria-live="polite"></div>
     </div>
 
     <div class="section">
@@ -4863,6 +5176,98 @@ function renderCalendarPage() {
     let calendarLastRefreshAt = 0;
     const CALENDAR_REFRESH_INTERVAL_MS = 60000; // 1 minute cooldown
     let calendarRefreshTicker = null;
+    const QUICK_ASK_PROVIDERS = [
+      { key: 'codex', title: 'Codex', logo: '/assets/logos/openai.svg?v=2' },
+      { key: 'claude', title: 'Claude', logo: '/assets/logos/anthropic.svg?v=2' },
+      { key: 'gemini', title: 'Gemini', logo: '/assets/logos/google.svg?v=2' },
+    ];
+    let quickAskProviderIndex = 0;
+    let quickAskSubmitting = false;
+
+    function hostForPort(port) {
+      return window.location.protocol + '//' + window.location.hostname + ':' + port;
+    }
+
+    function connectUrlForPort(port) {
+      const base = hostForPort(port);
+      const sep = base.includes('?') ? '&' : '?';
+      return base + sep + 'atc_connect=' + Date.now();
+    }
+
+    async function prewarmPublicEndpoint(port) {
+      const ctl = new AbortController();
+      const timer = setTimeout(function () {
+        ctl.abort();
+      }, 1200);
+      try {
+        await fetch(hostForPort(port) + '/?atc_prewarm=' + Date.now(), {
+          method: 'GET',
+          cache: 'no-store',
+          signal: ctl.signal,
+          credentials: 'omit',
+        });
+      } catch (_error) {
+        // best-effort only
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    function selectedQuickAskProvider() {
+      return QUICK_ASK_PROVIDERS[quickAskProviderIndex] || QUICK_ASK_PROVIDERS[0];
+    }
+
+    function renderQuickAskProvider() {
+      const host = document.getElementById('quickAskProviderHost');
+      if (!host) return;
+      const provider = selectedQuickAskProvider();
+      host.innerHTML = '<div class="quick-ask-provider-card" id="quickAskProviderCard">' +
+        '<img src="' + provider.logo + '" alt="' + provider.title + ' logo" width="18" height="18" loading="lazy" />' +
+        '<span>' + provider.title + '</span>' +
+      '</div>';
+    }
+
+    function rotateQuickAskProvider(direction) {
+      quickAskProviderIndex = (quickAskProviderIndex + direction + QUICK_ASK_PROVIDERS.length) % QUICK_ASK_PROVIDERS.length;
+      renderQuickAskProvider();
+    }
+
+    function bindQuickAskProviderControls() {
+      const prev = document.getElementById('quickAskProviderPrev');
+      if (prev && prev.dataset.bound !== '1') {
+        prev.dataset.bound = '1';
+        prev.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          rotateQuickAskProvider(-1);
+        });
+      }
+      const next = document.getElementById('quickAskProviderNext');
+      if (next && next.dataset.bound !== '1') {
+        next.dataset.bound = '1';
+        next.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          rotateQuickAskProvider(1);
+        });
+      }
+    }
+
+    function setQuickAskStatus(message, kind = '') {
+      const status = document.getElementById('quickAskStatus');
+      if (!status) return;
+      status.textContent = message || '';
+      status.className = 'quick-ask-status' + (kind ? ' ' + kind : '');
+    }
+
+    function setQuickAskSubmittingState(submitting) {
+      quickAskSubmitting = !!submitting;
+      const input = document.getElementById('quickAskInput');
+      const button = document.getElementById('quickAskButton');
+      if (input) input.disabled = quickAskSubmitting;
+      if (button) {
+        button.disabled = quickAskSubmitting;
+        button.textContent = quickAskSubmitting ? 'Launching…' : 'Ask';
+      }
+    }
 
     function tickCalendarRefreshCountdown() {
       const btn = document.getElementById('refreshBtn');
@@ -5391,24 +5796,51 @@ function renderCalendarPage() {
       await loadDashboard(true);
     }
 
-    async function sendQuickAsk() {
+    async function sendQuickAsk(ev) {
+      if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
+      if (quickAskSubmitting) return;
       const input = document.getElementById('quickAskInput');
       const prompt = input.value.trim();
       if (!prompt) return;
+      const provider = selectedQuickAskProvider();
+      setQuickAskStatus('');
+      setQuickAskSubmittingState(true);
+      let pendingTab = null;
+      try {
+        pendingTab = window.open('about:blank', '_blank');
+        if (pendingTab) pendingTab.document.title = 'Launching scientist session...';
+      } catch (_error) {
+        pendingTab = null;
+      }
 
       try {
         const resp = await fetch('/api/agents/spawn', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ dialId: 'calendar_manager', initialPrompt: prompt })
+          body: JSON.stringify({ dialId: 'calendar_manager', provider: provider.key, initialPrompt: prompt })
         });
         const result = await resp.json();
-        if (result.ok) {
-          input.value = '';
-          console.log('Agent spawned');
+        if (!resp.ok || !result.ok) {
+          throw new Error(result.error || 'Launch failed');
         }
+        if (!result.publicPort) {
+          throw new Error('Launch succeeded but no scientist session URL was returned');
+        }
+        await prewarmPublicEndpoint(result.publicPort);
+        const nextUrl = connectUrlForPort(result.publicPort);
+        if (pendingTab && !pendingTab.closed) {
+          pendingTab.location.replace(nextUrl);
+        } else {
+          window.open(nextUrl, '_blank', 'noopener,noreferrer');
+        }
+        input.value = '';
+        setQuickAskStatus(((result.slotName || 'Scientist') + ' at your service.'), 'success');
       } catch (error) {
+        if (pendingTab && !pendingTab.closed) pendingTab.close();
         console.error('Send failed:', error);
+        setQuickAskStatus(error && error.message ? error.message : 'Launch failed', 'error');
+      } finally {
+        setQuickAskSubmittingState(false);
       }
     }
 
@@ -5620,6 +6052,9 @@ function renderCalendarPage() {
       });
     }
 
+    renderQuickAskProvider();
+    bindQuickAskProviderControls();
+
     // Paint cached state instantly, then fetch fresh in background
     loadDashboard();
 
@@ -5750,6 +6185,32 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/sessions' && req.method === 'GET') {
     const [sessions, recentWorkdirs] = await Promise.all([getMergedSessions(), readRecentWorkdirsFromState()]);
     json(res, 200, { sessions, recentWorkdirs, fetchedAt: new Date().toISOString() });
+    return;
+  }
+
+  if (url.pathname === '/api/mcp/logs' && req.method === 'GET') {
+    try {
+      const logs = await listLogFiles();
+      json(res, 200, { logs });
+    } catch (error) {
+      json(res, 500, { error: error.message });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/mcp/log' && req.method === 'GET') {
+    try {
+      const file = url.searchParams.get('file');
+      const lines = parseInt(url.searchParams.get('lines') || '100', 10);
+      if (!file) {
+        json(res, 400, { error: 'file parameter is required' });
+        return;
+      }
+      const content = await readLogTail(file, lines);
+      json(res, 200, { file, content });
+    } catch (error) {
+      json(res, 500, { error: error.message });
+    }
     return;
   }
 
